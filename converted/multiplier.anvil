@@ -3,15 +3,14 @@
 //
 // Conversion summary:
 //   Auto-generated lines (preserved as-is):   ~20
-//   Manually fixed lines:                      ~50
-//   Lines needing further review:              ~8
+//   Manually fixed lines:                      ~55
+//   Lines needing further review:              ~5
 //
 // [MANUAL-CLEANUP-NEEDED] Items requiring manual review:
-//   - $signed multiplication semantics (line ~90) — $signed wrapper removed, annotated
+//   - $signed multiplication semantics (line ~107) — $signed wrappers added, verify Anvil support
 //   - sext32to64() function call kept as-is — needs Anvil equivalent
 //   - Replication operators rendered as #{...} placeholders
 //   - Carry-less multiplication loop (clmul_d) — iterative logic may need manual verification
-//   - Conditional generate for CVA6Cfg.RVB — uses if block, verify Anvil semantics
 //   - inside operator converted to series of == comparisons — verify completeness
 //   - genvar bit-reversal loops converted to generate blocks — verify bounds
 
@@ -43,35 +42,40 @@ proc multiplier (
     // Pipeline registers
     reg trans_id_q : (logic[CVA6Cfg.TRANS_ID_BITS]);   // [AUTO]
     reg mult_valid_q : logic;                           // [AUTO]
-    reg operator_q : fu_op;                             // [MANUAL] — was missing type declaration in scaffold
+    reg operator_q : fu_op = MUL;                       // [MANUAL] explicit reset to MUL per SV line 158
     reg mult_result_q : (logic[CVA6Cfg.XLEN * 2]);     // [AUTO]
 
     // --- Carry-less multiplication (conditional on CVA6Cfg.RVB) ---  // [MANUAL]
     // SV: if (CVA6Cfg.RVB) begin : gen_bitmanip ... end
 
-    // Combinational signals for clmul  // [MANUAL]
-    let clmul_rmode = (operation_i == CLMULR);      // [AUTO]
-    let clmul_hmode = (operation_i == CLMULH);      // [AUTO]
+    // Combinational signals for clmul (gated by CVA6Cfg.RVB per SV line 49)  // [MANUAL]
+    if CVA6Cfg.RVB {                                    // [MANUAL] SV: if (CVA6Cfg.RVB) begin : gen_bitmanip
+        let clmul_rmode = (operation_i == CLMULR);      // [AUTO]
+        let clmul_hmode = (operation_i == CLMULH);      // [AUTO]
 
-    // Bit-reversal of operands  // [MANUAL]
-    // SV: for (genvar i = 0; i < CVA6Cfg.XLEN; i++) assign operand_a_rev[i] = operand_a_i[(CVA6Cfg.XLEN-1)-i];
-    // [MANUAL-CLEANUP-NEEDED] generate block for bit reversal — verify Anvil generate semantics
-    let operand_a_rev = generate (i : 0, CVA6Cfg.XLEN, 1) { operand_a_i[(CVA6Cfg.XLEN - 1) - i] };  // [MANUAL]
-    let operand_b_rev = generate (i : 0, CVA6Cfg.XLEN, 1) { operand_b_i[(CVA6Cfg.XLEN - 1) - i] };  // [MANUAL]
+        // Bit-reversal of operands  // [MANUAL]
+        // SV: for (genvar i = 0; i < CVA6Cfg.XLEN; i++) assign operand_a_rev[i] = operand_a_i[(CVA6Cfg.XLEN-1)-i];
+        // [MANUAL-CLEANUP-NEEDED] generate block for bit reversal — verify Anvil generate semantics
+        let operand_a_rev = generate (i : 0, CVA6Cfg.XLEN, 1) { operand_a_i[(CVA6Cfg.XLEN - 1) - i] };  // [MANUAL]
+        let operand_b_rev = generate (i : 0, CVA6Cfg.XLEN, 1) { operand_b_i[(CVA6Cfg.XLEN - 1) - i] };  // [MANUAL]
 
-    // Operand selection based on clmul mode  // [MANUAL]
-    let operand_a_clmul = if (clmul_rmode | clmul_hmode) { operand_a_rev } else { operand_a_i };  // [MANUAL]
-    let operand_b_clmul = if (clmul_rmode | clmul_hmode) { operand_b_rev } else { operand_b_i };  // [MANUAL]
+        // Operand selection based on clmul mode  // [MANUAL]
+        let operand_a_clmul = if (clmul_rmode | clmul_hmode) { operand_a_rev } else { operand_a_i };  // [MANUAL]
+        let operand_b_clmul = if (clmul_rmode | clmul_hmode) { operand_b_rev } else { operand_b_i };  // [MANUAL]
 
-    // Carry-less multiply implementation  // [MANUAL]
-    // SV: always_comb begin clmul_d = '0; for (int i = 0; i <= CVA6Cfg.XLEN; i++) ...
-    // [MANUAL-CLEANUP-NEEDED] Iterative XOR loop — verify generate_seq semantics for accumulation
-    let clmul_d = generate_seq (i : 0, CVA6Cfg.XLEN + 1, 1) {  // [MANUAL]
-        if (|((operand_b_clmul >> i) & 1)) { clmul_d ^ (operand_a_clmul << i) } else { clmul_d }  // [MANUAL]
-    };  // [MANUAL]
+        // Carry-less multiply implementation  // [MANUAL]
+        // SV: always_comb begin clmul_d = '0; for (int i = 0; i <= CVA6Cfg.XLEN; i++) ...
+        // [MANUAL-CLEANUP-NEEDED] Iterative XOR loop — verify generate_seq semantics for accumulation
+        let clmul_d = generate_seq (i : 0, CVA6Cfg.XLEN + 1, 1) {  // [MANUAL]
+            if (|((operand_b_clmul >> i) & 1)) { clmul_d ^ (operand_a_clmul << i) } else { clmul_d }  // [MANUAL]
+        };  // [MANUAL]
 
-    // clmulr result: bit-reverse of clmul_d  // [MANUAL]
-    let clmulr_d = generate (i : 0, CVA6Cfg.XLEN, 1) { clmul_d[(CVA6Cfg.XLEN - 1) - i] };  // [MANUAL]
+        // clmulr result: bit-reverse of clmul_d  // [MANUAL]
+        let clmulr_d = generate (i : 0, CVA6Cfg.XLEN, 1) { clmul_d[(CVA6Cfg.XLEN - 1) - i] };  // [MANUAL]
+    } else {                                             // [MANUAL] SV lines 147-149
+        let clmul_d = 0;                                // [MANUAL] SV: assign clmul_q = '0
+        let clmulr_d = 0;                               // [MANUAL] SV: assign clmulr_q = '0
+    }
 
     // --- Control signals ---
     let mult_valid_o = *mult_valid_q;     // [MANUAL] — added dereference for register read
@@ -101,11 +105,12 @@ proc multiplier (
     // --- Multiplication ---
     // SV: assign mult_result_d = $signed({operand_a_i[XLEN-1] & sign_a, operand_a_i})
     //                          * $signed({operand_b_i[XLEN-1] & sign_b, operand_b_i});
-    // [MANUAL-CLEANUP-NEEDED] $signed removed — Anvil may need explicit signed cast
-    let mult_result_d = (
+    // [MANUAL-CLEANUP-NEEDED] $signed wrappers added — verify Anvil supports $signed cast
+    let mult_result_d = $signed(
         #{ operand_a_i[CVA6Cfg.XLEN - 1] & sign_a, operand_a_i }   // [MANUAL]
-        * #{ operand_b_i[CVA6Cfg.XLEN - 1] & sign_b, operand_b_i } // [MANUAL]
-    );
+    ) * $signed(
+        #{ operand_b_i[CVA6Cfg.XLEN - 1] & sign_b, operand_b_i }   // [MANUAL]
+    );  // [MANUAL] $signed required for correct MULH/MULHSU upper-half results
 
     // Operator passthrough  // [AUTO]
     let operator_d = operation_i;  // [AUTO]
@@ -139,7 +144,7 @@ proc multiplier (
 
     // --- Output pipeline register ---  // [AUTO]
     // SV: always_ff @(posedge clk_i or negedge rst_ni)
-    // Reset values are implicit in Anvil (registers initialize to 0)  // [MANUAL]
+    // Reset: mult_valid_q=0, trans_id_q=0, operator_q=MUL (via reg init), mult_result_q=0  // [MANUAL]
     loop {                                               // [MANUAL]
         set trans_id_q := trans_id_i;                    // [MANUAL]
         set mult_valid_q := mult_valid;                  // [MANUAL]
