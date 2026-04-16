@@ -362,12 +362,18 @@ def convert_case_to_match(selector: str, items, indent: str = "    ") -> str:
     lines = [f"{indent}match {convert_expr(selector)} {{"]
     has_default = False
     for pat, body in items:
+        body_stripped = body.strip().rstrip(';') if body else ''
+        am = re.match(r'(\w+(?:\[[^\]]*\])?)\s*=\s*(.+)', body_stripped)
+        if am:
+            converted_body = f'let {am.group(1)} = {convert_expr(am.group(2))}'
+        elif body:
+            converted_body = convert_expr(body)
+        else:
+            converted_body = '()'
         if pat == "default":
             has_default = True
-            converted_body = convert_expr(body) if body else "()"
             lines.append(f"{indent}    _ => {converted_body},")
         else:
-            converted_body = convert_expr(body) if body else "()"
             lines.append(f"{indent}    {pat} => {converted_body},")
     if not has_default:
         lines.append(f"{indent}    _ => (),")
@@ -505,12 +511,22 @@ def _convert_if_else_block(inner: str, if_pos: int, indent: str) -> Optional[str
 
 def _convert_comb_body(inner: str, indent: str) -> str:
     """Recursively convert an always_comb body, preserving structure."""
-    lines: List[str] = []
+    top_level_assigns: List[str] = []
+    case_lines: List[str] = []
+    if_lines: List[str] = []
     case_spans = _find_case_spans(inner)
     if_spans = _find_if_spans(inner)
     all_spans = case_spans + if_spans
 
-    # 1. Emit top-level case blocks (not inside any if-span)
+    # 1. Collect top-level assignments NOT inside any structured span
+    #    (SV defaults — emitted first so they precede match/if blocks)
+    for am in re.finditer(r"(\w+(?:\[[^\]]*\])?)\s*=\s*([^;]+);", inner):
+        if not _pos_inside_spans(am.start(), all_spans):
+            lhs = am.group(1)
+            rhs = convert_expr(am.group(2))
+            top_level_assigns.append(f"{indent}let {lhs} = {rhs};")
+
+    # 2. Emit top-level case blocks (not inside any if-span)
     for m in re.finditer(r"(?:unique\s+)?case\s*\(", inner):
         if _pos_inside_spans(m.start(), if_spans):
             continue  # inside an if block — will be handled by recursive call
@@ -526,22 +542,17 @@ def _convert_comb_body(inner: str, indent: str) -> str:
         # Use extract_case_blocks on just this case block region
         case_region = inner[m.start():ec + len("endcase")]
         for selector, items in extract_case_blocks(case_region):
-            lines.append(convert_case_to_match(selector, items, indent))
+            case_lines.append(convert_case_to_match(selector, items, indent))
 
-    # 2. Emit top-level if/else blocks (not inside any other span)
+    # 3. Emit top-level if/else blocks (not inside any other span)
     for m in re.finditer(r"\bif\s*\(", inner):
         if _pos_inside_spans(m.start(), [(s, e) for s, e in all_spans if s != m.start()]):
             continue  # nested inside another structure
         converted = _convert_if_else_block(inner, m.start(), indent)
         if converted:
-            lines.append(converted)
+            if_lines.append(converted)
 
-    # 3. Emit top-level assignments NOT inside any structured span
-    for am in re.finditer(r"(\w+(?:\[[^\]]*\])?)\s*=\s*([^;]+);", inner):
-        if not _pos_inside_spans(am.start(), all_spans):
-            lhs = am.group(1)
-            rhs = convert_expr(am.group(2))
-            lines.append(f"{indent}let {lhs} = {rhs};")
+    lines = top_level_assigns + case_lines + if_lines
 
     if not lines:
         for l in inner.splitlines():
