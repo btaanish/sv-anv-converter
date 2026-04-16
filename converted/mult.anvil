@@ -4,9 +4,12 @@
 // Conversion summary:
 //   [AUTO]   — 12 items: proc signature, signal declarations, basic let bindings,
 //              conditional structure, loop skeleton
-//   [MANUAL] — 18 items: inside → == expansion, spawn instantiations, always_ff
+//   [MANUAL] — 21 items: inside → == expansion, spawn instantiations, always_ff
 //              reset pattern, register vs let cleanup, sext32to64 annotation,
-//              opcode concatenation, output arbitration wiring
+//              opcode concatenation, output arbitration wiring,
+//              removed erroneous reg div_result (Bug 1), fixed operand defaults
+//              to XLEN-width zero (Bug 2), restructured operand let bindings
+//              to top-level conditional expressions for correct scoping (Bug 3)
 //   [MANUAL-CLEANUP-NEEDED] — 3 items: sext32to64 function calls, inside operator
 //              expansion may need verification, parameter/import handling
 
@@ -35,7 +38,6 @@ proc mult (                                                              // [AUT
     reg mul_trans_id : (logic[CVA6Cfg.TRANS_ID_BITS]);                   // [MANUAL] driven by spawned multiplier
     reg div_trans_id : (logic[CVA6Cfg.TRANS_ID_BITS]);                   // [MANUAL] driven by spawned serdiv
     reg mul_result : (logic[CVA6Cfg.XLEN]);                              // [MANUAL] driven by spawned multiplier
-    reg div_result : (logic[CVA6Cfg.XLEN]);                              // [MANUAL] intermediate — see let below
     reg result : (logic[CVA6Cfg.XLEN]);                                  // [MANUAL] driven by spawned serdiv
     reg word_op_q : logic;                                               // [MANUAL] sequential register
 
@@ -85,34 +87,49 @@ proc mult (                                                              // [AUT
     // ---------------------
     // Division operand preparation (always_comb)
     // ---------------------
-    let operand_a = 1'b0;                                                // [AUTO] default: silence inputs
-    let operand_b = 1'b0;                                                // [AUTO] default: silence inputs
-    let word_op_d = *word_op_q;                                          // [MANUAL] dereference register with *
+    // [MANUAL] Bug 3 fix: restructured as top-level conditional expressions
+    // to avoid lexical scoping issues with let bindings inside if-blocks.
+    // [MANUAL] Bug 2 fix: default uses '0 (XLEN-width zero) instead of 1'b0.
 
-    // [MANUAL] inside → == comparisons in condition
-    if mult_valid_i && (
+    let is_div_op = mult_valid_i && (                                    // [MANUAL]
         fu_data_i.operation == DIV   || fu_data_i.operation == DIVU  ||
         fu_data_i.operation == DIVW  || fu_data_i.operation == DIVUW ||
         fu_data_i.operation == REM   || fu_data_i.operation == REMU  ||
         fu_data_i.operation == REMW  || fu_data_i.operation == REMUW
-    ) {
-        if CVA6Cfg.IS_XLEN64 && (fu_data_i.operation == DIVW || fu_data_i.operation == DIVUW || fu_data_i.operation == REMW || fu_data_i.operation == REMUW) {
-            // Word operation
-            let word_op_d = 1'b1;                                        // [AUTO]
-            if div_signed {
-                let operand_a = sext32to64(fu_data_i.operand_a[31:0]);   // [MANUAL-CLEANUP-NEEDED] sext32to64 kept as-is
-                let operand_b = sext32to64(fu_data_i.operand_b[31:0]);   // [MANUAL-CLEANUP-NEEDED] sext32to64 kept as-is
-            } else {
-                let operand_a = fu_data_i.operand_a[31:0];              // [AUTO]
-                let operand_b = fu_data_i.operand_b[31:0];              // [AUTO]
-            }
+    );                                                                   // [MANUAL]
+
+    let is_word_div = CVA6Cfg.IS_XLEN64 && (                            // [MANUAL]
+        fu_data_i.operation == DIVW  || fu_data_i.operation == DIVUW ||
+        fu_data_i.operation == REMW  || fu_data_i.operation == REMUW
+    );                                                                   // [MANUAL]
+
+    let operand_a = if is_div_op {                                       // [MANUAL]
+        if is_word_div {
+            if div_signed { sext32to64(fu_data_i.operand_a[31:0]) }      // [MANUAL-CLEANUP-NEEDED] sext32to64 kept as-is
+            else { fu_data_i.operand_a[31:0] }
         } else {
-            // Regular full-width operation
-            let operand_a = fu_data_i.operand_a;                        // [AUTO]
-            let operand_b = fu_data_i.operand_b;                        // [AUTO]
-            let word_op_d = 1'b0;                                        // [AUTO]
+            fu_data_i.operand_a
         }
-    }
+    } else {
+        '0                                                               // [MANUAL] XLEN-width zero, was incorrectly 1'b0
+    };
+
+    let operand_b = if is_div_op {                                       // [MANUAL]
+        if is_word_div {
+            if div_signed { sext32to64(fu_data_i.operand_b[31:0]) }      // [MANUAL-CLEANUP-NEEDED] sext32to64 kept as-is
+            else { fu_data_i.operand_b[31:0] }
+        } else {
+            fu_data_i.operand_b
+        }
+    } else {
+        '0                                                               // [MANUAL] XLEN-width zero, was incorrectly 1'b0
+    };
+
+    let word_op_d = if is_div_op {                                       // [MANUAL]
+        if is_word_div { 1'b1 } else { 1'b0 }
+    } else {
+        *word_op_q                                                       // [MANUAL] dereference register with *
+    };
 
     // ---------------------
     // Multiplication (sub-module instantiation)
