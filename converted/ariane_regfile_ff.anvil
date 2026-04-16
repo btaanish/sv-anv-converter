@@ -4,11 +4,10 @@
 // Conversion summary:
 //   Auto-generated lines (kept as-is or lightly edited): ~5
 //   Manually written/fixed lines: ~55
-//   Lines needing further review: 3 (marked [MANUAL-CLEANUP-NEEDED])
+//   Lines needing further review: 2 (marked [MANUAL-CLEANUP-NEEDED])
 //
 // [MANUAL-CLEANUP-NEEDED] Items requiring manual review:
 //   - Multi-dimensional array `mem[NUM_WORDS][DATA_WIDTH]` — no direct Anvil equivalent
-//   - Multi-dimensional array `we_dec[NrCommitPorts][NUM_WORDS]` — no direct Anvil equivalent
 //   - For-loops inside always_ff/always_comb converted to generate — verify semantics
 //   - ZERO_REG_ZERO parameter used as runtime conditional — verify Anvil supports this
 //   - Nested generate blocks (j over commit ports, i over words) may need flattening
@@ -45,9 +44,8 @@ proc ariane_regfile (                                               // [MANUAL]
     // [MANUAL-CLEANUP-NEEDED] Multi-dimensional register array — no direct Anvil equivalent
     reg mem : (logic[NUM_WORDS][DATA_WIDTH]);                       // [MANUAL]
 
-    // Write-enable decoder: one-hot per word per commit port
-    // [MANUAL-CLEANUP-NEEDED] Multi-dimensional signal — no direct Anvil equivalent
-    reg we_dec : (logic[CVA6Cfg.NrCommitPorts][NUM_WORDS]);         // [MANUAL]
+    // Write-enable decoder: one-hot per word per commit port              // [MANUAL]
+    // we_dec is combinational, defined by let bindings below              // [MANUAL]
 
     // === Write-enable decoder (always_comb : we_decoder) ===
     // For each commit port j and each word i:
@@ -67,10 +65,7 @@ proc ariane_regfile (                                               // [MANUAL]
     // Otherwise: write wdata_i[j] to mem[i] when we_dec[j][i] is set
     // If ZERO_REG_ZERO: register 0 is always forced to zero
     loop {                                                          // [MANUAL]
-        // Reset: initialize all memory to zero
-        generate (i : 0, NUM_WORDS, 1) {                            // [MANUAL]
-            set mem[i] := 0;                                        // [MANUAL]
-        }                                                           // [MANUAL]
+        // Reset handled implicitly — Anvil regs initialize to 0   // [MANUAL]
 
         // Write: for each commit port, update addressed register
         generate (j : 0, CVA6Cfg.NrCommitPorts, 1) {               // [MANUAL]
