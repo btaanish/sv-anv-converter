@@ -351,9 +351,24 @@ def convert_expr(expr: str) -> str:
             t_val = e[tm.start(2):tm.end(2)].strip()
             f_val = e[tm.start(3):tm.end(3)].strip()
             e = f"if {cond} {{ {t_val} }} else {{ {f_val} }}"
+    # SV 'inside' operator: expr inside {val1, val2, ...} → (expr == val1 || expr == val2 || ...)
+    inside_re = re.compile(r"(\w+(?:\.\w+)*)\s+inside\s+\{([^}]+)\}")
+    im = inside_re.search(e)
+    if im:
+        inside_expr = im.group(1)
+        vals = [v.strip() for v in im.group(2).split(",") if v.strip()]
+        expanded = " || ".join(f"{inside_expr} == {v}" for v in vals)
+        e = e[:im.start()] + f"({expanded})" + e[im.end():]
+
+    # SV replication: {N{expr}} → comment for manual cleanup
+    repl_re = re.compile(r"\{(\w+(?:\.\w+)*)\{([^}]+)\}\}")
+    e = repl_re.sub(
+        lambda m: f"/* [MANUAL-CLEANUP-NEEDED] replication: repeat({m.group(2)}, {m.group(1)}) */",
+        e,
+    )
+
     # Concatenation: {a, b, c} → #{{ a, b, c }}
     e = re.sub(r"\{([^{}]+)\}", lambda m: f"#{{ {m.group(1)} }}", e)
-    # Replication: N{expr} inside concat — leave as comment for now
     return e
 
 
@@ -700,11 +715,28 @@ def convert_sv_to_anvil(sv_source: str) -> str:
     out.append(") {")
 
     # --- Parse and emit signals (let bindings) ------------------------------
+    # Classify signals: sequential (non-blocking <=) → reg, combinational → skip (let binding)
+    sequential_signals: set = set()
+    for nba in re.finditer(r"(\w+)\s*<=\s*", body):
+        sequential_signals.add(nba.group(1))
+    # Also check always_ff blocks for non-blocking targets
+    for kind, _label, inner in extract_always_blocks(body):
+        if kind == "ff":
+            for nba in re.finditer(r"(\w+)\s*<=\s*", inner):
+                sequential_signals.add(nba.group(1))
+
     signals = parse_signals(body)
-    if signals:
-        out.append("    // Signal declarations")
-        for sig in signals:
+    reg_signals = [s for s in signals if s.name in sequential_signals]
+    if reg_signals:
+        out.append("    // Signal declarations (sequential)")
+        for sig in reg_signals:
             out.append(f"    reg {sig.name} : {sig.width_type};")
+        out.append("")
+    comb_signals = [s for s in signals if s.name not in sequential_signals]
+    if comb_signals:
+        out.append("    // Combinational signals (use let bindings, no reg)")
+        for sig in comb_signals:
+            out.append(f"    // let {sig.name} : {sig.width_type};  // assigned via let")
         out.append("")
 
     # --- Assign statements → let bindings -----------------------------------
