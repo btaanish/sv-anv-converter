@@ -3,14 +3,14 @@
 //   - rd_i port: scaffold emitted broken "c : right logi", replaced with correct 2D port
 //   - rd_fpr_i port: scaffold treated as flat vector, corrected width comment
 //   - Indexed let bindings (same_rd_as_rs[i]) converted to generate blocks
-//   - always_comb priority loop: scaffold only emitted i=0 case, replaced with generate loop
+//   - always_comb priority loop: scaffold only emitted i=0 case, replaced with generate_seq fold
 //   - rs_is_gpr0 zero literal: scaffold used 1'b0, corrected to '0 (all-zeros)
 //   - Reordered let bindings so definitions precede uses
 // [MANUAL-CLEANUP-NEEDED] Items requiring manual review:
 //   - Parameter handling (CVA6Cfg with NR_SB_ENTRIES, TRANS_ID_BITS)
 //   - Package imports (ariane_pkg for REG_ADDR_SIZE)
 //   - 2D array port rd_i — Anvil 2D port syntax may need adaptation
-//   - Generate-based priority loop may need Anvil-specific iteration construct
+//   - generate blocks for last_before_idx/last_after_idx replaced with generate_seq (sequential fold)
 
 // Parameters (from SV — adapt manually):
 // param CVA6Cfg = config_pkg::cva6_cfg_empty
@@ -54,15 +54,14 @@ proc raw_checker (
     };
 
     // Priority encoder: find last matching index in before/after groups
-    // SV always_comb loop scans ascending, so last match wins // [MANUAL]
-    // [MANUAL-CLEANUP-NEEDED] Generate-based priority scan — verify Anvil supports
-    //   mutable accumulation in generate; may need alternative construct
-    let last_before_idx = generate (i : 0, CVA6Cfg.NR_SB_ENTRIES, 1) {     // [MANUAL]
-        if same_rd_as_rs_before[i] { i } else { '0 }
+    // SV always_comb loop scans ascending, so last match wins — use generate_seq for fold // [MANUAL]
+    // Sequential scan: start at '0, overwrite with i on each match (last wins)
+    let last_before_idx = generate_seq (i : 0, CVA6Cfg.NR_SB_ENTRIES, 1) { // [MANUAL]
+        if same_rd_as_rs_before[i] { <i :: (logic[CVA6Cfg.TRANS_ID_BITS])> } else { last_before_idx }
     };
 
-    let last_after_idx = generate (i : 0, CVA6Cfg.NR_SB_ENTRIES, 1) {      // [MANUAL]
-        if same_rd_as_rs_after[i] { i } else { '0 }
+    let last_after_idx = generate_seq (i : 0, CVA6Cfg.NR_SB_ENTRIES, 1) {  // [MANUAL]
+        if same_rd_as_rs_after[i] { <i :: (logic[CVA6Cfg.TRANS_ID_BITS])> } else { last_after_idx }
     };
 
     // Select before-group match if any, otherwise after-group // [AUTO]
