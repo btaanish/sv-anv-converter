@@ -1689,13 +1689,43 @@ def build_ir(module: SVModule) -> AnvilIR:
             val = re.sub(r"'0", "0", val)
             params[p.name] = val
 
-    # Collect enum values from case blocks and assign integer constants
+    # Collect enum values from case blocks and expressions
     enum_values = set()
     for cb in module.always_comb_blocks:
         _collect_enum_values(cb.stmts, enum_values)
     for ff in module.always_ff_blocks:
         _collect_enum_values(ff.main_body, enum_values)
         _collect_enum_values(ff.reset_body, enum_values)
+    # Also collect identifiers from `inside {...}` patterns in assigns
+    for a in module.assigns:
+        inside_m = re.findall(r'inside\s*\{([^}]+)\}', a.rhs)
+        for inside_content in inside_m:
+            ids = re.findall(r'\b([a-zA-Z_]\w*)\b', inside_content)
+            enum_values.update(ids)
+        # Collect from == comparisons with identifiers
+        eq_m = re.findall(r'==\s*(\w+)', a.rhs)
+        for val in eq_m:
+            if val[0].isupper():
+                enum_values.add(val)
+    # Collect from if conditions in always blocks
+    def _collect_expr_enums(stmts, enums):
+        for stmt in stmts:
+            if isinstance(stmt, SVIfBlock):
+                inside_m = re.findall(r'inside\s*\{([^}]+)\}', stmt.condition)
+                for inside_content in inside_m:
+                    ids = re.findall(r'\b([a-zA-Z_]\w*)\b', inside_content)
+                    enums.update(ids)
+                _collect_expr_enums(stmt.then_stmts, enums)
+                _collect_expr_enums(stmt.else_stmts, enums)
+            elif isinstance(stmt, SVCaseBlock):
+                _collect_enum_values([stmt], enums)
+                for item in stmt.items:
+                    _collect_expr_enums(item.stmts, enums)
+    for cb in module.always_comb_blocks:
+        _collect_expr_enums(cb.stmts, enum_values)
+    for ff in module.always_ff_blocks:
+        _collect_expr_enums(ff.main_body, enum_values)
+        _collect_expr_enums(ff.reset_body, enum_values)
 
     # Assign integer values to enum identifiers that aren't already parameters
     port_names = {p.name for p in module.ports}
@@ -1774,9 +1804,36 @@ def build_ir(module: SVModule) -> AnvilIR:
             regs.append(AnvilReg(name=sig.name, anvil_type=atype))
             reg_names.discard(sig.name)  # mark as handled
 
+    # Build a width lookup from ports and signals
+    width_lookup = {}
+    for p in module.ports:
+        atype = anvil_type_str(p.width_msb, p.width_lsb, params,
+                               p.type_name if p.is_custom_type else None)
+        width_lookup[p.name] = atype
+    for sig in module.signals:
+        atype = anvil_type_str(sig.width_msb, sig.width_lsb, params)
+        width_lookup[sig.name] = atype
+
     # Any remaining NBA targets that weren't declared as signals
     for rn in sorted(reg_names):
-        regs.append(AnvilReg(name=rn, anvil_type="logic[32]"))
+        # Try to infer width from related names
+        atype = "logic[32]"
+        # Check if the name maps to a port (e.g., flush_dcache → flush_dcache_o)
+        if rn in width_lookup:
+            atype = width_lookup[rn]
+        else:
+            # Try matching _d/_n suffix to _q register or output port _o
+            base = rn
+            for suffix in ('_d', '_n'):
+                if rn.endswith(suffix):
+                    base = rn[:-len(suffix)]
+                    break
+            # Look for base_q, base_o, or base in width_lookup
+            for variant in [base + '_q', base + '_o', base, base + '_i']:
+                if variant in width_lookup:
+                    atype = width_lookup[variant]
+                    break
+        regs.append(AnvilReg(name=rn, anvil_type=atype))
 
     # Determine which inputs are used vs unused
     used_inputs = [p for p in input_ports if not _is_unused_input(p.name, module)]
@@ -1844,8 +1901,14 @@ def build_ir(module: SVModule) -> AnvilIR:
         output_type_map[p.name] = atype
 
     # Send all outputs
+    output_names = {p.name for p in output_ports}
     for p in output_ports:
         send_expr = _find_output_expr(p.name, module, params, output_type_map, all_reg_names, input_to_reg)
+        # Replace any remaining output port names in expression with zeros
+        for oname in output_names:
+            if oname != p.name and re.search(r'\b' + re.escape(oname) + r'\b', send_expr):
+                zero = _make_zero(oname, output_type_map)
+                send_expr = re.sub(r'\b' + re.escape(oname) + r'\b', zero, send_expr)
         atype = output_type_map.get(p.name, "logic")
         # Add cast if the expression is not a literal matching the type
         cast = None
@@ -2447,7 +2510,35 @@ def _postprocess_loop_body(stmts: list, reg_names: set, ep_msg_names: set) -> li
         all_defined.add(s.name)
         final_lets.append(s)
 
-    return other_stmts_before + final_lets + other_stmts_after
+    # Also scan other_stmts_after for undefined identifiers (if conditions, set exprs, send exprs)
+    def _collect_all_exprs(stmts):
+        """Collect all expressions from any statement type."""
+        exprs = []
+        for s in stmts:
+            if isinstance(s, AnvilSet):
+                exprs.append(s.expr)
+            elif isinstance(s, AnvilSend):
+                exprs.append(s.expr)
+            elif isinstance(s, AnvilIf):
+                exprs.append(s.condition)
+                exprs.extend(_collect_all_exprs(s.then_stmts))
+                exprs.extend(_collect_all_exprs(s.else_stmts))
+            elif isinstance(s, AnvilMatch):
+                exprs.append(s.selector)
+                for _, arm_stmts in s.arms:
+                    exprs.extend(_collect_all_exprs(arm_stmts))
+        return exprs
+
+    extra_placeholders = []
+    all_exprs = _collect_all_exprs(other_stmts_after)
+    for expr_str in all_exprs:
+        deps = _used_ids(expr_str)
+        for dep in deps:
+            if dep not in all_defined and dep not in let_map:
+                extra_placeholders.append(AnvilLetBinding(name=dep, expr=f"<(0)::logic[32]>"))
+                all_defined.add(dep)
+
+    return other_stmts_before + final_lets + extra_placeholders + other_stmts_after
 
 
 def _postprocess_ir(ir: 'AnvilIR'):
