@@ -48,21 +48,24 @@ Convert three RISC-V processor implementations (BOOM, Rocket Chip, CVA6) from th
 
 **Converted so far: 14/43 top-level core modules (33%)**
 
-### M2.2: CVA6 Core Batch 3 — Medium-Small Modules (budget: 6 cycles)
-**Status:** NEXT
+### M2.2: CVA6 Core Batch 3 — Medium-Small Modules (budget: 6 cycles, used: 4)
+**Status:** COMPLETE (PRs #24-#29, verified: perf_counters PASS, lsu_bypass CONDITIONAL PASS — 1 bug)
 **Goal:** Convert 6 medium-small CVA6 modules (133-234 lines).
-Target modules:
-- zcmt_decoder.sv (133 lines)
-- cva6_rvfi_probes.sv (145 lines)
-- lsu_bypass.sv (145 lines)
-- perf_counters.sv (217 lines)
-- cva6_fifo_v3.sv (231 lines)
-- aes.sv (234 lines)
+- [x] zcmt_decoder.sv (PR #24)
+- [x] cva6_rvfi_probes.sv (PR #25)
+- [x] lsu_bypass.sv (PR #26) — ⚠️ pop_both edge case bug found in verification
+- [x] perf_counters.sv (PR #27)
+- [x] cva6_fifo_v3.sv (PR #28)
+- [x] aes.sv (PR #29)
+- Note: Only 2/6 modules verified by Apollo (lsu_bypass, perf_counters). Remaining 4 unverified.
 
-### M2.3: CVA6 Core Batch 4 — Medium-Large Modules (budget: TBD)
-**Status:** NOT STARTED
-**Goal:** Convert 7 medium-large CVA6 modules (277-365 lines).
+**Converted so far: 20/43 top-level core modules (47%)**
+
+### M2.3: CVA6 Core Batch 4 — Medium-Large Modules (budget: 8 cycles)
+**Status:** NEXT
+**Goal:** Fix lsu_bypass bug + convert 7 medium-large CVA6 modules (277-365 lines).
 Target: controller, serdiv, axi_shim, issue_stage, store_buffer, scoreboard, instr_realign
+Fix: lsu_bypass.anvil pop_both edge case (found in M2.2 verification)
 
 ### M2.4: CVA6 Core Batch 5 — Large Modules (budget: TBD)
 **Status:** NOT STARTED
@@ -95,9 +98,11 @@ Target: store_unit, commit_stage, acc_dispatcher, id_stage, trigger_module, fpu_
 - **Scale workers for throughput:** With 8 modules to convert, hire 8 workers (1 each) rather than overloading fewer workers.
 - **M2.1 completed efficiently in ~4 cycles:** 8 small modules, 1 bug found in verification (raw_checker generate vs generate_seq). Pattern works well.
 - **generate vs generate_seq matters:** Parallel generate produces a vector; generate_seq does accumulation. Workers need to recognize SV always_comb scan loops as needing generate_seq.
+- **Verification coverage gap:** M2.2 only verified 2/6 modules. Need to ensure Apollo verifies all modules, not just a subset.
+- **Edge cases in concurrent operations:** lsu_bypass pop_both bug shows simultaneous signal handling needs extra care. Workers should explicitly handle all signal combinations.
 
 ## Progress Tracking
-- CVA6 top-level core: 14/43 converted (33%)
+- CVA6 top-level core: 20/43 converted (47%)
 - CVA6 subdirectories: 0/~71 converted (0%)
 - BOOM: not started
 - Rocket Chip: not started
