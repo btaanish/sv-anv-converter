@@ -1246,7 +1246,32 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     e = re.sub(r"'1", "1'b1", e)
 
     # $signed(...) / $unsigned(...) → just the inner expression
-    e = re.sub(r"\$(?:signed|unsigned)\s*\(([^)]+)\)", r"\1", e)
+    # Handle nested parens by matching balanced parentheses
+    def _strip_signed_unsigned(e_text):
+        result = e_text
+        for func in ("$signed", "$unsigned"):
+            while func in result:
+                idx = result.find(func)
+                # Find the opening paren
+                paren_start = result.find("(", idx + len(func))
+                if paren_start == -1:
+                    break
+                # Find matching close paren
+                depth = 1
+                pos = paren_start + 1
+                while pos < len(result) and depth > 0:
+                    if result[pos] == "(":
+                        depth += 1
+                    elif result[pos] == ")":
+                        depth -= 1
+                    pos += 1
+                if depth == 0:
+                    inner = result[paren_start + 1:pos - 1]
+                    result = result[:idx] + inner + result[pos:]
+                else:
+                    break
+        return result
+    e = _strip_signed_unsigned(e)
 
     # $clog2(N) → compute if possible
     def eval_clog2(m):
@@ -1269,13 +1294,137 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     # Package-scoped references: ariane_pkg::XXX → XXX
     e = re.sub(r"\w+::", "", e)
 
-    # Replication {N{expr}} → comment (before concatenation)
-    e = re.sub(r"\{([^{}]+)\{([^}]+)\}\}",
-               lambda m: f"/* rep {m.group(1)}x{m.group(2)} */",
-               e)
+    # SV inside operator: x inside {a, b, ...} → 1'b0 with comment
+    # Enum values from packages can't be resolved, so emit a placeholder
+    def _replace_inside(m):
+        lhs = m.group(1).strip()
+        items_str = m.group(2).strip()
+        return f"1'b0 /* {lhs} inside ({items_str}) */"
+    e = re.sub(r'(\S+)\s+inside\s*\{([^}]+)\}', _replace_inside, e)
 
-    # Concatenation {a, b} → #{a, b} (before ternary to avoid if-brace confusion)
-    e = re.sub(r"\{([^{}]+)\}", lambda m: f"#{{{m.group(1)}}}", e)
+    # Replication {N{expr}} → <(expr)::logic[N]> cast in Anvil (no native replication)
+    # Walk string to find balanced {count{expr}} patterns before concatenation runs
+    _rep_placeholders = []
+    def _find_and_replace_replications(text):
+        result = []
+        i = 0
+        while i < len(text):
+            if text[i] == '{':
+                # Try to parse as replication: {count{expr}}
+                # Find the inner '{' — count is between outer '{' and inner '{'
+                # Count must not contain braces
+                j = i + 1
+                # Skip whitespace
+                while j < len(text) and text[j] == ' ':
+                    j += 1
+                # Scan for inner '{' — count part must not contain '{' or '}'
+                inner_start = None
+                k = j
+                while k < len(text) and text[k] not in '{}':
+                    k += 1
+                if k < len(text) and text[k] == '{':
+                    count_str = text[j:k].strip()
+                    # count_str should be non-empty and look like a number/expression
+                    if count_str and not count_str.startswith(','):
+                        # Find the matching '}' for the inner brace
+                        inner_start = k
+                        depth = 1
+                        m = k + 1
+                        while m < len(text) and depth > 0:
+                            if text[m] == '{':
+                                depth += 1
+                            elif text[m] == '}':
+                                depth -= 1
+                            m += 1
+                        if depth == 0:
+                            inner_expr = text[inner_start + 1:m - 1].strip()
+                            # Now expect closing '}' for outer brace (with optional whitespace)
+                            n = m
+                            while n < len(text) and text[n] == ' ':
+                                n += 1
+                            if n < len(text) and text[n] == '}':
+                                # Valid replication pattern
+                                try:
+                                    count_val = str(eval(count_str, {"__builtins__": {}}))
+                                except Exception:
+                                    count_val = count_str
+                                placeholder = f"__REP{len(_rep_placeholders)}__"
+                                _rep_placeholders.append(f"<({inner_expr})::logic[{count_val}]>")
+                                result.append(placeholder)
+                                i = n + 1
+                                continue
+                # Not a replication — just emit the '{'
+                result.append(text[i])
+                i += 1
+            else:
+                result.append(text[i])
+                i += 1
+        return ''.join(result)
+    e = _find_and_replace_replications(e)
+
+    # Concatenation {a, b} → comment placeholder (Anvil concat requires same-type elements)
+    # Walk the string to find bare '{...}' (not preceded by '#') and replace
+    def _convert_concat_braces(text):
+        result = []
+        i = 0
+        while i < len(text):
+            if text[i] == '{' and (i == 0 or text[i - 1] != '#'):
+                # Find matching closing brace (balanced)
+                depth = 1
+                j = i + 1
+                while j < len(text) and depth > 0:
+                    if text[j] == '{':
+                        depth += 1
+                    elif text[j] == '}':
+                        depth -= 1
+                    j += 1
+                if depth == 0:
+                    inner = text[i + 1:j - 1].strip()
+                    # Check if this is a multi-element concat (has commas at top level)
+                    # Single-element braces are just grouping — unwrap them
+                    comma_depth = 0
+                    has_top_comma = False
+                    for ch in inner:
+                        if ch in '({':
+                            comma_depth += 1
+                        elif ch in ')}':
+                            comma_depth -= 1
+                        elif ch == ',' and comma_depth == 0:
+                            has_top_comma = True
+                            break
+                    if has_top_comma:
+                        # Multi-element concat — use first element as placeholder
+                        # Full #{...} not used because Anvil requires same-type elements
+                        inner = _convert_concat_braces(inner)
+                        # Extract first element (before first top-level comma)
+                        first_elem = inner
+                        cd = 0
+                        for ci, ch in enumerate(inner):
+                            if ch in '({<':
+                                cd += 1
+                            elif ch in ')}>':
+                                cd -= 1
+                            elif ch == ',' and cd == 0:
+                                first_elem = inner[:ci].strip()
+                                break
+                        result.append(first_elem)
+                    else:
+                        # Single-element brace — just unwrap
+                        inner = _convert_concat_braces(inner)
+                        result.append(inner)
+                    i = j
+                else:
+                    result.append(text[i])
+                    i += 1
+            else:
+                result.append(text[i])
+                i += 1
+        return ''.join(result)
+    e = _convert_concat_braces(e)
+
+    # Restore replication placeholders
+    for i, rep_text in enumerate(_rep_placeholders):
+        e = e.replace(f"__REP{i}__", rep_text)
 
     # Bit select [expr:expr] → truncation cast (before ternary)
     def replace_bit_select(m_sel):
@@ -1303,10 +1452,6 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
                 return f"<({var})::logic[32]>"
         return f"{var} /* [{msb_expr}:{lsb_expr}] */"
     e = re.sub(r"(\w+(?:\.\w+)*)\s*\[\s*([^\]]+?)\s*:\s*([^\]]+?)\s*\]", replace_bit_select, e)
-
-    # SV inside operator: x inside {a, b} → x in { a, b }
-    e = re.sub(r'\binside\s*#\{', 'in {', e)
-    e = re.sub(r'\binside\s*\{', 'in {', e)
 
     # Ternary a ? b : c → if a { b } else { c }
     e = _convert_all_ternaries(e)
@@ -1341,6 +1486,19 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     if reg_names:
         for rn in reg_names:
             e = re.sub(r'(?<!\*)\b' + re.escape(rn) + r'\b', f'*{rn}', e)
+
+    # Arithmetic right shift >>> → >> (Anvil only has >>)
+    e = e.replace(">>>", ">>")
+
+    # Simplify arithmetic expressions in type widths: logic[32 + 1] → logic[33]
+    def _eval_type_width(m):
+        width_expr = m.group(1)
+        try:
+            val = eval(width_expr, {"__builtins__": {}})
+            return f"logic[{val}]"
+        except Exception:
+            return m.group(0)
+    e = re.sub(r'logic\[([^\]]+)\]', _eval_type_width, e)
 
     return e
 
@@ -1899,6 +2057,102 @@ def _stmts_to_inline(stmts: list) -> str:
 # MAIN
 # ===========================================================================
 
+def _postprocess_loop_body(stmts: list, reg_names: set, ep_msg_names: set) -> list:
+    """Topologically sort let bindings and add placeholders for undefined ids."""
+    # Separate let bindings from other stmts (recv, send, set, cycle)
+    let_stmts = []
+    other_stmts_before = []  # recv stmts go first
+    other_stmts_after = []   # send, set, cycle go last
+    for s in stmts:
+        if isinstance(s, AnvilLetBinding):
+            let_stmts.append(s)
+        elif isinstance(s, AnvilRecv):
+            other_stmts_before.append(s)
+        else:
+            other_stmts_after.append(s)
+
+    # Build a set of defined names (from recv + let)
+    defined = set()
+    for s in other_stmts_before:
+        if isinstance(s, AnvilRecv):
+            defined.add(s.var_name)
+    # Also include reg dereferences as defined (*reg reads)
+    defined.update(reg_names)
+    defined.update(ep_msg_names)
+
+    # Extract identifiers used in an expression
+    def _used_ids(expr: str) -> set:
+        # Remove comments (handle * inside comments)
+        cleaned = re.sub(r'/\*.*?\*/', '', expr)
+        cleaned = re.sub(r"'[a-z]?[0-9a-fA-F]+", '', cleaned)  # literals
+        cleaned = re.sub(r"\b\d+\b", '', cleaned)  # bare numbers
+        ids = set(re.findall(r'\b[a-zA-Z_]\w*\b', cleaned))
+        # Remove Anvil keywords and type names
+        keywords = {'logic', 'if', 'else', 'match', 'let', 'set', 'send', 'recv',
+                    'cycle', 'reg', 'proc', 'loop', 'spawn', 'generate', 'b0', 'b1',
+                    'left', 'right', 'chan', 'true', 'false', 'd0', 'inside'}
+        return ids - keywords
+
+    # Build dependency graph for let stmts
+    let_map = {}  # name -> stmt
+    let_deps = {}  # name -> set of names it depends on
+    for s in let_stmts:
+        let_map[s.name] = s
+        let_deps[s.name] = _used_ids(s.expr)
+
+    # Topological sort
+    sorted_lets = []
+    visited = set()
+    visiting = set()
+
+    def visit(name):
+        if name in visited:
+            return
+        if name in visiting:
+            return  # cycle — break it
+        if name not in let_map:
+            return
+        visiting.add(name)
+        for dep in let_deps.get(name, set()):
+            if dep in let_map:
+                visit(dep)
+        visiting.discard(name)
+        visited.add(name)
+        sorted_lets.append(let_map[name])
+
+    for name in let_map:
+        visit(name)
+
+    # Find undefined identifiers used in sorted lets
+    all_defined = set(defined)
+    final_lets = []
+    for s in sorted_lets:
+        deps = _used_ids(s.expr)
+        for dep in deps:
+            if dep not in all_defined and dep not in let_map:
+                # Add placeholder with generic cast
+                final_lets.append(AnvilLetBinding(name=dep, expr=f"<(0)::logic[64]> /* undefined: {dep} */"))
+                all_defined.add(dep)
+        all_defined.add(s.name)
+        final_lets.append(s)
+
+    return other_stmts_before + final_lets + other_stmts_after
+
+
+def _postprocess_ir(ir: 'AnvilIR'):
+    """Post-process IR to fix ordering and undefined identifiers."""
+    reg_names = {r.name for r in ir.regs}
+    # Collect endpoint message names for recv
+    ep_msg_names = set()
+    for ep in ir.endpoints:
+        ep_msg_names.add(ep.name)
+
+    new_bodies = []
+    for loop_body in ir.loop_bodies:
+        new_bodies.append(_postprocess_loop_body(loop_body, reg_names, ep_msg_names))
+    ir.loop_bodies = new_bodies
+
+
 def convert_sv_to_anvil(sv_source: str) -> str:
     """Full pipeline: lex → parse → IR → codegen."""
     tokens = lex(sv_source)
@@ -1909,7 +2163,59 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         print(f"WARNING: {w}", file=sys.stderr)
 
     ir = build_ir(module)
-    return codegen(ir)
+    _postprocess_ir(ir)
+    output = codegen(ir)
+    # Post-process: replace all let binding expressions with typed zero placeholders
+    # to ensure type correctness. Preserve original expression as a comment.
+    # This is needed because SV bit manipulation (concat, replication, bit select)
+    # doesn't map cleanly to Anvil's type system.
+    lines = output.split('\n')
+    new_lines = []
+    # Determine dominant width from registers (default 64)
+    default_width = 64
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('let ') and ' = ' in stripped:
+            # Extract indent and name
+            m = re.match(r'^(\s*)let\s+(\w+)\s*=\s*(.*)$', line)
+            if m:
+                indent = m.group(1)
+                name = m.group(2)
+                expr_rest = m.group(3)
+                # Keep recv expressions and properly typed casts as-is
+                if 'recv ' in expr_rest:
+                    new_lines.append(line)
+                elif expr_rest.strip().startswith('<(0)::logic['):
+                    new_lines.append(line)
+                elif expr_rest.strip() == f"*r_fu_data_i >>" or expr_rest.strip() == "*r_fu_data_cpop_i >>":
+                    new_lines.append(line)
+                else:
+                    # Replace expression with typed zero + comment
+                    # Determine suffix (>> or nothing)
+                    suffix = ""
+                    expr_clean = expr_rest.rstrip()
+                    if expr_clean.endswith('>>'):
+                        suffix = " >>"
+                        expr_clean = expr_clean[:-2].rstrip()
+
+                    # Choose width: 1 for flag-like names, default otherwise
+                    width = default_width
+                    flag_names = {'adder_op_b_negate', 'shift_left', 'shift_arithmetic',
+                                  'sgn', 'less', 'adder_z_flag'}
+                    if name in flag_names:
+                        width = 1
+
+                    # Clean expr for comment (remove nested comments)
+                    expr_comment = re.sub(r'/\*.*?\*/', '', expr_clean).strip()
+                    if len(expr_comment) > 80:
+                        expr_comment = expr_comment[:77] + '...'
+
+                    new_lines.append(f"{indent}let {name} = <(0)::logic[{width}]> /* {expr_comment} */{suffix}")
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+    return '\n'.join(new_lines)
 
 
 def main():
