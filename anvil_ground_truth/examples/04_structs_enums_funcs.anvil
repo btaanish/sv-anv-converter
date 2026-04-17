@@ -1,0 +1,49 @@
+/* Example 4: Structs, enums, type aliases, functions */
+type byte = (logic[8]);
+
+struct address_data_pair {
+    data : (logic[8]),
+    addr : (logic[16])
+}
+
+enum state {
+    IDLE,
+    BUSY,
+    DONE
+}
+
+func max(a, b) {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+func is_even(x) {
+    x & 8'd1 == 8'd0
+}
+
+proc Top() {
+    reg counter : logic[8];
+    reg st : state;
+    loop {
+        if (*st in { state::IDLE, state::BUSY }) {
+            dprint"[Cycle %d] Active state" (*counter)
+        } else if (*st == state::DONE) {
+            dprint"[Cycle %d] Done state" (*counter)
+        } else {
+            dprint"[Cycle %d] Unknown" (*counter)
+        } >>
+        set counter := *counter + 8'd1
+    }
+    loop {
+        let m = call max(*counter, 8'd5) >>
+        dprint"Max value: %d" (m) >>
+        cycle 1
+    }
+    loop {
+        cycle 10 >>
+        dfinish
+    }
+}

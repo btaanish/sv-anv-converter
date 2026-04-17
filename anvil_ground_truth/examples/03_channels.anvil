@@ -1,0 +1,40 @@
+/* Example 3: Channels, send/recv, multi-process communication */
+chan foobar_ch {
+    left req : (logic[8]@res),
+    right res : (logic[8]@#1)
+}
+
+proc Foo(ep : left foobar_ch) {
+    reg cycle_count : logic[8];
+    reg result : logic[8];
+    loop {
+        let x = recv ep.req >>
+        set result := x + 8'd1 >>
+        send ep.res (*result) >>
+        cycle 1
+    }
+    loop {
+        set cycle_count := *cycle_count + 8'd1
+    }
+}
+
+proc Top() {
+    chan ep_le -- ep_ri : foobar_ch;
+    spawn Foo(ep_le);
+    reg input : logic[8];
+    reg counter : logic[8];
+    loop {
+        send ep_ri.req (*input) >>
+        let data = recv ep_ri.res >>
+        dprint"[Cycle %d] Got response: %d" (*counter, data) >>
+        set input := *input + 8'd1 >>
+        cycle 1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+    loop {
+        cycle 20 >>
+        dfinish
+    }
+}

@@ -1,0 +1,34 @@
+/* Example 9: Parameterized channel, spawn */
+chan data_ch {
+    left data : (logic[8]@#1) @dyn - @#1
+}
+
+proc Producer(ep : right data_ch) {
+    reg val : logic[8];
+    loop {
+        send ep.data (*val) >>
+        set val := *val + 8'd1
+    }
+}
+
+proc Consumer(ep : left data_ch) {
+    reg counter : logic[8];
+    loop {
+        let d = recv ep.data >>
+        dprint"[Cycle %d] Received: %d" (*counter, d) >>
+        cycle 1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+}
+
+proc Top() {
+    chan ep_le -- ep_ri : data_ch;
+    spawn Producer(ep_ri);
+    spawn Consumer(ep_le);
+    loop {
+        cycle 10 >>
+        dfinish
+    }
+}
