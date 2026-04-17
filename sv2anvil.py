@@ -1,829 +1,1918 @@
 #!/usr/bin/env python3
-"""sv2anvil.py — Convert SystemVerilog to Anvil HDL.
+"""sv2anvil.py — AST-based SystemVerilog to Anvil HDL converter.
 
 Usage:
-    python3 sv2anvil.py input.sv output.anvil
+    python3 sv2anvil.py input.sv > output.anvil
 
+Architecture: Lexer → Parser → IR → Codegen
 """
 
 import re
 import sys
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from enum import Enum, auto
+from typing import List, Optional, Tuple, Dict
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# LEXER
+# ===========================================================================
 
-def warn(msg: str) -> None:
-    """Print a conversion warning to stderr."""
-    print(f"WARNING: {msg}", file=sys.stderr)
-
-
-def anvil_width_type(msb: str, lsb: str) -> str:
-    """Convert [msb:lsb] to Anvil type.  Returns e.g. '(logic[8])'."""
-    try:
-        width = int(msb) - int(lsb) + 1
-        if width == 1:
-            return "logic"
-        return f"(logic[{width}])"
-    except ValueError:
-        # Parametric width — keep as expression
-        # e.g. CVA6Cfg.XLEN-1 : 0  =>  (logic[CVA6Cfg.XLEN])
-        msb_s = msb.strip()
-        lsb_s = lsb.strip()
-        if lsb_s == "0":
-            # Simplify: if msb is "X-1", width is just "X"
-            m = re.match(r"^(.+?)\s*-\s*1$", msb_s)
-            if m:
-                return f"(logic[{m.group(1).strip()}])"
-            return f"(logic[{msb_s} + 1])"
-        return f"(logic[{msb_s} - {lsb_s} + 1])"
-
-
-def convert_literal(lit: str) -> str:
-    """Convert an SV numeric literal to Anvil format.
-
-    SV:   32'd0, 8'hFF, 1'b1, 'b0, '0, '1
-    Anvil: 32'd0, 8'hFF, 1'b1, 1'b0, 1'b0, 1'b1  (width-prefixed)
-    """
-    # Already width-prefixed: 8'hFF etc.
-    m = re.match(r"(\d+)'([bdho])([0-9a-fA-F_xXzZ]+)", lit)
-    if m:
-        return lit  # pass through, Anvil uses same format
-
-    # Unsized: 'b0, 'h1A
-    m = re.match(r"'([bdho])([0-9a-fA-F_xXzZ]+)", lit)
-    if m:
-        base, digits = m.group(1), m.group(2)
-        width = 1 if base == "b" else len(digits) * 4
-        return f"{width}'{base}{digits}"
-
-    # '0 and '1 shorthand
-    if lit == "'0":
-        return "1'b0"
-    if lit == "'1":
-        return "1'b1"
-
-    return lit
-
-
-_LITERAL_RE = re.compile(r"(\d+)'([bdho])([0-9a-fA-F_xXzZ]+)|'([bdho])([0-9a-fA-F_xXzZ]+)|'[01]")
-
-
-def convert_literals_in_expr(expr: str) -> str:
-    """Replace all SV literals inside an expression."""
-    return _LITERAL_RE.sub(lambda m: convert_literal(m.group(0)), expr)
-
-
-def find_balanced_parens(text: str, start: int = 0) -> Tuple[int, int]:
-    """Find balanced parentheses starting from *start*.
-
-    Returns (open_idx, close_idx) of the balanced pair, or (-1, -1) if not found.
-    """
-    idx = text.find("(", start)
-    if idx == -1:
-        return (-1, -1)
-    depth = 0
-    for i in range(idx, len(text)):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return (idx, i)
-    return (idx, -1)
-
-
-def extract_if_condition(text: str, if_pos: int) -> Optional[Tuple[str, int]]:
-    """Extract the full condition from an if statement using balanced parens.
-
-    Returns (condition_string, end_pos_after_close_paren) or None.
-    """
-    rest = text[if_pos:]
-    m = re.match(r"if\s*", rest)
-    if not m:
-        return None
-    paren_start = if_pos + m.end()
-    if paren_start >= len(text) or text[paren_start] != "(":
-        return None
-    open_idx, close_idx = find_balanced_parens(text, paren_start)
-    if close_idx == -1:
-        return None
-    condition = text[open_idx + 1 : close_idx].strip()
-    return (condition, close_idx + 1)
-
-
-# ---------------------------------------------------------------------------
-# Port / signal data
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Port:
-    name: str
-    direction: str  # input, output, inout
-    width_type: str  # Anvil type string
-    raw: str  # original declaration for reference
+class TokenKind(Enum):
+    # Keywords
+    MODULE = auto()
+    ENDMODULE = auto()
+    INPUT = auto()
+    OUTPUT = auto()
+    INOUT = auto()
+    LOGIC = auto()
+    WIRE = auto()
+    REG = auto()
+    PARAMETER = auto()
+    LOCALPARAM = auto()
+    ASSIGN = auto()
+    ALWAYS_FF = auto()
+    ALWAYS_COMB = auto()
+    ALWAYS = auto()
+    IF = auto()
+    ELSE = auto()
+    BEGIN = auto()
+    END = auto()
+    CASE = auto()
+    UNIQUE = auto()
+    ENDCASE = auto()
+    DEFAULT = auto()
+    FOR = auto()
+    GENERATE = auto()
+    ENDGENERATE = auto()
+    IMPORT = auto()
+    POSEDGE = auto()
+    NEGEDGE = auto()
+    SIGNED = auto()
+    UNSIGNED = auto()
+    # Symbols
+    LPAREN = auto()
+    RPAREN = auto()
+    LBRACKET = auto()
+    RBRACKET = auto()
+    LBRACE = auto()
+    RBRACE = auto()
+    SEMI = auto()
+    COLON = auto()
+    COMMA = auto()
+    DOT = auto()
+    AT = auto()
+    HASH = auto()
+    EQUALS = auto()
+    LTE = auto()       # <=
+    QUESTION = auto()
+    TILDE = auto()
+    BANG = auto()
+    AND = auto()
+    OR = auto()
+    XOR = auto()
+    PLUS = auto()
+    MINUS = auto()
+    STAR = auto()
+    SLASH = auto()
+    PERCENT = auto()
+    LT = auto()
+    GT = auto()
+    EQEQ = auto()      # ==
+    NEQ = auto()        # !=
+    LEQ = auto()        # <=  (comparison context)
+    GEQ = auto()        # >=
+    LSHIFT = auto()     # <<
+    RSHIFT = auto()     # >>
+    ARSHIFT = auto()    # >>>
+    LAND = auto()       # &&
+    LOR = auto()        # ||
+    ARROW = auto()      # ->
+    # Literals
+    NUMBER = auto()     # decimal number
+    SIZED_LIT = auto()  # e.g. 32'd0, 8'hFF, 1'b1
+    TICK_ZERO = auto()  # '0
+    TICK_ONE = auto()   # '1
+    STRING = auto()
+    # Identifiers & misc
+    IDENT = auto()
+    DOLLAR_IDENT = auto()  # $clog2, $signed, etc.
+    SCOPE = auto()     # ::
+    INSIDE = auto()
+    EOF = auto()
 
 
 @dataclass
-class Signal:
-    name: str
-    width_type: str
-    raw: str
+class Token:
+    kind: TokenKind
+    value: str
+    line: int
+    col: int
 
 
-# ---------------------------------------------------------------------------
-# Clock/reset detection
-# ---------------------------------------------------------------------------
-
-_CLK_NAMES = {"clk", "clk_i", "clk_o", "clock", "CLK"}
-_RST_NAMES = {"rst", "rst_i", "rst_ni", "rst_n", "reset", "RST", "rst_o", "areset"}
-
-
-def is_clk_or_rst(name: str) -> bool:
-    return name in _CLK_NAMES or name in _RST_NAMES
-
-
-# ---------------------------------------------------------------------------
-# Parsing helpers
-# ---------------------------------------------------------------------------
-
-_PORT_RE = re.compile(
-    r"(input|output|inout)\s+(\w+)?\s*"
-    r"(?:\[([^\]]+):([^\]]+)\])?\s*"
-    r"(\w+)",
-)
-
-_SIGNAL_RE = re.compile(
-    r"^\s*(logic|wire|reg)\s*"
-    r"(?:\[([^\]]+):([^\]]+)\])?\s*"
-    r"(\w+(?:\s*,\s*\w+)*)\s*;",
-    re.MULTILINE,
-)
-
-_ASSIGN_RE = re.compile(
-    r"^\s*assign\s+(\w+(?:\[[^\]]*\])?)\s*=\s*(.+?)\s*;",
-    re.MULTILINE,
-)
-
-_PARAM_RE = re.compile(
-    r"parameter\s+.*?\b(\w+)\s*=\s*([^,\)]+)",
-)
+# Keywords map
+_KEYWORDS = {
+    "module": TokenKind.MODULE,
+    "endmodule": TokenKind.ENDMODULE,
+    "input": TokenKind.INPUT,
+    "output": TokenKind.OUTPUT,
+    "inout": TokenKind.INOUT,
+    "logic": TokenKind.LOGIC,
+    "wire": TokenKind.WIRE,
+    "reg": TokenKind.REG,
+    "parameter": TokenKind.PARAMETER,
+    "localparam": TokenKind.LOCALPARAM,
+    "assign": TokenKind.ASSIGN,
+    "always_ff": TokenKind.ALWAYS_FF,
+    "always_comb": TokenKind.ALWAYS_COMB,
+    "always": TokenKind.ALWAYS,
+    "if": TokenKind.IF,
+    "else": TokenKind.ELSE,
+    "begin": TokenKind.BEGIN,
+    "end": TokenKind.END,
+    "case": TokenKind.CASE,
+    "unique": TokenKind.UNIQUE,
+    "endcase": TokenKind.ENDCASE,
+    "default": TokenKind.DEFAULT,
+    "for": TokenKind.FOR,
+    "generate": TokenKind.GENERATE,
+    "endgenerate": TokenKind.ENDGENERATE,
+    "import": TokenKind.IMPORT,
+    "posedge": TokenKind.POSEDGE,
+    "negedge": TokenKind.NEGEDGE,
+    "signed": TokenKind.SIGNED,
+    "unsigned": TokenKind.UNSIGNED,
+    "inside": TokenKind.INSIDE,
+}
 
 
-def parse_ports(port_block: str) -> List[Port]:
-    """Extract ports from the module port list."""
-    ports: List[Port] = []
-    for m in _PORT_RE.finditer(port_block):
-        direction = m.group(1)
-        type_kw = m.group(2)  # logic, wire, reg, or custom type name
-        msb, lsb = m.group(3), m.group(4)
-        name = m.group(5)
-        if msb and lsb:
-            wtype = anvil_width_type(msb, lsb)
-        elif type_kw and type_kw not in ("logic", "wire", "reg"):
-            wtype = type_kw  # custom type — pass through
-        else:
-            wtype = "logic"
-        ports.append(Port(name=name, direction=direction, width_type=wtype, raw=m.group(0)))
-    return ports
+def lex(source: str) -> List[Token]:
+    """Tokenize SystemVerilog source into a token list."""
+    tokens: List[Token] = []
+    i = 0
+    line = 1
+    col = 1
 
-
-def parse_signals(body: str) -> List[Signal]:
-    """Extract signal declarations from the module body."""
-    signals: List[Signal] = []
-    for m in _SIGNAL_RE.finditer(body):
-        msb, lsb = m.group(2), m.group(3)
-        names_str = m.group(4)
-        if msb and lsb:
-            wtype = anvil_width_type(msb, lsb)
-        else:
-            wtype = "logic"
-        for name in re.split(r"\s*,\s*", names_str):
-            name = name.strip()
-            if name:
-                signals.append(Signal(name=name, width_type=wtype, raw=m.group(0)))
-    return signals
-
-
-# ---------------------------------------------------------------------------
-# Block extraction
-# ---------------------------------------------------------------------------
-
-def find_balanced_braces(text: str, start: int) -> Tuple[int, int]:
-    """Return (open, close) indices of balanced braces starting from *start*.
-
-    *start* should point at or before the first '{'.
-    """
-    idx = text.find("{", start)
-    if idx == -1:
-        return (-1, -1)
-    depth = 0
-    for i in range(idx, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return (idx, i)
-    return (idx, -1)
-
-
-def find_begin_end(text: str, start: int) -> Tuple[int, int]:
-    """Find balanced begin/end block starting from *start*.
-
-    Returns (begin_pos, end_pos) where begin_pos is the index of 'begin'
-    and end_pos is the index right after the matching 'end'.
-    """
-    # Find the first 'begin' keyword
-    bm = re.search(r"\bbegin\b", text[start:])
-    if not bm:
-        return (-1, -1)
-    begin_pos = start + bm.start()
-    depth = 0
-    # Tokenize begin/end keywords
-    for km in re.finditer(r"\b(begin|end)\b", text[begin_pos:]):
-        if km.group(1) == "begin":
-            depth += 1
-        else:
-            depth -= 1
-            if depth == 0:
-                return (begin_pos, begin_pos + km.end())
-    return (begin_pos, -1)
-
-
-def extract_always_blocks(body: str):
-    """Yield (kind, label_or_empty, block_body) for each always block."""
-    for m in re.finditer(r"always_(comb|ff)\b", body):
-        kind = m.group(1)
-        # Find the begin/end block
-        begin_pos, end_pos = find_begin_end(body, m.end())
-        if begin_pos == -1 or end_pos == -1:
-            # Try brace-delimited as fallback
-            open_idx, close_idx = find_balanced_braces(body, m.start())
-            if open_idx == -1 or close_idx == -1:
-                continue
-            inner = body[open_idx + 1 : close_idx].strip()
-        else:
-            # Extract between begin and end
-            # Skip past "begin" keyword and optional label
-            after_begin = re.match(r"\s*begin\s*(?::\s*\w+)?\s*", body[begin_pos:])
-            inner_start = begin_pos + after_begin.end() if after_begin else begin_pos + 5
-            # end_pos points right after "end" — inner is up to the "end" keyword
-            inner_end = end_pos - 3  # len("end") = 3
-            inner = body[inner_start:inner_end].strip()
-        # Check for a label in the "begin : label" part
-        label_text = body[m.end():begin_pos + 30] if begin_pos != -1 else ""
-        label_m = re.search(r"begin\s*:\s*(\w+)", label_text)
-        label = label_m.group(1) if label_m else ""
-        yield (kind, label, inner)
-
-
-def extract_case_blocks(block: str):
-    """Yield (selector_expr, [(pattern, body), ...]) for case/unique case."""
-    for m in re.finditer(r"(?:unique\s+)?case\s*\(([^)]+)\)", block):
-        selector = m.group(1).strip()
-        # Find the matching endcase
-        ec = block.find("endcase", m.end())
-        if ec == -1:
-            continue
-        case_body = block[m.end() : ec]
-        items: List[Tuple[str, str]] = []
-        # Match case items: pattern at start of line followed by ':'
-        # but NOT inside brackets like [31:0].
-        # Pattern: line-start, optional whitespace, identifiers/commas, then ':'
-        for cm in re.finditer(r"^[ \t]*((?:\w+(?:\s*,\s*\w+)*))\s*:", case_body, re.MULTILINE):
-            pat = cm.group(1).strip()
-            # Skip if this looks like a label inside a nested block
-            if pat in ("begin", "end"):
-                continue
-            rest_start = cm.end()
-            # Find next case item (line starting with identifier(s) followed by :)
-            next_m = re.search(r"^[ \t]*(?:\w+(?:\s*,\s*\w+)*)\s*:", case_body[rest_start:], re.MULTILINE)
-            if next_m:
-                cbody = case_body[rest_start : rest_start + next_m.start()].strip().rstrip(";")
+    while i < len(source):
+        # Skip whitespace
+        if source[i] in " \t\r":
+            if source[i] == "\t":
+                col += 4
             else:
-                cbody = case_body[rest_start:].strip().rstrip(";")
-            items.append((pat, cbody))
-        yield (selector, items)
+                col += 1
+            i += 1
+            continue
+        if source[i] == "\n":
+            line += 1
+            col = 1
+            i += 1
+            continue
+
+        # Block comment
+        if source[i:i+2] == "/*":
+            end = source.find("*/", i + 2)
+            if end == -1:
+                end = len(source)
+            else:
+                end += 2
+            # Count newlines in comment
+            for ch in source[i:end]:
+                if ch == "\n":
+                    line += 1
+                    col = 1
+                else:
+                    col += 1
+            i = end
+            continue
+
+        # Line comment
+        if source[i:i+2] == "//":
+            end = source.find("\n", i)
+            if end == -1:
+                end = len(source)
+            i = end
+            continue
+
+        # String literal
+        if source[i] == '"':
+            j = i + 1
+            while j < len(source) and source[j] != '"':
+                if source[j] == "\\":
+                    j += 1
+                j += 1
+            j += 1  # skip closing quote
+            tokens.append(Token(TokenKind.STRING, source[i:j], line, col))
+            col += j - i
+            i = j
+            continue
+
+        # Sized literal: N'bXXX, N'dXXX, N'hXXX, N'oXXX
+        m = re.match(r"(\d+)'([bdho])([0-9a-fA-F_xXzZ]+)", source[i:])
+        if m:
+            tokens.append(Token(TokenKind.SIZED_LIT, m.group(0), line, col))
+            col += len(m.group(0))
+            i += len(m.group(0))
+            continue
+
+        # Tick literals: '0, '1, 'b0, 'h1A, etc.
+        if source[i] == "'" and i + 1 < len(source):
+            if source[i+1] == "0":
+                tokens.append(Token(TokenKind.TICK_ZERO, "'0", line, col))
+                col += 2
+                i += 2
+                continue
+            if source[i+1] == "1":
+                tokens.append(Token(TokenKind.TICK_ONE, "'1", line, col))
+                col += 2
+                i += 2
+                continue
+            # Unsized literal: 'bXXX, 'hXXX, etc.
+            m2 = re.match(r"'([bdho])([0-9a-fA-F_xXzZ]+)", source[i:])
+            if m2:
+                tokens.append(Token(TokenKind.SIZED_LIT, m2.group(0), line, col))
+                col += len(m2.group(0))
+                i += len(m2.group(0))
+                continue
+            # '{default: ...} pattern
+            if source[i+1] == "{":
+                tokens.append(Token(TokenKind.TICK_ZERO, "'", line, col))
+                col += 1
+                i += 1
+                continue
+
+        # Numbers
+        if source[i].isdigit():
+            j = i
+            while j < len(source) and (source[j].isdigit() or source[j] == "_"):
+                j += 1
+            tokens.append(Token(TokenKind.NUMBER, source[i:j], line, col))
+            col += j - i
+            i = j
+            continue
+
+        # $-prefixed identifiers
+        if source[i] == "$":
+            j = i + 1
+            while j < len(source) and (source[j].isalnum() or source[j] == "_"):
+                j += 1
+            tokens.append(Token(TokenKind.DOLLAR_IDENT, source[i:j], line, col))
+            col += j - i
+            i = j
+            continue
+
+        # Identifiers and keywords
+        if source[i].isalpha() or source[i] == "_":
+            j = i
+            while j < len(source) and (source[j].isalnum() or source[j] == "_"):
+                j += 1
+            word = source[i:j]
+            kind = _KEYWORDS.get(word, TokenKind.IDENT)
+            tokens.append(Token(kind, word, line, col))
+            col += j - i
+            i = j
+            continue
+
+        # Multi-char symbols
+        two = source[i:i+2] if i + 1 < len(source) else ""
+        three = source[i:i+3] if i + 2 < len(source) else ""
+
+        if three == ">>>":
+            tokens.append(Token(TokenKind.ARSHIFT, ">>>", line, col))
+            col += 3
+            i += 3
+            continue
+        if two == "::":
+            tokens.append(Token(TokenKind.SCOPE, "::", line, col))
+            col += 2
+            i += 2
+            continue
+        if two == "<=":
+            tokens.append(Token(TokenKind.LTE, "<=", line, col))
+            col += 2
+            i += 2
+            continue
+        if two == ">=":
+            tokens.append(Token(TokenKind.GEQ, ">=", line, col))
+            col += 2
+            i += 2
+            continue
+        if two == "==":
+            tokens.append(Token(TokenKind.EQEQ, "==", line, col))
+            col += 2
+            i += 2
+            continue
+        if two == "!=":
+            tokens.append(Token(TokenKind.NEQ, "!=", line, col))
+            col += 2
+            i += 2
+            continue
+        if two == "<<":
+            tokens.append(Token(TokenKind.LSHIFT, "<<", line, col))
+            col += 2
+            i += 2
+            continue
+        if two == ">>":
+            tokens.append(Token(TokenKind.RSHIFT, ">>", line, col))
+            col += 2
+            i += 2
+            continue
+        if two == "&&":
+            tokens.append(Token(TokenKind.LAND, "&&", line, col))
+            col += 2
+            i += 2
+            continue
+        if two == "||":
+            tokens.append(Token(TokenKind.LOR, "||", line, col))
+            col += 2
+            i += 2
+            continue
+        if two == "->":
+            tokens.append(Token(TokenKind.ARROW, "->", line, col))
+            col += 2
+            i += 2
+            continue
+
+        # Single-char symbols
+        sym_map = {
+            "(": TokenKind.LPAREN, ")": TokenKind.RPAREN,
+            "[": TokenKind.LBRACKET, "]": TokenKind.RBRACKET,
+            "{": TokenKind.LBRACE, "}": TokenKind.RBRACE,
+            ";": TokenKind.SEMI, ":": TokenKind.COLON,
+            ",": TokenKind.COMMA, ".": TokenKind.DOT,
+            "@": TokenKind.AT, "#": TokenKind.HASH,
+            "=": TokenKind.EQUALS, "?": TokenKind.QUESTION,
+            "~": TokenKind.TILDE, "!": TokenKind.BANG,
+            "&": TokenKind.AND, "|": TokenKind.OR,
+            "^": TokenKind.XOR, "+": TokenKind.PLUS,
+            "-": TokenKind.MINUS, "*": TokenKind.STAR,
+            "/": TokenKind.SLASH, "%": TokenKind.PERCENT,
+            "<": TokenKind.LT, ">": TokenKind.GT,
+        }
+        if source[i] in sym_map:
+            tokens.append(Token(sym_map[source[i]], source[i], line, col))
+            col += 1
+            i += 1
+            continue
+
+        # Skip unknown character
+        i += 1
+        col += 1
+
+    tokens.append(Token(TokenKind.EOF, "", line, col))
+    return tokens
 
 
-# ---------------------------------------------------------------------------
-# Expression converter
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# AST NODE TYPES
+# ===========================================================================
 
-def _mask_brackets(text: str) -> str:
-    """Replace content inside [...] with underscores to protect colons in bit slices."""
-    result = list(text)
-    depth = 0
-    for i, ch in enumerate(text):
-        if ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth -= 1
-        elif depth > 0:
-            result[i] = "_"
-    return "".join(result)
+@dataclass
+class SVPort:
+    name: str
+    direction: str  # "input", "output", "inout"
+    width_msb: Optional[str]  # None if scalar
+    width_lsb: Optional[str]
+    type_name: Optional[str]  # custom type if any (e.g. "scoreboard_entry_t")
+    is_custom_type: bool = False
+    packed_dims: List[Tuple[str, str]] = field(default_factory=list)  # extra packed dims
 
 
-def convert_expr(expr: str) -> str:
-    """Best-effort conversion of an SV expression to Anvil."""
-    e = expr.strip().rstrip(";")
-    e = convert_literals_in_expr(e)
-    # $signed(...) / $unsigned(...) — strip, just keep inner
-    e = re.sub(r"\$(?:signed|unsigned)\s*\(", "(", e)
-    # $clog2(...) — keep as-is (comment it)
-    # Ternary: a ? b : c  →  if a { b } else { c }
-    # Only convert simple one-level ternaries.
-    # Bug fix: mask bracket content so ':' inside [5:0] is not matched as ternary.
-    if "?" in e and e.count("?") == 1:
-        # Mask [...] content with placeholders to protect bit-slice colons
-        masked = _mask_brackets(e)
-        tm = re.match(r"^(.+?)\s*\?\s*(.+?)\s*:\s*(.+)$", masked)
-        if tm:
-            # Use the same span positions on the original string
-            cond = e[tm.start(1):tm.end(1)].strip()
-            t_val = e[tm.start(2):tm.end(2)].strip()
-            f_val = e[tm.start(3):tm.end(3)].strip()
-            e = f"if {cond} {{ {t_val} }} else {{ {f_val} }}"
-    # SV 'inside' operator: expr inside {val1, val2, ...} → (expr == val1 || expr == val2 || ...)
-    inside_re = re.compile(r"(\w+(?:\.\w+)*)\s+inside\s+\{([^}]+)\}")
-    im = inside_re.search(e)
-    if im:
-        inside_expr = im.group(1)
-        vals = [v.strip() for v in im.group(2).split(",") if v.strip()]
-        expanded = " || ".join(f"{inside_expr} == {v}" for v in vals)
-        e = e[:im.start()] + f"({expanded})" + e[im.end():]
+@dataclass
+class SVParam:
+    name: str
+    value: str
+    is_type: bool = False  # parameter type X = logic
 
-    # SV replication: {N{expr}} → comment for manual cleanup
-    repl_re = re.compile(r"\{(\w+(?:\.\w+)*)\{([^}]+)\}\}")
-    e = repl_re.sub(
-        lambda m: f"/* [MANUAL-CLEANUP-NEEDED] replication: repeat({m.group(2)}, {m.group(1)}) */",
-        e,
-    )
 
-    # Concatenation: {a, b, c} → #{{ a, b, c }}
-    e = re.sub(r"\{([^{}]+)\}", lambda m: f"#{{ {m.group(1)} }}", e)
+@dataclass
+class SVAssign:
+    lhs: str
+    rhs: str
+
+
+@dataclass
+class SVNonBlockAssign:
+    lhs: str
+    rhs: str
+
+
+@dataclass
+class SVIfBlock:
+    condition: str
+    then_stmts: list
+    else_stmts: list  # may contain SVIfBlock for else-if
+
+
+@dataclass
+class SVCaseItem:
+    pattern: str
+    stmts: list
+
+
+@dataclass
+class SVCaseBlock:
+    selector: str
+    items: List[SVCaseItem]
+
+
+@dataclass
+class SVAlwaysComb:
+    label: str
+    stmts: list  # mix of SVAssign, SVIfBlock, SVCaseBlock
+
+
+@dataclass
+class SVAlwaysFF:
+    label: str
+    clock_edge: str
+    reset_edge: Optional[str]
+    reset_body: list
+    main_body: list
+
+
+@dataclass
+class SVSignal:
+    name: str
+    width_msb: Optional[str]
+    width_lsb: Optional[str]
+
+
+@dataclass
+class SVModule:
+    name: str
+    params: List[SVParam]
+    ports: List[SVPort]
+    signals: List[SVSignal]
+    assigns: List[SVAssign]
+    always_comb_blocks: List[SVAlwaysComb]
+    always_ff_blocks: List[SVAlwaysFF]
+    imports: List[str]
+
+
+# ===========================================================================
+# PARSER
+# ===========================================================================
+
+class Parser:
+    """Recursive-descent parser for the SV subset we need."""
+
+    def __init__(self, tokens: List[Token]):
+        self.tokens = tokens
+        self.pos = 0
+        self.warnings: List[str] = []
+
+    def warn(self, msg: str):
+        tok = self.peek()
+        self.warnings.append(f"Line {tok.line}: {msg}")
+
+    def peek(self) -> Token:
+        if self.pos < len(self.tokens):
+            return self.tokens[self.pos]
+        return Token(TokenKind.EOF, "", 0, 0)
+
+    def advance(self) -> Token:
+        tok = self.peek()
+        if self.pos < len(self.tokens):
+            self.pos += 1
+        return tok
+
+    def expect(self, kind: TokenKind) -> Token:
+        tok = self.advance()
+        if tok.kind != kind:
+            self.warn(f"Expected {kind.name}, got {tok.kind.name} '{tok.value}'")
+        return tok
+
+    def at(self, kind: TokenKind) -> bool:
+        return self.peek().kind == kind
+
+    def at_any(self, *kinds: TokenKind) -> bool:
+        return self.peek().kind in kinds
+
+    def match(self, kind: TokenKind) -> Optional[Token]:
+        if self.at(kind):
+            return self.advance()
+        return None
+
+    def skip_until(self, *kinds: TokenKind):
+        while not self.at(TokenKind.EOF) and not self.at_any(*kinds):
+            self.advance()
+
+    def skip_balanced_parens(self) -> str:
+        """Skip and collect text inside balanced parentheses."""
+        depth = 0
+        parts = []
+        while not self.at(TokenKind.EOF):
+            if self.at(TokenKind.LPAREN):
+                depth += 1
+                parts.append(self.advance().value)
+            elif self.at(TokenKind.RPAREN):
+                depth -= 1
+                parts.append(self.advance().value)
+                if depth == 0:
+                    return " ".join(parts)
+            else:
+                parts.append(self.advance().value)
+        return " ".join(parts)
+
+    def collect_expr_until(self, *stop_kinds: TokenKind) -> str:
+        """Collect tokens as text until one of stop_kinds is seen (not consumed)."""
+        parts = []
+        depth_p = 0  # parens
+        depth_b = 0  # brackets
+        depth_c = 0  # braces
+        while not self.at(TokenKind.EOF):
+            if depth_p == 0 and depth_b == 0 and depth_c == 0:
+                if self.at_any(*stop_kinds):
+                    break
+            tok = self.peek()
+            if tok.kind == TokenKind.LPAREN:
+                depth_p += 1
+            elif tok.kind == TokenKind.RPAREN:
+                depth_p -= 1
+                if depth_p < 0:
+                    break
+            elif tok.kind == TokenKind.LBRACKET:
+                depth_b += 1
+            elif tok.kind == TokenKind.RBRACKET:
+                depth_b -= 1
+                if depth_b < 0:
+                    break
+            elif tok.kind == TokenKind.LBRACE:
+                depth_c += 1
+            elif tok.kind == TokenKind.RBRACE:
+                depth_c -= 1
+                if depth_c < 0:
+                    break
+            parts.append(self.advance().value)
+        return " ".join(parts)
+
+    def parse_module(self) -> SVModule:
+        """Parse: module name import... #(params) (ports); body endmodule"""
+        imports = []
+        # Skip to module keyword
+        while not self.at(TokenKind.MODULE) and not self.at(TokenKind.EOF):
+            # Collect imports before module
+            if self.at(TokenKind.IMPORT):
+                self.advance()
+                imp_text = self.collect_expr_until(TokenKind.SEMI)
+                imports.append(imp_text.strip())
+                self.match(TokenKind.SEMI)
+            else:
+                self.advance()
+
+        self.expect(TokenKind.MODULE)
+        name_tok = self.expect(TokenKind.IDENT)
+        module_name = name_tok.value
+
+        # Collect imports after module name
+        while self.at(TokenKind.IMPORT):
+            self.advance()
+            imp_text = self.collect_expr_until(TokenKind.SEMI)
+            imports.append(imp_text.strip())
+            self.match(TokenKind.SEMI)
+
+        # Parameters
+        params = []
+        if self.at(TokenKind.HASH):
+            self.advance()
+            self.expect(TokenKind.LPAREN)
+            params = self._parse_params()
+            self.expect(TokenKind.RPAREN)
+
+        # Port list
+        self.expect(TokenKind.LPAREN)
+        ports = self._parse_ports()
+        self.expect(TokenKind.RPAREN)
+        self.expect(TokenKind.SEMI)
+
+        # Body
+        signals = []
+        assigns = []
+        comb_blocks = []
+        ff_blocks = []
+
+        while not self.at(TokenKind.ENDMODULE) and not self.at(TokenKind.EOF):
+            if self.at(TokenKind.ASSIGN):
+                a = self._parse_assign()
+                if a:
+                    assigns.append(a)
+            elif self.at(TokenKind.ALWAYS_COMB):
+                cb = self._parse_always_comb()
+                if cb:
+                    comb_blocks.append(cb)
+            elif self.at(TokenKind.ALWAYS_FF):
+                fb = self._parse_always_ff()
+                if fb:
+                    ff_blocks.append(fb)
+            elif self.at(TokenKind.ALWAYS):
+                # plain always — try to parse as always_ff
+                fb = self._parse_always_ff()
+                if fb:
+                    ff_blocks.append(fb)
+            elif self.at_any(TokenKind.LOGIC, TokenKind.WIRE, TokenKind.REG):
+                sig = self._parse_signal()
+                if sig:
+                    signals.extend(sig)
+            elif self.at(TokenKind.LOCALPARAM):
+                # Treat as parameter
+                self.advance()
+                p = self._parse_one_param()
+                if p:
+                    params.append(p)
+                self.match(TokenKind.SEMI)
+            elif self.at(TokenKind.GENERATE):
+                self._skip_generate()
+            elif self.at(TokenKind.FOR):
+                self._skip_for_generate()
+            elif self.at(TokenKind.IMPORT):
+                self.advance()
+                imp_text = self.collect_expr_until(TokenKind.SEMI)
+                imports.append(imp_text.strip())
+                self.match(TokenKind.SEMI)
+            elif self.at(TokenKind.DOLLAR_IDENT):
+                # $error, $warning, etc. — skip to semicolon
+                self.skip_until(TokenKind.SEMI)
+                self.match(TokenKind.SEMI)
+            else:
+                self.advance()
+
+        self.match(TokenKind.ENDMODULE)
+
+        return SVModule(
+            name=module_name,
+            params=params,
+            ports=ports,
+            signals=signals,
+            assigns=assigns,
+            always_comb_blocks=comb_blocks,
+            always_ff_blocks=ff_blocks,
+            imports=imports,
+        )
+
+    def _parse_params(self) -> List[SVParam]:
+        """Parse parameter list inside #(...)."""
+        params = []
+        while not self.at(TokenKind.RPAREN) and not self.at(TokenKind.EOF):
+            p = self._parse_one_param()
+            if p:
+                params.append(p)
+            if self.at(TokenKind.COMMA):
+                self.advance()
+            elif not self.at(TokenKind.RPAREN):
+                self.advance()  # skip unexpected
+        return params
+
+    def _parse_one_param(self) -> Optional[SVParam]:
+        """Parse a single parameter declaration."""
+        self.match(TokenKind.PARAMETER)
+        # Check for 'type' keyword
+        is_type = False
+        if self.peek().value == "type":
+            is_type = True
+            self.advance()
+
+        # Skip type qualifiers (int unsigned, bit, config_pkg::cva6_cfg_t, etc.)
+        while self.at_any(TokenKind.IDENT, TokenKind.SCOPE, TokenKind.SIGNED,
+                          TokenKind.UNSIGNED, TokenKind.LOGIC) and not self.at(TokenKind.EOF):
+            name_tok = self.advance()
+            if self.at(TokenKind.SCOPE):
+                self.advance()
+                continue
+            if self.at(TokenKind.EQUALS):
+                # This identifier is the parameter name
+                self.advance()  # consume =
+                value = self.collect_expr_until(TokenKind.COMMA, TokenKind.RPAREN, TokenKind.SEMI)
+                return SVParam(name=name_tok.value, value=value.strip(), is_type=is_type)
+            # Otherwise it's a type qualifier, continue
+        return None
+
+    def _parse_ports(self) -> List[SVPort]:
+        """Parse port list inside module(...)."""
+        ports = []
+        while not self.at(TokenKind.RPAREN) and not self.at(TokenKind.EOF):
+            if self.at_any(TokenKind.INPUT, TokenKind.OUTPUT, TokenKind.INOUT):
+                direction = self.advance().value
+                # Determine type
+                type_name = None
+                is_custom = False
+                width_msb = None
+                width_lsb = None
+                packed_dims = []
+
+                # Check for logic/wire/reg or custom type
+                if self.at_any(TokenKind.LOGIC, TokenKind.WIRE, TokenKind.REG):
+                    self.advance()
+                elif self.at(TokenKind.IDENT):
+                    # Could be a custom type (e.g. riscv::xs_t)
+                    # or the port name
+                    # Peek ahead: if next is :: or [, it's a type
+                    saved = self.pos
+                    type_tok = self.advance()
+                    if self.at(TokenKind.SCOPE):
+                        # Scoped type: riscv::xs_t
+                        self.advance()
+                        type_suffix = self.advance()
+                        type_name = f"{type_tok.value}::{type_suffix.value}"
+                        is_custom = True
+                    elif self.at(TokenKind.LBRACKET) or self.at(TokenKind.IDENT):
+                        # Custom type or just the port name
+                        # If next token is an identifier, current was a type
+                        if self.at(TokenKind.IDENT):
+                            type_name = type_tok.value
+                            is_custom = True
+                        elif self.at(TokenKind.LBRACKET):
+                            # Could be type with dims or port name with dims
+                            # Heuristic: if after brackets there's an ident, it's a type
+                            saved2 = self.pos
+                            self._skip_brackets()
+                            if self.at(TokenKind.IDENT):
+                                type_name = type_tok.value
+                                is_custom = True
+                                self.pos = saved2  # restore to parse dims
+                            else:
+                                # It was the port name, restore
+                                self.pos = saved
+                        else:
+                            self.pos = saved
+                    else:
+                        self.pos = saved
+
+                # Parse packed dimensions [msb:lsb]
+                while self.at(TokenKind.LBRACKET):
+                    self.advance()
+                    msb = self.collect_expr_until(TokenKind.COLON, TokenKind.RBRACKET)
+                    if self.at(TokenKind.COLON):
+                        self.advance()
+                        lsb = self.collect_expr_until(TokenKind.RBRACKET)
+                        if width_msb is None:
+                            width_msb = msb.strip()
+                            width_lsb = lsb.strip()
+                        else:
+                            packed_dims.append((msb.strip(), lsb.strip()))
+                    self.expect(TokenKind.RBRACKET)
+
+                # Port name
+                if self.at(TokenKind.IDENT):
+                    port_name = self.advance().value
+                else:
+                    self.warn("Expected port name")
+                    self.skip_until(TokenKind.COMMA, TokenKind.RPAREN)
+                    if self.at(TokenKind.COMMA):
+                        self.advance()
+                    continue
+
+                ports.append(SVPort(
+                    name=port_name,
+                    direction=direction,
+                    width_msb=width_msb,
+                    width_lsb=width_lsb,
+                    type_name=type_name,
+                    is_custom_type=is_custom,
+                    packed_dims=packed_dims,
+                ))
+
+                # Skip trailing comma
+                if self.at(TokenKind.COMMA):
+                    self.advance()
+            else:
+                self.advance()  # skip unexpected tokens
+        return ports
+
+    def _skip_brackets(self):
+        """Skip over [...]."""
+        if self.at(TokenKind.LBRACKET):
+            self.advance()
+            depth = 1
+            while depth > 0 and not self.at(TokenKind.EOF):
+                if self.at(TokenKind.LBRACKET):
+                    depth += 1
+                elif self.at(TokenKind.RBRACKET):
+                    depth -= 1
+                self.advance()
+
+    def _parse_signal(self) -> List[SVSignal]:
+        """Parse a signal declaration: logic [msb:lsb] name, name2;"""
+        self.advance()  # consume logic/wire/reg
+        width_msb = None
+        width_lsb = None
+
+        if self.at(TokenKind.LBRACKET):
+            self.advance()
+            width_msb = self.collect_expr_until(TokenKind.COLON, TokenKind.RBRACKET).strip()
+            if self.at(TokenKind.COLON):
+                self.advance()
+                width_lsb = self.collect_expr_until(TokenKind.RBRACKET).strip()
+            self.expect(TokenKind.RBRACKET)
+
+        # May have additional packed dims — skip them
+        while self.at(TokenKind.LBRACKET):
+            self._skip_brackets()
+
+        signals = []
+        while True:
+            if self.at(TokenKind.IDENT):
+                name = self.advance().value
+                # Skip unpacked dims
+                while self.at(TokenKind.LBRACKET):
+                    self._skip_brackets()
+                signals.append(SVSignal(name=name, width_msb=width_msb, width_lsb=width_lsb))
+            if self.at(TokenKind.COMMA):
+                self.advance()
+            else:
+                break
+        self.match(TokenKind.SEMI)
+        return signals
+
+    def _parse_assign(self) -> Optional[SVAssign]:
+        """Parse: assign lhs = rhs;"""
+        self.expect(TokenKind.ASSIGN)
+        lhs = self.collect_expr_until(TokenKind.EQUALS)
+        self.expect(TokenKind.EQUALS)
+        rhs = self.collect_expr_until(TokenKind.SEMI)
+        self.match(TokenKind.SEMI)
+        return SVAssign(lhs=lhs.strip(), rhs=rhs.strip())
+
+    def _parse_always_comb(self) -> Optional[SVAlwaysComb]:
+        """Parse always_comb begin...end."""
+        self.advance()  # consume always_comb
+        label = ""
+        if self.at(TokenKind.BEGIN):
+            self.advance()
+            if self.at(TokenKind.COLON):
+                self.advance()
+                if self.at(TokenKind.IDENT):
+                    label = self.advance().value
+        stmts = self._parse_stmts_until(TokenKind.END)
+        self.match(TokenKind.END)
+        # Skip optional : label after end
+        if self.at(TokenKind.COLON):
+            self.advance()
+            self.match(TokenKind.IDENT)
+        return SVAlwaysComb(label=label, stmts=stmts)
+
+    def _parse_always_ff(self) -> Optional[SVAlwaysFF]:
+        """Parse always_ff @(posedge clk...) begin...end."""
+        self.advance()  # consume always_ff or always
+        # Skip sensitivity list @(...)
+        clock_edge = "posedge"
+        reset_edge = None
+        if self.at(TokenKind.AT):
+            self.advance()
+            if self.at(TokenKind.LPAREN):
+                sens = self.skip_balanced_parens()
+                if "negedge" in sens:
+                    reset_edge = "negedge"
+                elif "posedge" in sens and sens.count("posedge") > 1:
+                    reset_edge = "posedge"
+
+        label = ""
+        if self.at(TokenKind.BEGIN):
+            self.advance()
+            if self.at(TokenKind.COLON):
+                self.advance()
+                if self.at(TokenKind.IDENT):
+                    label = self.advance().value
+
+        # Parse reset/main body
+        reset_body = []
+        main_body = []
+
+        # Check for if (~rst_ni) pattern (reset handling)
+        if self.at(TokenKind.IF):
+            self.advance()
+            self.expect(TokenKind.LPAREN)
+            cond = self.collect_expr_until(TokenKind.RPAREN)
+            self.expect(TokenKind.RPAREN)
+
+            # Parse reset body
+            if self.at(TokenKind.BEGIN):
+                self.advance()
+                if self.at(TokenKind.COLON):
+                    self.advance()
+                    self.match(TokenKind.IDENT)
+                reset_body = self._parse_stmts_until(TokenKind.END)
+                self.match(TokenKind.END)
+            else:
+                # Single statement
+                stmt = self._parse_one_stmt()
+                if stmt:
+                    reset_body = [stmt]
+
+            # Parse else (main body)
+            if self.at(TokenKind.ELSE):
+                self.advance()
+                if self.at(TokenKind.BEGIN):
+                    self.advance()
+                    if self.at(TokenKind.COLON):
+                        self.advance()
+                        self.match(TokenKind.IDENT)
+                    main_body = self._parse_stmts_until(TokenKind.END)
+                    self.match(TokenKind.END)
+                else:
+                    stmt = self._parse_one_stmt()
+                    if stmt:
+                        main_body = [stmt]
+        else:
+            main_body = self._parse_stmts_until(TokenKind.END)
+
+        self.match(TokenKind.END)
+        # Skip optional : label
+        if self.at(TokenKind.COLON):
+            self.advance()
+            self.match(TokenKind.IDENT)
+
+        return SVAlwaysFF(
+            label=label,
+            clock_edge=clock_edge,
+            reset_edge=reset_edge,
+            reset_body=reset_body,
+            main_body=main_body,
+        )
+
+    def _parse_stmts_until(self, stop: TokenKind) -> list:
+        """Parse statements until stop token."""
+        stmts = []
+        while not self.at(stop) and not self.at(TokenKind.EOF):
+            stmt = self._parse_one_stmt()
+            if stmt:
+                stmts.append(stmt)
+        return stmts
+
+    def _parse_one_stmt(self) -> object:
+        """Parse a single statement in an always block."""
+        # Skip 'automatic' keyword
+        if self.peek().value == "automatic":
+            self.advance()
+            # Skip type and collect as signal/assign
+            self.skip_until(TokenKind.SEMI)
+            self.match(TokenKind.SEMI)
+            return None
+
+        # for loop — skip for now
+        if self.at(TokenKind.FOR):
+            self._skip_for_loop()
+            return None
+
+        # if-else
+        if self.at(TokenKind.IF):
+            return self._parse_if()
+
+        # case / unique case
+        if self.at(TokenKind.UNIQUE):
+            self.advance()
+        if self.at(TokenKind.CASE):
+            return self._parse_case()
+
+        # Non-blocking assignment: lhs <= rhs;
+        # or blocking assignment: lhs = rhs;
+        if self.at(TokenKind.IDENT) or self.at(TokenKind.LBRACE):
+            saved = self.pos
+            lhs = self.collect_expr_until(TokenKind.LTE, TokenKind.EQUALS, TokenKind.SEMI)
+            if self.at(TokenKind.LTE):
+                self.advance()
+                rhs = self.collect_expr_until(TokenKind.SEMI)
+                self.match(TokenKind.SEMI)
+                return SVNonBlockAssign(lhs=lhs.strip(), rhs=rhs.strip())
+            elif self.at(TokenKind.EQUALS):
+                self.advance()
+                rhs = self.collect_expr_until(TokenKind.SEMI)
+                self.match(TokenKind.SEMI)
+                return SVAssign(lhs=lhs.strip(), rhs=rhs.strip())
+            else:
+                self.match(TokenKind.SEMI)
+                return None
+
+        # Skip anything else
+        self.advance()
+        return None
+
+    def _parse_if(self) -> SVIfBlock:
+        """Parse if (...) begin...end [else begin...end]."""
+        self.expect(TokenKind.IF)
+        self.expect(TokenKind.LPAREN)
+        condition = self.collect_expr_until(TokenKind.RPAREN)
+        self.expect(TokenKind.RPAREN)
+
+        then_stmts = []
+        if self.at(TokenKind.BEGIN):
+            self.advance()
+            if self.at(TokenKind.COLON):
+                self.advance()
+                self.match(TokenKind.IDENT)
+            then_stmts = self._parse_stmts_until(TokenKind.END)
+            self.match(TokenKind.END)
+            # Skip optional : label
+            if self.at(TokenKind.COLON):
+                self.advance()
+                self.match(TokenKind.IDENT)
+        else:
+            stmt = self._parse_one_stmt()
+            if stmt:
+                then_stmts = [stmt]
+
+        else_stmts = []
+        if self.at(TokenKind.ELSE):
+            self.advance()
+            if self.at(TokenKind.IF):
+                # else if
+                else_stmts = [self._parse_if()]
+            elif self.at(TokenKind.BEGIN):
+                self.advance()
+                if self.at(TokenKind.COLON):
+                    self.advance()
+                    self.match(TokenKind.IDENT)
+                else_stmts = self._parse_stmts_until(TokenKind.END)
+                self.match(TokenKind.END)
+                if self.at(TokenKind.COLON):
+                    self.advance()
+                    self.match(TokenKind.IDENT)
+            else:
+                stmt = self._parse_one_stmt()
+                if stmt:
+                    else_stmts = [stmt]
+
+        return SVIfBlock(condition=condition.strip(), then_stmts=then_stmts, else_stmts=else_stmts)
+
+    def _parse_case(self) -> SVCaseBlock:
+        """Parse case(expr) ... endcase."""
+        self.expect(TokenKind.CASE)
+        self.expect(TokenKind.LPAREN)
+        selector = self.collect_expr_until(TokenKind.RPAREN)
+        self.expect(TokenKind.RPAREN)
+
+        items = []
+        while not self.at(TokenKind.ENDCASE) and not self.at(TokenKind.EOF):
+            if self.at(TokenKind.DEFAULT):
+                self.advance()
+                self.match(TokenKind.COLON)
+                stmts = self._parse_case_item_body()
+                items.append(SVCaseItem(pattern="default", stmts=stmts))
+            elif self.at_any(TokenKind.IDENT, TokenKind.NUMBER, TokenKind.SIZED_LIT):
+                pattern = self.collect_expr_until(TokenKind.COLON)
+                self.expect(TokenKind.COLON)
+                stmts = self._parse_case_item_body()
+                items.append(SVCaseItem(pattern=pattern.strip(), stmts=stmts))
+            else:
+                self.advance()
+
+        self.match(TokenKind.ENDCASE)
+        return SVCaseBlock(selector=selector.strip(), items=items)
+
+    def _parse_case_item_body(self) -> list:
+        """Parse statements for a case item."""
+        if self.at(TokenKind.BEGIN):
+            self.advance()
+            if self.at(TokenKind.COLON):
+                self.advance()
+                self.match(TokenKind.IDENT)
+            stmts = self._parse_stmts_until(TokenKind.END)
+            self.match(TokenKind.END)
+            return stmts
+        else:
+            stmt = self._parse_one_stmt()
+            return [stmt] if stmt else []
+
+    def _skip_for_loop(self):
+        """Skip a for loop (including begin...end body)."""
+        self.advance()  # 'for'
+        if self.at(TokenKind.LPAREN):
+            self.skip_balanced_parens()
+        if self.at(TokenKind.BEGIN):
+            self.advance()
+            if self.at(TokenKind.COLON):
+                self.advance()
+                self.match(TokenKind.IDENT)
+            depth = 1
+            while depth > 0 and not self.at(TokenKind.EOF):
+                if self.at(TokenKind.BEGIN):
+                    depth += 1
+                elif self.at(TokenKind.END):
+                    depth -= 1
+                self.advance()
+        else:
+            self.skip_until(TokenKind.SEMI)
+            self.match(TokenKind.SEMI)
+
+    def _skip_generate(self):
+        """Skip generate...endgenerate."""
+        self.advance()  # generate
+        while not self.at(TokenKind.ENDGENERATE) and not self.at(TokenKind.EOF):
+            self.advance()
+        self.match(TokenKind.ENDGENERATE)
+
+    def _skip_for_generate(self):
+        """Skip a for-generate at module level."""
+        self._skip_for_loop()
+
+
+# ===========================================================================
+# IR (Intermediate Representation)
+# ===========================================================================
+
+CLK_RST_NAMES = {"clk", "clk_i", "clk_o", "clock", "CLK",
+                  "rst", "rst_i", "rst_ni", "rst_n", "reset", "RST", "rst_o",
+                  "areset", "test_en_i"}
+
+
+@dataclass
+class AnvilChanMsg:
+    name: str
+    anvil_type: str  # e.g. "logic[32]"
+
+
+@dataclass
+class AnvilChan:
+    name: str
+    messages: List[AnvilChanMsg]
+
+
+@dataclass
+class AnvilEndpoint:
+    name: str
+    side: str  # "left" or "right"
+    chan_name: str
+
+
+@dataclass
+class AnvilReg:
+    name: str
+    anvil_type: str
+
+
+@dataclass
+class AnvilLetBinding:
+    name: str
+    expr: str
+
+
+@dataclass
+class AnvilSend:
+    endpoint: str
+    msg_name: str
+    expr: str
+    cast_type: Optional[str] = None  # if set, wrap expr in cast
+
+
+@dataclass
+class AnvilRecv:
+    var_name: str
+    endpoint: str
+    msg_name: str
+
+
+@dataclass
+class AnvilSet:
+    reg_name: str
+    expr: str
+
+
+@dataclass
+class AnvilIf:
+    condition: str
+    then_stmts: list
+    else_stmts: list
+
+
+@dataclass
+class AnvilMatch:
+    selector: str
+    arms: List[Tuple[str, list]]
+
+
+@dataclass
+class AnvilCycle:
+    count: int
+
+
+@dataclass
+class AnvilIR:
+    module_name: str
+    channels: List[AnvilChan]
+    endpoints: List[AnvilEndpoint]
+    regs: List[AnvilReg]
+    loop_bodies: list  # list of list of statements
+
+
+# ===========================================================================
+# IR BUILDER
+# ===========================================================================
+
+def compute_width(msb: Optional[str], lsb: Optional[str], params: Dict[str, str]) -> Optional[int]:
+    """Try to compute a concrete width from msb:lsb, substituting known params."""
+    if msb is None:
+        return 1
+    expr_msb = msb
+    expr_lsb = lsb or "0"
+    # Substitute known parameters
+    for pname, pval in params.items():
+        expr_msb = re.sub(r'\b' + re.escape(pname) + r'\b', pval, expr_msb)
+        expr_lsb = re.sub(r'\b' + re.escape(pname) + r'\b', pval, expr_lsb)
+    # Also handle CVA6Cfg.XXX → try to evaluate common patterns
+    expr_msb = re.sub(r'CVA6Cfg\.\w+', '31', expr_msb)
+    expr_lsb = re.sub(r'config_pkg::\w+', '0', expr_lsb)
+    try:
+        w = eval(expr_msb, {"__builtins__": {}}) - eval(expr_lsb, {"__builtins__": {}}) + 1
+        return max(w, 1)
+    except Exception:
+        return None
+
+
+def anvil_type_str(msb: Optional[str], lsb: Optional[str], params: Dict[str, str],
+                   custom_type: Optional[str] = None) -> str:
+    """Convert SV port width to Anvil type string."""
+    if custom_type:
+        # Custom types become concrete logic widths
+        # scoreboard_entry_t, fu_data_t etc. — use 64-bit as default
+        return "logic[64]"
+    w = compute_width(msb, lsb, params)
+    if w is not None:
+        if w == 1:
+            return "logic"
+        return f"logic[{w}]"
+    # Fallback
+    return "logic[32]"
+
+
+def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] = None,
+                    input_to_reg: Optional[Dict[str, str]] = None) -> str:
+    """Convert an SV expression to Anvil."""
+    e = expr.strip()
+    if not e:
+        return "0"
+
+    # '0 → explicit zero
+    e = re.sub(r"'\{default\s*:\s*'0\s*\}", "0", e)
+    e = re.sub(r"'0", "1'b0", e)
+    e = re.sub(r"'1", "1'b1", e)
+
+    # $signed(...) / $unsigned(...) → just the inner expression
+    e = re.sub(r"\$(?:signed|unsigned)\s*\(([^)]+)\)", r"\1", e)
+
+    # $clog2(N) → compute if possible
+    def eval_clog2(m):
+        inner = m.group(1).strip()
+        for pn, pv in params.items():
+            inner = re.sub(r'\b' + re.escape(pn) + r'\b', pv, inner)
+        try:
+            import math
+            val = eval(inner, {"__builtins__": {}})
+            return str(max(1, int(math.ceil(math.log2(val)))))
+        except Exception:
+            return f"/* $clog2({m.group(1)}) */"
+    e = re.sub(r"\$clog2\s*\(([^)]+)\)", eval_clog2, e)
+
+    # Clean up spaces around dots (from tokenizer)
+    e = re.sub(r"(\w)\s*\.\s*(\w)", r"\1.\2", e)
+    # Clean up spaces around ::
+    e = re.sub(r"\s*::\s*", "::", e)
+
+    # Package-scoped references: ariane_pkg::XXX → XXX
+    e = re.sub(r"\w+::", "", e)
+
+    # Replication {N{expr}} → comment (before concatenation)
+    e = re.sub(r"\{(\d+)\{([^}]+)\}\}",
+               lambda m: f"/* rep {m.group(1)}x{m.group(2)} */",
+               e)
+
+    # Concatenation {a, b} → #{a, b} (before ternary to avoid if-brace confusion)
+    e = re.sub(r"\{([^{}]+)\}", lambda m: f"#{{{m.group(1)}}}", e)
+
+    # Bit select [expr:expr] → truncation cast (before ternary)
+    def replace_bit_select(m_sel):
+        var = m_sel.group(1)
+        msb_expr = m_sel.group(2).strip()
+        lsb_expr = m_sel.group(3).strip()
+        for pn, pv in params.items():
+            msb_expr = re.sub(r'\b' + re.escape(pn) + r'\b', pv, msb_expr)
+            lsb_expr = re.sub(r'\b' + re.escape(pn) + r'\b', pv, lsb_expr)
+        msb_expr = re.sub(r'CVA6Cfg\.\w+', '31', msb_expr)
+        lsb_expr = re.sub(r'CVA6Cfg\.\w+', '0', lsb_expr)
+        if lsb_expr == "0":
+            mm = re.match(r"(.+?)\s*-\s*1$", msb_expr)
+            if mm:
+                width_expr = mm.group(1).strip()
+                try:
+                    w = eval(width_expr, {"__builtins__": {}})
+                    return f"<({var})::logic[{w}]>"
+                except Exception:
+                    return f"<({var})::logic[32]>"
+            try:
+                w = eval(msb_expr, {"__builtins__": {}}) + 1
+                return f"<({var})::logic[{w}]>"
+            except Exception:
+                return f"<({var})::logic[32]>"
+        return f"{var} /* [{msb_expr}:{lsb_expr}] */"
+    e = re.sub(r"(\w+(?:\.\w+)*)\s*\[\s*([^\]]+?)\s*:\s*([^\]]+?)\s*\]", replace_bit_select, e)
+
+    # SV inside operator: x inside {a, b} → x in { a, b }
+    e = re.sub(r'\binside\s*#\{', 'in {', e)
+    e = re.sub(r'\binside\s*\{', 'in {', e)
+
+    # Ternary a ? b : c → if a { b } else { c }
+    e = _convert_all_ternaries(e)
+
+    # Substitute param references
+    for pname, pval in params.items():
+        if pname not in ("CVA6Cfg",):
+            e = re.sub(r'\bCVA6Cfg\.' + re.escape(pname) + r'\b', pval, e)
+
+    # CVA6Cfg.X config references → 1'b1 (assume enabled) for boolean, 32 for sizes
+    def replace_cfg(m):
+        field = m.group(1)
+        # Common boolean config flags
+        if any(kw in field for kw in ("Enable", "Flush", "RV", "Tval", "Has", "Is", "Use")):
+            return "1'b1"
+        # Common size parameters
+        if any(kw in field for kw in ("LEN", "Width", "Depth", "Size", "Ports", "Num", "Nr")):
+            return "32"
+        return "1'b1"  # default: assume enabled
+    e = re.sub(r'CVA6Cfg\.(\w+)', replace_cfg, e)
+
+    # SV struct field access x.field → just x (Anvil doesn't have SV structs)
+    # Strip field access - use the base variable
+    e = re.sub(r'(\w+)\.\w+', r'\1', e)
+
+    # Replace input port references with register references
+    if input_to_reg:
+        for port_name, reg_name in input_to_reg.items():
+            e = re.sub(r'\b' + re.escape(port_name) + r'\b', f'*{reg_name}', e)
+
+    # Add * prefix for register references
+    if reg_names:
+        for rn in reg_names:
+            e = re.sub(r'(?<!\*)\b' + re.escape(rn) + r'\b', f'*{rn}', e)
+
     return e
 
 
-def convert_case_to_match(selector: str, items, indent: str = "    ") -> str:
-    """Convert a parsed case block to an Anvil match expression."""
-    lines = [f"{indent}match {convert_expr(selector)} {{"]
-    has_default = False
-    for pat, body in items:
-        body_stripped = body.strip().rstrip(';') if body else ''
-        am = re.match(r'(\w+(?:\[[^\]]*\])?)\s*=\s*(.+)', body_stripped)
-        if am:
-            converted_body = f'let {am.group(1)} = {convert_expr(am.group(2))}'
-        elif body:
-            converted_body = convert_expr(body)
-        else:
-            converted_body = '()'
-        if pat == "default":
-            has_default = True
-            lines.append(f"{indent}    _ => {converted_body},")
-        else:
-            lines.append(f"{indent}    {pat} => {converted_body},")
-    if not has_default:
-        lines.append(f"{indent}    _ => (),")
-    lines.append(f"{indent}}}")
-    return "\n".join(lines)
+def _convert_all_ternaries(expr: str) -> str:
+    """Recursively convert all ternary expressions in text."""
+    if "?" not in expr:
+        return expr
+    # Try at top level first
+    parts = _split_ternary(expr)
+    if parts:
+        cond, t_val, f_val = parts
+        t_val = _convert_all_ternaries(t_val.strip())
+        f_val = _convert_all_ternaries(f_val.strip())
+        return f"if {cond.strip()} {{ {t_val} }} else {{ {f_val} }}"
+    # Not at top level — scan for sub-expressions in parens that contain ?
+    result = list(expr)
+    i = 0
+    while i < len(result):
+        s = "".join(result)
+        if s[i] == "(":
+            # Find matching close paren
+            depth = 0
+            j = i
+            while j < len(s):
+                if s[j] == "(":
+                    depth += 1
+                elif s[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            inner = s[i+1:j]
+            if "?" in inner:
+                converted = _convert_all_ternaries(inner)
+                new_s = s[:i] + "(" + converted + ")" + s[j+1:]
+                result = list(new_s)
+                i = i + len(converted) + 2
+                continue
+        i += 1
+    return "".join(result)
 
 
-# ---------------------------------------------------------------------------
-# Always-block converters
-# ---------------------------------------------------------------------------
+def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
+    """Split a ternary expression respecting brackets, braces, and angle brackets."""
+    depth = 0
+    q_pos = -1
+    for i, ch in enumerate(expr):
+        if ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth -= 1
+        elif ch == "?" and depth == 0:
+            q_pos = i
+            break
 
-def _find_case_spans(inner: str) -> List[Tuple[int, int]]:
-    """Find spans of case/unique case ... endcase blocks."""
-    spans: List[Tuple[int, int]] = []
-    for m in re.finditer(r"(?:unique\s+)?case\s*\(", inner):
-        ec = inner.find("endcase", m.start())
-        if ec != -1:
-            spans.append((m.start(), ec + len("endcase")))
-    return spans
+    if q_pos == -1:
+        return None
 
+    cond = expr[:q_pos]
+    rest = expr[q_pos + 1:]
 
-def _find_if_spans(inner: str) -> List[Tuple[int, int]]:
-    """Find spans of if (...) begin...end [else begin...end] blocks."""
-    spans: List[Tuple[int, int]] = []
-    for m in re.finditer(r"\bif\s*\(", inner):
-        result = extract_if_condition(inner, m.start())
-        if not result:
-            continue
-        _, after_cond = result
-        rest = inner[after_cond:]
-        bm = re.match(r"\s*begin\b", rest)
-        if bm:
-            bp, ep = find_begin_end(inner, after_cond)
-            if bp != -1 and ep != -1:
-                end = ep
-                after_end = inner[ep:].lstrip()
-                if after_end.startswith("else"):
-                    else_start = ep + inner[ep:].index("else")
-                    bp2, ep2 = find_begin_end(inner, else_start)
-                    if bp2 != -1 and ep2 != -1:
-                        end = ep2
-                spans.append((m.start(), end))
-        else:
-            # Single-statement if: find the semicolon
-            sc = inner.find(";", after_cond)
-            if sc != -1:
-                spans.append((m.start(), sc + 1))
-    return spans
+    # Find the colon at depth 0
+    depth = 0
+    for i, ch in enumerate(rest):
+        if ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth -= 1
+        elif ch == ":" and depth == 0:
+            return (cond, rest[:i], rest[i + 1:])
+
+    return None
 
 
-def _find_structured_spans(inner: str) -> List[Tuple[int, int]]:
-    """Find all structured spans (case + if blocks)."""
-    return _find_case_spans(inner) + _find_if_spans(inner)
+def build_ir(module: SVModule) -> AnvilIR:
+    """Build Anvil IR from parsed SV module."""
+    params = {}
+    for p in module.params:
+        if not p.is_type:
+            # Try to get a concrete value
+            val = p.value.strip().rstrip(",")
+            # Clean up parameter values
+            val = re.sub(r"'0", "0", val)
+            params[p.name] = val
+
+    # Filter out clock/reset ports
+    data_ports = [p for p in module.ports if p.name not in CLK_RST_NAMES]
+    input_ports = [p for p in data_ports if p.direction == "input"]
+    output_ports = [p for p in data_ports if p.direction in ("output", "inout")]
+
+    # Build channel definitions
+    channels = []
+    endpoints = []
+
+    if input_ports:
+        in_msgs = []
+        for p in input_ports:
+            atype = anvil_type_str(p.width_msb, p.width_lsb, params,
+                                   p.type_name if p.is_custom_type else None)
+            in_msgs.append(AnvilChanMsg(name=p.name, anvil_type=atype))
+        chan_name = f"{module.name}_in_ch"
+        channels.append(AnvilChan(name=chan_name, messages=in_msgs))
+        endpoints.append(AnvilEndpoint(name="in_ep", side="left", chan_name=chan_name))
+
+    if output_ports:
+        out_msgs = []
+        for p in output_ports:
+            atype = anvil_type_str(p.width_msb, p.width_lsb, params,
+                                   p.type_name if p.is_custom_type else None)
+            out_msgs.append(AnvilChanMsg(name=p.name, anvil_type=atype))
+        chan_name = f"{module.name}_out_ch"
+        channels.append(AnvilChan(name=chan_name, messages=out_msgs))
+        endpoints.append(AnvilEndpoint(name="out_ep", side="right", chan_name=chan_name))
+
+    # Collect registers from always_ff blocks
+    regs = []
+    reg_names = set()
+
+    # Non-blocking assignment targets are registers
+    for ff in module.always_ff_blocks:
+        _collect_nba_targets(ff.main_body, reg_names)
+        _collect_nba_targets(ff.reset_body, reg_names)
+
+    # Also check signals
+    for sig in module.signals:
+        if sig.name in reg_names:
+            atype = anvil_type_str(sig.width_msb, sig.width_lsb, params)
+            regs.append(AnvilReg(name=sig.name, anvil_type=atype))
+            reg_names.discard(sig.name)  # mark as handled
+
+    # Any remaining NBA targets that weren't declared as signals
+    for rn in sorted(reg_names):
+        regs.append(AnvilReg(name=rn, anvil_type="logic[32]"))
+
+    # Determine which inputs are used vs unused
+    used_inputs = [p for p in input_ports if not _is_unused_input(p.name, module)]
+    unused_inputs = [p for p in input_ports if _is_unused_input(p.name, module)]
+
+    # Add registers for used input ports
+    input_to_reg = {}  # maps port name → register name
+    for p in used_inputs:
+        atype = anvil_type_str(p.width_msb, p.width_lsb, params,
+                               p.type_name if p.is_custom_type else None)
+        reg_name = f"r_{p.name}"
+        regs.append(AnvilReg(name=reg_name, anvil_type=atype))
+        input_to_reg[p.name] = reg_name
+
+    # Collect all register names for expression conversion
+    all_reg_names = {r.name for r in regs}
+    # Also add input reg aliases so port names get converted to *r_portname
+    # by adding the port names as "registers" with r_ prefix mapping
+    input_reg_set = set(input_to_reg.values())  # r_xxx names
+
+    # Build loop bodies
+    loop_bodies = []
+
+    # Recv loops: one loop per used input (recv → set register)
+    for p in used_inputs:
+        recv_loop = [
+            AnvilRecv(var_name=p.name, endpoint="in_ep", msg_name=p.name),
+            AnvilSet(reg_name=input_to_reg[p.name], expr=p.name),
+        ]
+        loop_bodies.append(recv_loop)
+
+    # Main loop: compute → send outputs
+    main_loop = []
+
+    # Recv unused inputs (just to consume them, single loop)
+    for p in unused_inputs:
+        main_loop.append(AnvilRecv(
+            var_name=f"_{p.name}",
+            endpoint="in_ep",
+            msg_name=p.name,
+        ))
+
+    # Collect output port names for deduplication
+    output_names = {p.name for p in output_ports}
+
+    # Process assign statements → let bindings (skip direct output assigns, handled by send)
+    for a in module.assigns:
+        lhs_name = re.match(r"(\w+)", a.lhs)
+        if lhs_name and lhs_name.group(1) in output_names:
+            continue  # handled by send
+        anvil_rhs = convert_sv_expr(a.rhs, params, all_reg_names, input_to_reg)
+        main_loop.append(AnvilLetBinding(name=a.lhs, expr=anvil_rhs))
+
+    # Process always_comb blocks → let bindings (skip output assigns)
+    for cb in module.always_comb_blocks:
+        _convert_comb_stmts(cb.stmts, main_loop, params, skip_outputs=output_names,
+                            reg_names=all_reg_names, input_to_reg=input_to_reg)
+
+    # Build output type map for properly-sized zero literals
+    output_type_map = {}
+    for p in output_ports:
+        atype = anvil_type_str(p.width_msb, p.width_lsb, params,
+                               p.type_name if p.is_custom_type else None)
+        output_type_map[p.name] = atype
+
+    # Send all outputs
+    for p in output_ports:
+        send_expr = _find_output_expr(p.name, module, params, output_type_map, all_reg_names, input_to_reg)
+        atype = output_type_map.get(p.name, "logic")
+        # Add cast if the expression is not a literal matching the type
+        cast = None
+        if not _expr_matches_type(send_expr, atype):
+            cast = atype
+        main_loop.append(AnvilSend(
+            endpoint="out_ep",
+            msg_name=p.name,
+            expr=send_expr,
+            cast_type=cast,
+        ))
+
+    # End main loop with cycle 1
+    main_loop.append(AnvilCycle(count=1))
+    loop_bodies.append(main_loop)
+
+    # Process always_ff blocks → additional loops with reg/set
+    for ff in module.always_ff_blocks:
+        ff_loop = []
+        _convert_ff_stmts(ff.main_body, ff_loop, params, all_reg_names, input_to_reg)
+        if ff_loop:
+            # Ensure the loop takes at least 1 cycle
+            if not _has_set_or_cycle(ff_loop):
+                ff_loop.append(AnvilCycle(count=1))
+            loop_bodies.append(ff_loop)
+
+    return AnvilIR(
+        module_name=module.name,
+        channels=channels,
+        endpoints=endpoints,
+        regs=regs,
+        loop_bodies=loop_bodies,
+    )
 
 
-def _pos_inside_spans(pos: int, spans: List[Tuple[int, int]]) -> bool:
-    """Check if a position falls inside any structured span."""
-    for start, end in spans:
-        if start < pos < end:
-            return True
+def _collect_nba_targets(stmts: list, targets: set):
+    """Recursively collect non-blocking assignment target names."""
+    for stmt in stmts:
+        if isinstance(stmt, SVNonBlockAssign):
+            name = re.match(r"(\w+)", stmt.lhs)
+            if name:
+                targets.add(name.group(1))
+        elif isinstance(stmt, SVIfBlock):
+            _collect_nba_targets(stmt.then_stmts, targets)
+            _collect_nba_targets(stmt.else_stmts, targets)
+        elif isinstance(stmt, SVCaseBlock):
+            for item in stmt.items:
+                _collect_nba_targets(item.stmts, targets)
+
+
+def _is_unused_input(port_name: str, module: SVModule) -> bool:
+    """Check if an input port is not used in any logic (stub pattern)."""
+    # Check assigns
+    for a in module.assigns:
+        if port_name in a.rhs:
+            return False
+    # Check always blocks
+    for cb in module.always_comb_blocks:
+        if _name_in_stmts(port_name, cb.stmts):
+            return False
+    for ff in module.always_ff_blocks:
+        if _name_in_stmts(port_name, ff.main_body):
+            return False
+    return True
+
+
+def _name_in_stmts(name: str, stmts: list) -> bool:
+    """Check if a name appears in statements."""
+    for stmt in stmts:
+        if isinstance(stmt, (SVAssign, SVNonBlockAssign)):
+            if name in stmt.rhs:
+                return True
+        elif isinstance(stmt, SVIfBlock):
+            if name in stmt.condition:
+                return True
+            if _name_in_stmts(name, stmt.then_stmts):
+                return True
+            if _name_in_stmts(name, stmt.else_stmts):
+                return True
+        elif isinstance(stmt, SVCaseBlock):
+            if name in stmt.selector:
+                return True
+            for item in stmt.items:
+                if _name_in_stmts(name, item.stmts):
+                    return True
     return False
 
 
-def _convert_if_else_block(inner: str, if_pos: int, indent: str) -> Optional[str]:
-    """Convert an if/else block structurally to Anvil."""
-    result = extract_if_condition(inner, if_pos)
-    if not result:
-        return None
-    cond_str, after_cond = result
-    cond_anvil = convert_expr(cond_str)
+def _find_output_expr(port_name: str, module: SVModule, params: Dict[str, str],
+                      output_type_map: Optional[Dict[str, str]] = None,
+                      reg_names: Optional[set] = None,
+                      input_to_reg: Optional[Dict[str, str]] = None) -> str:
+    """Find what expression drives an output port."""
+    # Check assigns
+    for a in module.assigns:
+        lhs_name = re.match(r"(\w+)", a.lhs)
+        if lhs_name and lhs_name.group(1) == port_name:
+            expr = convert_sv_expr(a.rhs, params, reg_names, input_to_reg)
+            return _fix_zero_width(expr, port_name, output_type_map)
 
-    lines = [f"{indent}if {cond_anvil} {{"]
+    # Check always_comb for blocking assignments
+    for cb in module.always_comb_blocks:
+        expr = _find_assign_in_stmts(port_name, cb.stmts, params, reg_names, input_to_reg)
+        if expr:
+            return _fix_zero_width(expr, port_name, output_type_map)
 
-    # Find the then-body
-    rest = inner[after_cond:]
-    bm = re.match(r"\s*begin\b", rest)
-    if bm:
-        bp, ep = find_begin_end(inner, after_cond)
-        if bp == -1 or ep == -1:
-            return None
-        after_begin = re.match(r"\s*begin\s*(?::\s*\w+)?\s*", inner[bp:])
-        inner_start = bp + after_begin.end() if after_begin else bp + 5
-        inner_end = ep - 3
-        then_body = inner[inner_start:inner_end].strip()
-        # Recursively convert the then-body
-        lines.append(_convert_comb_body(then_body, indent + "    "))
-        lines.append(f"{indent}}}")
-
-        # Check for else
-        after_end_str = inner[ep:].lstrip()
-        if after_end_str.startswith("else"):
-            else_start = ep + inner[ep:].index("else")
-            after_else = inner[else_start + 4:].lstrip()
-            if after_else.startswith("if"):
-                # else if — recurse
-                if_start = else_start + 4 + (len(inner[else_start + 4:]) - len(after_else))
-                else_part = _convert_if_else_block(inner, if_start, indent)
-                if else_part:
-                    # Replace the leading indent + "if" with "else if"
-                    lines[-1] = f"{indent}}} else {else_part.lstrip()}"
-            elif after_else.startswith("begin"):
-                bp2, ep2 = find_begin_end(inner, else_start + 4)
-                if bp2 != -1 and ep2 != -1:
-                    after_begin2 = re.match(r"\s*begin\s*(?::\s*\w+)?\s*", inner[bp2:])
-                    inner_start2 = bp2 + after_begin2.end() if after_begin2 else bp2 + 5
-                    inner_end2 = ep2 - 3
-                    else_body = inner[inner_start2:inner_end2].strip()
-                    lines[-1] = f"{indent}}} else {{"
-                    lines.append(_convert_comb_body(else_body, indent + "    "))
-                    lines.append(f"{indent}}}")
-            else:
-                # Single-statement else
-                sc = inner.find(";", else_start + 4)
-                if sc != -1:
-                    else_stmt = inner[else_start + 4:sc].strip()
-                    am = re.match(r"(\w+(?:\[[^\]]*\])?)\s*=\s*(.+)", else_stmt)
-                    if am:
-                        lines[-1] = f"{indent}}} else {{"
-                        lines.append(f"{indent}    let {am.group(1)} = {convert_expr(am.group(2))};")
-                        lines.append(f"{indent}}}")
-    else:
-        # Single-statement then
-        sc = inner.find(";", after_cond)
-        if sc != -1:
-            then_stmt = inner[after_cond:sc].strip()
-            am = re.match(r"(\w+(?:\[[^\]]*\])?)\s*=\s*(.+)", then_stmt)
-            if am:
-                lines.append(f"{indent}    let {am.group(1)} = {convert_expr(am.group(2))};")
-            else:
-                lines.append(f"{indent}    {convert_expr(then_stmt)};")
-        lines.append(f"{indent}}}")
-
-    return "\n".join(lines)
+    # Default: properly-sized zero
+    return _make_zero(port_name, output_type_map)
 
 
-def _convert_comb_body(inner: str, indent: str) -> str:
-    """Recursively convert an always_comb body, preserving structure."""
-    top_level_assigns: List[str] = []
-    case_lines: List[str] = []
-    if_lines: List[str] = []
-    case_spans = _find_case_spans(inner)
-    if_spans = _find_if_spans(inner)
-    all_spans = case_spans + if_spans
-
-    # 1. Collect top-level assignments NOT inside any structured span
-    #    (SV defaults — emitted first so they precede match/if blocks)
-    for am in re.finditer(r"(\w+(?:\[[^\]]*\])?)\s*=\s*([^;]+);", inner):
-        if not _pos_inside_spans(am.start(), all_spans):
-            lhs = am.group(1)
-            rhs = convert_expr(am.group(2))
-            top_level_assigns.append(f"{indent}let {lhs} = {rhs};")
-
-    # 2. Emit top-level case blocks (not inside any if-span)
-    for m in re.finditer(r"(?:unique\s+)?case\s*\(", inner):
-        if _pos_inside_spans(m.start(), if_spans):
-            continue  # inside an if block — will be handled by recursive call
-        # Also skip if inside another case block
-        if _pos_inside_spans(m.start(), [(s, e) for s, e in case_spans if s != m.start()]):
-            continue
-        ec = inner.find("endcase", m.start())
-        if ec == -1:
-            continue
-        selector_m = re.match(r"(?:unique\s+)?case\s*\(([^)]+)\)", inner[m.start():])
-        if not selector_m:
-            continue
-        # Use extract_case_blocks on just this case block region
-        case_region = inner[m.start():ec + len("endcase")]
-        for selector, items in extract_case_blocks(case_region):
-            case_lines.append(convert_case_to_match(selector, items, indent))
-
-    # 3. Emit top-level if/else blocks (not inside any other span)
-    for m in re.finditer(r"\bif\s*\(", inner):
-        if _pos_inside_spans(m.start(), [(s, e) for s, e in all_spans if s != m.start()]):
-            continue  # nested inside another structure
-        converted = _convert_if_else_block(inner, m.start(), indent)
-        if converted:
-            if_lines.append(converted)
-
-    lines = top_level_assigns + case_lines + if_lines
-
-    if not lines:
-        for l in inner.splitlines():
-            stripped = l.strip()
-            if stripped:
-                lines.append(f"{indent}// [comb] {stripped}")
-    return "\n".join(lines)
+def _fix_zero_width(expr: str, port_name: str, output_type_map: Optional[Dict[str, str]]) -> str:
+    """If expression is a zero literal but port is wider, use proper sized zero."""
+    if expr in ("1'b0", "0") and output_type_map and port_name in output_type_map:
+        return _make_zero(port_name, output_type_map)
+    return expr
 
 
-def convert_always_comb(inner: str, indent: str = "    ") -> str:
-    """Convert an always_comb body to Anvil let-bindings and match exprs.
+def _expr_matches_type(expr: str, atype: str) -> bool:
+    """Check if an expression clearly matches the expected Anvil type."""
+    # Sized literals like 32'd0 match logic[32]
+    m = re.match(r"(\d+)'[bdho]", expr)
+    if m:
+        lit_width = int(m.group(1))
+        type_m = re.match(r"logic\[(\d+)\]", atype)
+        if type_m:
+            return lit_width == int(type_m.group(1))
+        return lit_width == 1 and atype == "logic"
+    # 1'bX matches logic
+    if expr.startswith("1'b") and atype == "logic":
+        return True
+    # Expressions with cast already
+    if expr.startswith("<("):
+        return True
+    return False
 
-    Structure-aware: keeps assignments inside their case/if structures
-    instead of flattening everything to top-level let bindings.
-    """
-    return _convert_comb_body(inner, indent)
+
+def _make_zero(port_name: str, output_type_map: Optional[Dict[str, str]]) -> str:
+    """Create a properly-sized zero literal for a port."""
+    if output_type_map and port_name in output_type_map:
+        atype = output_type_map[port_name]
+        m = re.match(r"logic\[(\d+)\]", atype)
+        if m:
+            width = int(m.group(1))
+            return f"{width}'d0"
+        return "1'b0"
+    return "1'b0"
 
 
-def convert_always_ff(inner: str, indent: str = "    ") -> str:
-    """Convert an always_ff body to Anvil reg + set statements."""
+def _find_assign_in_stmts(name: str, stmts: list, params: Dict[str, str],
+                          reg_names: Optional[set] = None,
+                          input_to_reg: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """Find the first blocking assignment to name in stmts."""
+    for stmt in stmts:
+        if isinstance(stmt, SVAssign):
+            lhs_name = re.match(r"(\w+)", stmt.lhs)
+            if lhs_name and lhs_name.group(1) == name:
+                return convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg)
+        elif isinstance(stmt, SVIfBlock):
+            r = _find_assign_in_stmts(name, stmt.then_stmts, params, reg_names, input_to_reg)
+            if r:
+                return r
+            r = _find_assign_in_stmts(name, stmt.else_stmts, params, reg_names, input_to_reg)
+            if r:
+                return r
+        elif isinstance(stmt, SVCaseBlock):
+            for item in stmt.items:
+                r = _find_assign_in_stmts(name, item.stmts, params, reg_names, input_to_reg)
+                if r:
+                    return r
+    return None
+
+
+def _convert_comb_stmts(stmts: list, output: list, params: Dict[str, str],
+                        skip_outputs: Optional[set] = None,
+                        reg_names: Optional[set] = None,
+                        input_to_reg: Optional[Dict[str, str]] = None):
+    """Convert always_comb statements to Anvil IR."""
+    for stmt in stmts:
+        if isinstance(stmt, SVAssign):
+            lhs_name = re.match(r"(\w+)", stmt.lhs)
+            if skip_outputs and lhs_name and lhs_name.group(1) in skip_outputs:
+                continue
+            output.append(AnvilLetBinding(
+                name=stmt.lhs,
+                expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
+            ))
+        # If/case in always_comb: skip (too complex for auto-conversion)
+        # These need manual conversion to Anvil channel-based patterns
+
+
+def _convert_ff_stmts(stmts: list, output: list, params: Dict[str, str],
+                      reg_names: Optional[set] = None,
+                      input_to_reg: Optional[Dict[str, str]] = None):
+    """Convert always_ff statements to Anvil IR (set statements)."""
+    for stmt in stmts:
+        if isinstance(stmt, SVNonBlockAssign):
+            output.append(AnvilSet(
+                reg_name=stmt.lhs,
+                expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
+            ))
+        elif isinstance(stmt, SVIfBlock):
+            then_ir = []
+            _convert_ff_stmts(stmt.then_stmts, then_ir, params, reg_names, input_to_reg)
+            else_ir = []
+            _convert_ff_stmts(stmt.else_stmts, else_ir, params, reg_names, input_to_reg)
+            if then_ir or else_ir:
+                output.append(AnvilIf(
+                    condition=convert_sv_expr(stmt.condition, params, reg_names, input_to_reg),
+                    then_stmts=then_ir,
+                    else_stmts=else_ir,
+                ))
+        elif isinstance(stmt, SVCaseBlock):
+            arms = []
+            for item in stmt.items:
+                arm_stmts = []
+                _convert_ff_stmts(item.stmts, arm_stmts, params, reg_names, input_to_reg)
+                pat = "_" if item.pattern == "default" else convert_sv_expr(item.pattern, params, reg_names, input_to_reg)
+                arms.append((pat, arm_stmts))
+            output.append(AnvilMatch(
+                selector=convert_sv_expr(stmt.selector, params, reg_names, input_to_reg),
+                arms=arms,
+            ))
+        elif isinstance(stmt, SVAssign):
+            output.append(AnvilLetBinding(
+                name=stmt.lhs,
+                expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
+            ))
+
+
+def _has_set_or_cycle(stmts: list) -> bool:
+    """Check if statements contain a set or cycle."""
+    for s in stmts:
+        if isinstance(s, (AnvilSet, AnvilCycle)):
+            return True
+        if isinstance(s, AnvilIf):
+            if _has_set_or_cycle(s.then_stmts) and _has_set_or_cycle(s.else_stmts):
+                return True
+    return False
+
+
+# ===========================================================================
+# CODEGEN
+# ===========================================================================
+
+def codegen(ir: AnvilIR) -> str:
+    """Generate Anvil HDL from IR."""
     lines: List[str] = []
-    # Non-blocking assignments: lhs <= rhs;
-    for m in re.finditer(r"(\w+(?:\[[^\]]*\])?)\s*<=\s*([^;]+);", inner):
-        lhs = m.group(1)
-        rhs = convert_expr(m.group(2))
-        lines.append(f"{indent}set {lhs} := {rhs};")
 
-    # case blocks inside always_ff
-    for selector, items in extract_case_blocks(inner):
-        ff_items = []
-        for pat, body in items:
-            # Convert <= to set :=
-            body_c = re.sub(r"(\w+)\s*<=\s*([^;]+)", lambda m2: f"set {m2.group(1)} := {convert_expr(m2.group(2))}", body)
-            ff_items.append((pat, body_c))
-        lines.append(convert_case_to_match(selector, ff_items, indent))
+    lines.append(f"/* Anvil translation of {ir.module_name}")
+    lines.append(f"   Generated by sv2anvil.py (AST-based converter) */")
+    lines.append("")
 
-    if not lines:
-        for l in inner.splitlines():
-            lines.append(f"{indent}// [ff] {l.strip()}")
+    # Emit channel definitions
+    for chan in ir.channels:
+        lines.append(f"chan {chan.name} {{")
+        for i, msg in enumerate(chan.messages):
+            comma = "," if i < len(chan.messages) - 1 else ""
+            lines.append(f"    left {msg.name} : ({msg.anvil_type}@#1) @dyn - @dyn{comma}")
+        lines.append("}")
+        lines.append("")
+
+    # Emit proc
+    ep_parts = []
+    for ep in ir.endpoints:
+        ep_parts.append(f"    {ep.name} : {ep.side} {ep.chan_name}")
+    lines.append(f"proc {ir.module_name}(")
+    lines.append(",\n".join(ep_parts))
+    lines.append(") {")
+
+    # Emit registers
+    for reg in ir.regs:
+        lines.append(f"    reg {reg.name} : {reg.anvil_type};")
+    if ir.regs:
+        lines.append("")
+
+    # Emit loops
+    for loop_body in ir.loop_bodies:
+        lines.append("    loop {")
+        _emit_stmts(loop_body, lines, indent=8)
+        lines.append("    }")
+        lines.append("")
+
+    lines.append("}")
+    lines.append("")
+
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Main converter
-# ---------------------------------------------------------------------------
+def _emit_stmts(stmts: list, lines: List[str], indent: int):
+    """Emit a list of Anvil statements."""
+    pad = " " * indent
+    for i, stmt in enumerate(stmts):
+        seq = " >>" if i < len(stmts) - 1 else ""
 
-def strip_comments(sv: str) -> str:
-    """Remove single-line and block comments from SV source."""
-    # Remove block comments /* ... */
-    sv = re.sub(r"/\*.*?\*/", "", sv, flags=re.DOTALL)
-    # Remove single-line comments // ...
-    sv = re.sub(r"//[^\n]*", "", sv)
-    return sv
+        if isinstance(stmt, AnvilRecv):
+            lines.append(f"{pad}let {stmt.var_name} = recv {stmt.endpoint}.{stmt.msg_name}{seq}")
+        elif isinstance(stmt, AnvilSend):
+            expr = stmt.expr
+            if stmt.cast_type:
+                expr = f"<({expr})::{stmt.cast_type}>"
+            lines.append(f"{pad}send {stmt.endpoint}.{stmt.msg_name} ({expr}){seq}")
+        elif isinstance(stmt, AnvilLetBinding):
+            lines.append(f"{pad}let {stmt.name} = {stmt.expr}{seq}")
+        elif isinstance(stmt, AnvilSet):
+            lines.append(f"{pad}set {stmt.reg_name} := {stmt.expr}{seq}")
+        elif isinstance(stmt, AnvilCycle):
+            lines.append(f"{pad}cycle {stmt.count}")
+        elif isinstance(stmt, AnvilIf):
+            lines.append(f"{pad}if ({_paren_cond(stmt.condition)}) {{")
+            _emit_stmts(stmt.then_stmts, lines, indent + 4)
+            if stmt.else_stmts:
+                lines.append(f"{pad}}} else {{")
+                _emit_stmts(stmt.else_stmts, lines, indent + 4)
+            else:
+                # Every branch must take >= 1 cycle
+                lines.append(f"{pad}}} else {{")
+                lines.append(f"{pad}    cycle 1")
+            lines.append(f"{pad}}}{seq}")
+        elif isinstance(stmt, AnvilMatch):
+            lines.append(f"{pad}match ({stmt.selector}) {{")
+            for pat, arm_stmts in stmt.arms:
+                if arm_stmts:
+                    arm_text = _stmts_to_inline(arm_stmts)
+                    lines.append(f"{pad}    {pat} => {arm_text},")
+                else:
+                    lines.append(f"{pad}    {pat} => cycle 1,")
+            lines.append(f"{pad}}}{seq}")
 
+
+def _paren_cond(cond: str) -> str:
+    """Ensure condition doesn't have redundant outer parens."""
+    c = cond.strip()
+    if c.startswith("(") and c.endswith(")"):
+        return c[1:-1]
+    return c
+
+
+def _stmts_to_inline(stmts: list) -> str:
+    """Convert simple statements to inline text for match arms."""
+    parts = []
+    for s in stmts:
+        if isinstance(s, AnvilSet):
+            parts.append(f"set {s.reg_name} := {s.expr}")
+        elif isinstance(s, AnvilLetBinding):
+            parts.append(f"let {s.name} = {s.expr}")
+        elif isinstance(s, AnvilCycle):
+            parts.append(f"cycle {s.count}")
+        else:
+            parts.append("/* complex */")
+    return " >> ".join(parts) if parts else "cycle 1"
+
+
+# ===========================================================================
+# MAIN
+# ===========================================================================
 
 def convert_sv_to_anvil(sv_source: str) -> str:
-    """Convert a SystemVerilog source string to Anvil HDL."""
-    out: List[str] = []
+    """Full pipeline: lex → parse → IR → codegen."""
+    tokens = lex(sv_source)
+    parser = Parser(tokens)
+    module = parser.parse_module()
 
-    # Strip comments to avoid false matches (e.g., "module" in comments)
-    sv_clean = strip_comments(sv_source)
+    for w in parser.warnings:
+        print(f"WARNING: {w}", file=sys.stderr)
 
-    # --- Extract module name ------------------------------------------------
-    mod_m = re.search(r"\bmodule\s+(\w+)", sv_clean)
-    if not mod_m:
-        warn("No module declaration found")
-        return "// sv2anvil: no module found in input\n"
-    module_name = mod_m.group(1)
-
-    # --- Find module body boundaries ----------------------------------------
-    # SV modules use ); ... endmodule (not brace-delimited)
-    # Find the port-list closing ");".  We need the *last* ); before the
-    # first signal/assign/always/generate statement to avoid matching ");'
-    # inside expressions.  Strategy: find "); " that is followed by a newline
-    # at the start of a line (the true port-list terminator).
-    port_end = -1
-    search_start = mod_m.end()
-    while True:
-        idx = sv_clean.find(");", search_start)
-        if idx == -1:
-            break
-        # Check that this ); is at the end of a line (module port list)
-        rest = sv_clean[idx + 2 : idx + 4]
-        if rest.startswith("\n") or rest.startswith("\r") or idx + 2 >= len(sv_clean):
-            port_end = idx
-            break
-        search_start = idx + 2
-
-    if port_end == -1:
-        warn("Cannot find module port list terminator );")
-        return f"// sv2anvil: cannot parse module {module_name}\n"
-
-    body_start = port_end + 2
-    body_end_m = re.search(r"\bendmodule\b", sv_clean[body_start:])
-    if body_end_m:
-        body = sv_clean[body_start : body_start + body_end_m.start()]
-    else:
-        body = sv_clean[body_start:]
-    # Port block is between module declaration and );
-    port_block = sv_clean[mod_m.end() : port_end]
-
-    # --- Parameters ---------------------------------------------------------
-    params = _PARAM_RE.findall(sv_clean[mod_m.start() : mod_m.start() + len(port_block) + 200])
-    if params:
-        out.append(f"// Parameters (from SV — adapt manually):")
-        for pname, pval in params:
-            out.append(f"// param {pname} = {pval.strip()}")
-        out.append("")
-
-    # --- Imports / package references ---------------------------------------
-    for im in re.finditer(r"import\s+([\w:*]+)\s*;", sv_clean):
-        out.append(f"// import {im.group(1)} (SV package — adapt manually)")
-    if re.search(r"import\s+", sv_clean):
-        out.append("")
-
-    # --- Parse ports --------------------------------------------------------
-    ports = parse_ports(port_block)
-    # Filter out clk/rst
-    anvil_ports = [p for p in ports if not is_clk_or_rst(p.name)]
-    clk_rst_ports = [p for p in ports if is_clk_or_rst(p.name)]
-    if clk_rst_ports:
-        out.append("// Clock/reset ports removed (implicit in Anvil):")
-        for p in clk_rst_ports:
-            out.append(f"//   {p.raw.strip()}")
-        out.append("")
-
-    # Build endpoint list
-    endpoints: List[str] = []
-    for p in anvil_ports:
-        # input → right (data flows in), output → left (data flows out)
-        if p.direction == "input":
-            ep_dir = "right"
-        elif p.direction == "output":
-            ep_dir = "left"
-        else:
-            ep_dir = "left"  # inout → left with a warning
-            warn(f"inout port '{p.name}' mapped to 'left' — review manually")
-        # For a basic converter, we define a simple channel class per port
-        endpoints.append(f"    {p.name} : {ep_dir} {p.width_type}")
-
-    # --- Emit proc ----------------------------------------------------------
-    ep_str = ",\n".join(endpoints)
-    out.append(f"proc {module_name} (")
-    out.append(ep_str)
-    out.append(") {")
-
-    # --- Parse and emit signals (let bindings) ------------------------------
-    # Classify signals: sequential (non-blocking <=) → reg, combinational → skip (let binding)
-    sequential_signals: set = set()
-    for nba in re.finditer(r"(\w+)\s*<=\s*", body):
-        sequential_signals.add(nba.group(1))
-    # Also check always_ff blocks for non-blocking targets
-    for kind, _label, inner in extract_always_blocks(body):
-        if kind == "ff":
-            for nba in re.finditer(r"(\w+)\s*<=\s*", inner):
-                sequential_signals.add(nba.group(1))
-
-    signals = parse_signals(body)
-    reg_signals = [s for s in signals if s.name in sequential_signals]
-    if reg_signals:
-        out.append("    // Signal declarations (sequential)")
-        for sig in reg_signals:
-            out.append(f"    reg {sig.name} : {sig.width_type};")
-        out.append("")
-    comb_signals = [s for s in signals if s.name not in sequential_signals]
-    if comb_signals:
-        out.append("    // Combinational signals (use let bindings, no reg)")
-        for sig in comb_signals:
-            out.append(f"    // let {sig.name} : {sig.width_type};  // assigned via let")
-        out.append("")
-
-    # --- Assign statements → let bindings -----------------------------------
-    assigns = _ASSIGN_RE.findall(body)
-    if assigns:
-        out.append("    // Combinational assignments")
-        for lhs, rhs in assigns:
-            out.append(f"    let {lhs} = {convert_expr(rhs)};")
-        out.append("")
-
-    # --- Generate blocks → comments + unrolled if simple --------------------
-    for gm in re.finditer(r"\bgenerate\b", body):
-        eg = body.find("endgenerate", gm.end())
-        if eg == -1:
-            continue
-        gen_body = body[gm.end() : eg]
-        out.append("    // [generate block — review and convert manually]")
-        for line in gen_body.strip().splitlines():
-            sl = line.strip()
-            if sl:
-                out.append(f"    // {sl}")
-        out.append("")
-
-    # --- Always blocks ------------------------------------------------------
-    for kind, label, inner in extract_always_blocks(body):
-        if label:
-            out.append(f"    // always_{kind} : {label}")
-        else:
-            out.append(f"    // always_{kind}")
-        if kind == "comb":
-            out.append(convert_always_comb(inner, "    "))
-        else:
-            out.append("    loop {")
-            out.append(convert_always_ff(inner, "        "))
-            out.append("    }")
-        out.append("")
-
-    # --- Sub-module instantiations → spawn ----------------------------------
-    # Pattern: module_name #(...) instance_name (...);
-    inst_re = re.compile(r"(\w+)\s*#\s*\(([^)]*)\)\s*(\w+)\s*\(([^)]*)\)\s*;", re.DOTALL)
-    for im in inst_re.finditer(body):
-        mod = im.group(1)
-        params_str = im.group(2).strip()
-        inst = im.group(3)
-        conn_str = im.group(4).strip()
-        out.append(f"    // Instantiation: {mod} {inst}")
-        out.append(f"    spawn {mod} /* {params_str} */ (")
-        # Convert .port(signal) connections
-        for cm in re.finditer(r"\.(\w+)\s*\(([^)]*)\)", conn_str):
-            pname, sig = cm.group(1), cm.group(2).strip()
-            out.append(f"        {pname} = {sig},")
-        out.append(f"    );  // {inst}")
-        out.append("")
-
-    # --- Conditional generate (if blocks at module level) -------------------
-    # e.g., if (CVA6Cfg.RVB) begin : gen_bitmanip ... end
-    for cg in re.finditer(r"\bif\s*\(", body):
-        result = extract_if_condition(body, cg.start())
-        if not result:
-            continue
-        cond, after_cond = result
-        # Check for begin with optional label after the condition
-        rest_after = body[after_cond:]
-        lm = re.match(r"\s*begin\s*(?::\s*(\w+))?\s*\n", rest_after)
-        if not lm:
-            continue
-        label = lm.group(1) or ""
-        out.append(f"    // Conditional block: if ({cond}) {label}")
-        # Find matching end
-        cg_open, cg_close = find_balanced_braces(body, cg.start())
-        if cg_open != -1 and cg_close != -1:
-            inner_cg = body[cg_open + 1 : cg_close]
-            # Check for sub-module instantiations inside
-            for im in inst_re.finditer(inner_cg):
-                mod = im.group(1)
-                inst = im.group(3)
-                out.append(f"    // spawn {mod} ({inst}) — inside conditional, review manually")
-        out.append("")
-
-    out.append("}")
-    out.append("")
-
-    return "\n".join(out)
+    ir = build_ir(module)
+    return codegen(ir)
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-def main() -> None:
+def main():
     if len(sys.argv) < 2:
         print("Usage: python3 sv2anvil.py <input.sv> [output.anvil]", file=sys.stderr)
         sys.exit(1)
