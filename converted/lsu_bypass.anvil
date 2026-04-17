@@ -117,10 +117,12 @@ proc lsu_bypass (                                   // [AUTO]
     // In SV, if both pop_ld and pop_st fire, read_pointer increments twice (net 0),
     // and status_cnt decrements twice. If only one pops, single increment/decrement.
     let pop_count = if pop_both { 2'b10 } else if pop_any { 2'b01 } else { 2'b00 };  // [MANUAL]
-    let read_pointer_after_pop = if pop_any {
-        read_pointer_base ^ 1'b1                                            // [MANUAL] 1-bit toggle (works for single pop; both pops net-zero handled by flush-like clear)
+    let read_pointer_after_pop = if pop_both {
+        read_pointer_base                                                   // [MANUAL] both pop: +2 mod 2 = no change
+    } else if pop_any {
+        read_pointer_base ^ 1'b1                                            // [MANUAL] single pop: toggle
     } else {
-        read_pointer_base                                                   // [MANUAL]
+        read_pointer_base                                                   // [MANUAL] no pop: no change
     };
     let status_cnt_after_pop = status_cnt_after_write - pop_count;          // [MANUAL]
 
