@@ -1240,8 +1240,14 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     if not e:
         return "0"
 
-    # '0 → explicit zero
+    # '{default: expr} → just the expr (or 0)
     e = re.sub(r"'\{default\s*:\s*'0\s*\}", "0", e)
+    e = re.sub(r"'\{default\s*:\s*([^}]+)\s*\}", r"\1", e)
+    # Also handle bare ' { default : ... } after tokenization (spaces around braces)
+    e = re.sub(r"'\s*\{\s*default\s*:\s*([^}]+)\s*\}", r"\1", e)
+    # Handle leftover "default : value" patterns
+    e = re.sub(r"\bdefault\s*:\s*", "", e)
+    # '0 → explicit zero
     e = re.sub(r"'0", "1'b0", e)
     e = re.sub(r"'1", "1'b1", e)
 
@@ -1285,6 +1291,26 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
         except Exception:
             return f"/* $clog2({m.group(1)}) */"
     e = re.sub(r"\$clog2\s*\(([^)]+)\)", eval_clog2, e)
+
+    # $bits(X) → try to compute, else default to 32
+    def eval_bits(m):
+        inner = m.group(1).strip()
+        for pn, pv in params.items():
+            inner = re.sub(r'\b' + re.escape(pn) + r'\b', pv, inner)
+        try:
+            val = eval(inner, {"__builtins__": {}})
+            return str(val)
+        except Exception:
+            return "32"
+    e = re.sub(r"\$bits\s*\(([^)]+)\)", eval_bits, e)
+
+    # Strip any remaining $-prefixed function calls: $func(...) → 0
+    def strip_dollar_func(m):
+        return "0"
+    e = re.sub(r"\$\w+\s*\([^)]*\)", strip_dollar_func, e)
+
+    # Strip bare $identifiers that remain
+    e = re.sub(r"\$\w+", "0", e)
 
     # Clean up spaces around dots (from tokenizer)
     e = re.sub(r"(\w)\s*\.\s*(\w)", r"\1.\2", e)
@@ -1456,10 +1482,13 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     # Ternary a ? b : c → if a { b } else { c }
     e = _convert_all_ternaries(e)
 
-    # Substitute param references
+    # Substitute param references (CVA6Cfg.X and bare param names)
     for pname, pval in params.items():
         if pname not in ("CVA6Cfg",):
             e = re.sub(r'\bCVA6Cfg\.' + re.escape(pname) + r'\b', pval, e)
+            # Also substitute bare param/enum names, but not inside sized literals
+            # Avoid matching inside N'bXXX patterns by requiring no preceding apostrophe
+            e = re.sub(r"(?<!')" + r'\b' + re.escape(pname) + r'\b', pval, e)
 
     # CVA6Cfg.X config references → 1'b1 (assume enabled) for boolean, 32 for sizes
     def replace_cfg(m):
@@ -1472,6 +1501,9 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
             return "32"
         return "1'b1"  # default: assume enabled
     e = re.sub(r'CVA6Cfg\.(\w+)', replace_cfg, e)
+
+    # SV type casts: type_name(expr) → expr (strip cast function calls)
+    e = re.sub(r'\b\w+_t\s*\(\s*([^)]+)\s*\)', r'\1', e)
 
     # SV struct field access x.field → just x (Anvil doesn't have SV structs)
     # Strip field access - use the base variable
@@ -1487,8 +1519,17 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
         for rn in reg_names:
             e = re.sub(r'(?<!\*)\b' + re.escape(rn) + r'\b', f'*{rn}', e)
 
+    # Strip field access after register refs: *r_foo.bar → *r_foo
+    e = re.sub(r'(\*\w+)\.\w+', r'\1', e)
+    # Also strip any remaining field access: foo.bar → foo
+    e = re.sub(r'(\w+)\.\w+', r'\1', e)
+
     # Arithmetic right shift >>> → >> (Anvil only has >>)
     e = e.replace(">>>", ">>")
+
+    # SV negation ! → Anvil ~ (Anvil uses ~ for logical/bitwise NOT)
+    # Replace standalone ! but not != (already handled as NEQ)
+    e = re.sub(r'!(?!=)', '~', e)
 
     # Simplify arithmetic expressions in type widths: logic[32 + 1] → logic[33]
     def _eval_type_width(m):
@@ -1499,6 +1540,42 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
         except Exception:
             return m.group(0)
     e = re.sub(r'logic\[([^\]]+)\]', _eval_type_width, e)
+
+    # Convert remaining unsized tick literals (without size prefix) to integers
+    # Don't touch properly sized literals like 32'h0, 1'b1 — these are valid Anvil
+    # Only convert bare 'bXXX, 'hXXX (without leading digit+')
+    def _convert_unsized_lit(m):
+        prefix = m.group(1)  # may be empty or a digit
+        base = m.group(2)
+        digits = m.group(3)
+        if prefix:
+            # This is a sized literal like 1'b1 — keep as-is
+            return m.group(0)
+        # Unsized literal
+        try:
+            if base == 'b':
+                return str(int(digits, 2))
+            elif base == 'h':
+                return str(int(digits, 16))
+            elif base == 'd':
+                return digits
+            elif base == 'o':
+                return str(int(digits, 8))
+        except ValueError:
+            pass
+        return "0"
+    e = re.sub(r"(\d*)'([bdho])([0-9a-fA-F_xXzZ]+)", _convert_unsized_lit, e)
+
+    # Strip bare tick that's not part of a sized literal (leftover from tick-default etc.)
+    # Don't strip N' or 'b/'h/'d/'o (sized literal prefixes)
+    e = re.sub(r"(?<!\d)'\s*(?=[^0-9bdho])", "", e)
+
+    # Clean up string literals "..." → 0 (Anvil doesn't support string values in logic)
+    e = re.sub(r'"[^"]*"', "0", e)
+
+    # Clean up remaining ternary ? : that wasn't caught
+    if '?' in e:
+        e = _convert_all_ternaries(e)
 
     return e
 
@@ -1547,9 +1624,14 @@ def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
     depth = 0
     q_pos = -1
     for i, ch in enumerate(expr):
-        if ch in "([{<":
+        if ch in "([{":
             depth += 1
-        elif ch in ")]}>":
+        elif ch == "<" and i + 1 < len(expr) and expr[i + 1] == "(":
+            # Cast syntax <(...)::type> — treat as bracket
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ">" and depth > 0:
             depth -= 1
         elif ch == "?" and depth == 0:
             q_pos = i
@@ -1564,14 +1646,36 @@ def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
     # Find the colon at depth 0
     depth = 0
     for i, ch in enumerate(rest):
-        if ch in "([{<":
+        if ch in "([{":
             depth += 1
-        elif ch in ")]}>":
+        elif ch == "<" and i + 1 < len(rest) and rest[i + 1] == "(":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ">" and depth > 0:
             depth -= 1
         elif ch == ":" and depth == 0:
+            # Make sure this isn't part of :: (scope operator)
+            if i + 1 < len(rest) and rest[i + 1] == ":":
+                continue
             return (cond, rest[:i], rest[i + 1:])
 
     return None
+
+
+def _collect_enum_values(stmts: list, enums: set):
+    """Collect all identifiers used as case patterns (likely enum values)."""
+    for stmt in stmts:
+        if isinstance(stmt, SVCaseBlock):
+            for item in stmt.items:
+                if item.pattern != "default":
+                    # Extract identifiers from pattern
+                    ids = re.findall(r'\b([a-zA-Z_]\w*)\b', item.pattern)
+                    enums.update(ids)
+                _collect_enum_values(item.stmts, enums)
+        elif isinstance(stmt, SVIfBlock):
+            _collect_enum_values(stmt.then_stmts, enums)
+            _collect_enum_values(stmt.else_stmts, enums)
 
 
 def build_ir(module: SVModule) -> AnvilIR:
@@ -1584,6 +1688,26 @@ def build_ir(module: SVModule) -> AnvilIR:
             # Clean up parameter values
             val = re.sub(r"'0", "0", val)
             params[p.name] = val
+
+    # Collect enum values from case blocks and assign integer constants
+    enum_values = set()
+    for cb in module.always_comb_blocks:
+        _collect_enum_values(cb.stmts, enum_values)
+    for ff in module.always_ff_blocks:
+        _collect_enum_values(ff.main_body, enum_values)
+        _collect_enum_values(ff.reset_body, enum_values)
+
+    # Assign integer values to enum identifiers that aren't already parameters
+    port_names = {p.name for p in module.ports}
+    signal_names = {s.name for s in module.signals}
+    known_names = set(params.keys()) | port_names | signal_names
+    enum_counter = 0
+    enum_list = sorted(enum_values - known_names)
+    # Use 32-bit width for enum values to match common register sizes
+    for ev in enum_list:
+        if not ev.startswith(("logic", "wire", "reg")):
+            params[ev] = f"32'd{enum_counter}"
+            enum_counter += 1
 
     # Filter out clock/reset ports
     data_ports = [p for p in module.ports if p.name not in CLK_RST_NAMES]
@@ -1622,6 +1746,26 @@ def build_ir(module: SVModule) -> AnvilIR:
     for ff in module.always_ff_blocks:
         _collect_nba_targets(ff.main_body, reg_names)
         _collect_nba_targets(ff.reset_body, reg_names)
+
+    # Cross-scope variable promotion: variables written in always_comb and
+    # read in always_ff must be promoted to regs (let is loop-scoped)
+    comb_written = set()
+    for cb in module.always_comb_blocks:
+        _collect_assign_targets(cb.stmts, comb_written)
+    for a in module.assigns:
+        lhs_name = re.match(r"(\w+)", a.lhs)
+        if lhs_name:
+            comb_written.add(lhs_name.group(1))
+
+    ff_read = set()
+    for ff in module.always_ff_blocks:
+        _collect_read_names(ff.main_body, ff_read)
+        _collect_read_names(ff.reset_body, ff_read)
+
+    cross_scope_vars = comb_written & ff_read - reg_names
+
+    # Add cross-scope vars to reg_names
+    reg_names |= cross_scope_vars
 
     # Also check signals
     for sig in module.signals:
@@ -1684,12 +1828,13 @@ def build_ir(module: SVModule) -> AnvilIR:
         if lhs_name and lhs_name.group(1) in output_names:
             continue  # handled by send
         anvil_rhs = convert_sv_expr(a.rhs, params, all_reg_names, input_to_reg)
-        main_loop.append(AnvilLetBinding(name=a.lhs, expr=anvil_rhs))
+        main_loop.append(AnvilLetBinding(name=_sanitize_lhs(a.lhs), expr=anvil_rhs))
 
     # Process always_comb blocks → let bindings (skip output assigns)
     for cb in module.always_comb_blocks:
         _convert_comb_stmts(cb.stmts, main_loop, params, skip_outputs=output_names,
-                            reg_names=all_reg_names, input_to_reg=input_to_reg)
+                            reg_names=all_reg_names, input_to_reg=input_to_reg,
+                            cross_scope_regs=cross_scope_vars)
 
     # Build output type map for properly-sized zero literals
     output_type_map = {}
@@ -1737,18 +1882,54 @@ def build_ir(module: SVModule) -> AnvilIR:
 
 
 def _collect_nba_targets(stmts: list, targets: set):
-    """Recursively collect non-blocking assignment target names."""
+    """Recursively collect non-blocking assignment target names (sanitized)."""
     for stmt in stmts:
         if isinstance(stmt, SVNonBlockAssign):
-            name = re.match(r"(\w+)", stmt.lhs)
-            if name:
-                targets.add(name.group(1))
+            targets.add(_sanitize_lhs(stmt.lhs))
         elif isinstance(stmt, SVIfBlock):
             _collect_nba_targets(stmt.then_stmts, targets)
             _collect_nba_targets(stmt.else_stmts, targets)
         elif isinstance(stmt, SVCaseBlock):
             for item in stmt.items:
                 _collect_nba_targets(item.stmts, targets)
+
+
+def _collect_assign_targets(stmts: list, targets: set):
+    """Recursively collect blocking assignment target names from always_comb."""
+    for stmt in stmts:
+        if isinstance(stmt, SVAssign):
+            name = re.match(r"(\w+)", stmt.lhs)
+            if name:
+                targets.add(name.group(1))
+                targets.add(_sanitize_lhs(stmt.lhs))
+        elif isinstance(stmt, SVIfBlock):
+            _collect_assign_targets(stmt.then_stmts, targets)
+            _collect_assign_targets(stmt.else_stmts, targets)
+        elif isinstance(stmt, SVCaseBlock):
+            for item in stmt.items:
+                _collect_assign_targets(item.stmts, targets)
+
+
+def _collect_read_names(stmts: list, names: set):
+    """Recursively collect all identifier names read in statements."""
+    for stmt in stmts:
+        if isinstance(stmt, SVNonBlockAssign):
+            # RHS identifiers are reads
+            ids = re.findall(r'\b([a-zA-Z_]\w*)\b', stmt.rhs)
+            names.update(ids)
+        elif isinstance(stmt, SVAssign):
+            ids = re.findall(r'\b([a-zA-Z_]\w*)\b', stmt.rhs)
+            names.update(ids)
+        elif isinstance(stmt, SVIfBlock):
+            ids = re.findall(r'\b([a-zA-Z_]\w*)\b', stmt.condition)
+            names.update(ids)
+            _collect_read_names(stmt.then_stmts, names)
+            _collect_read_names(stmt.else_stmts, names)
+        elif isinstance(stmt, SVCaseBlock):
+            ids = re.findall(r'\b([a-zA-Z_]\w*)\b', stmt.selector)
+            names.update(ids)
+            for item in stmt.items:
+                _collect_read_names(item.stmts, names)
 
 
 def _is_unused_input(port_name: str, module: SVModule) -> bool:
@@ -1794,18 +1975,32 @@ def _find_output_expr(port_name: str, module: SVModule, params: Dict[str, str],
                       reg_names: Optional[set] = None,
                       input_to_reg: Optional[Dict[str, str]] = None) -> str:
     """Find what expression drives an output port."""
-    # Check assigns
-    for a in module.assigns:
-        lhs_name = re.match(r"(\w+)", a.lhs)
-        if lhs_name and lhs_name.group(1) == port_name:
-            expr = convert_sv_expr(a.rhs, params, reg_names, input_to_reg)
-            return _fix_zero_width(expr, port_name, output_type_map)
+    output_names = set(output_type_map.keys()) if output_type_map else set()
 
-    # Check always_comb for blocking assignments
+    # Check assigns - only exact LHS matches (not struct field assignments)
+    for a in module.assigns:
+        lhs_clean = a.lhs.strip()
+        if lhs_clean == port_name:
+            expr = convert_sv_expr(a.rhs, params, reg_names, input_to_reg)
+            expr = _fix_zero_width(expr, port_name, output_type_map)
+            # If expression references another output port name, resolve it
+            for oname in output_names:
+                if oname != port_name and re.search(r'\b' + re.escape(oname) + r'\b', expr):
+                    # Recursively find that output's expression
+                    sub_expr = _find_output_expr(oname, module, params, output_type_map,
+                                                 reg_names, input_to_reg)
+                    expr = re.sub(r'\b' + re.escape(oname) + r'\b', sub_expr, expr)
+            return expr
+
+    # Check always_comb for blocking assignments (exact match only)
     for cb in module.always_comb_blocks:
-        expr = _find_assign_in_stmts(port_name, cb.stmts, params, reg_names, input_to_reg)
+        expr = _find_assign_in_stmts(port_name, cb.stmts, params, reg_names, input_to_reg, exact=True)
         if expr:
             return _fix_zero_width(expr, port_name, output_type_map)
+
+    # Check if output is a register (set in always_ff)
+    if reg_names and port_name in reg_names:
+        return f"*{port_name}"
 
     # Default: properly-sized zero
     return _make_zero(port_name, output_type_map)
@@ -1851,44 +2046,109 @@ def _make_zero(port_name: str, output_type_map: Optional[Dict[str, str]]) -> str
 
 def _find_assign_in_stmts(name: str, stmts: list, params: Dict[str, str],
                           reg_names: Optional[set] = None,
-                          input_to_reg: Optional[Dict[str, str]] = None) -> Optional[str]:
+                          input_to_reg: Optional[Dict[str, str]] = None,
+                          exact: bool = False) -> Optional[str]:
     """Find the first blocking assignment to name in stmts."""
     for stmt in stmts:
         if isinstance(stmt, SVAssign):
-            lhs_name = re.match(r"(\w+)", stmt.lhs)
-            if lhs_name and lhs_name.group(1) == name:
-                return convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg)
+            if exact:
+                if stmt.lhs.strip() == name:
+                    return convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg)
+            else:
+                lhs_name = re.match(r"(\w+)", stmt.lhs)
+                if lhs_name and lhs_name.group(1) == name:
+                    return convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg)
         elif isinstance(stmt, SVIfBlock):
-            r = _find_assign_in_stmts(name, stmt.then_stmts, params, reg_names, input_to_reg)
+            r = _find_assign_in_stmts(name, stmt.then_stmts, params, reg_names, input_to_reg, exact)
             if r:
                 return r
-            r = _find_assign_in_stmts(name, stmt.else_stmts, params, reg_names, input_to_reg)
+            r = _find_assign_in_stmts(name, stmt.else_stmts, params, reg_names, input_to_reg, exact)
             if r:
                 return r
         elif isinstance(stmt, SVCaseBlock):
             for item in stmt.items:
-                r = _find_assign_in_stmts(name, item.stmts, params, reg_names, input_to_reg)
+                r = _find_assign_in_stmts(name, item.stmts, params, reg_names, input_to_reg, exact)
                 if r:
                     return r
     return None
 
 
+def _sanitize_lhs(name: str) -> str:
+    """Sanitize an LHS name for Anvil let bindings.
+
+    Strips array indices [N] and field access .field since Anvil let bindings
+    only support simple identifiers. E.g. 'x[0]' → 'x_0', 'x.field' → 'x_field'.
+    """
+    # Replace [expr] with _expr (simplified)
+    name = re.sub(r'\s*\[\s*([^\]]*?)\s*\]', lambda m: '_' + re.sub(r'\W+', '_', m.group(1).strip()), name)
+    # Replace .field with _field
+    name = re.sub(r'\s*\.\s*', '_', name)
+    # Remove any remaining non-identifier characters
+    name = re.sub(r'[^\w]', '_', name)
+    # Ensure it starts with a letter or underscore
+    if name and name[0].isdigit():
+        name = '_' + name
+    return name
+
+
 def _convert_comb_stmts(stmts: list, output: list, params: Dict[str, str],
                         skip_outputs: Optional[set] = None,
                         reg_names: Optional[set] = None,
-                        input_to_reg: Optional[Dict[str, str]] = None):
+                        input_to_reg: Optional[Dict[str, str]] = None,
+                        cross_scope_regs: Optional[set] = None):
     """Convert always_comb statements to Anvil IR."""
     for stmt in stmts:
         if isinstance(stmt, SVAssign):
             lhs_name = re.match(r"(\w+)", stmt.lhs)
             if skip_outputs and lhs_name and lhs_name.group(1) in skip_outputs:
                 continue
-            output.append(AnvilLetBinding(
-                name=stmt.lhs,
-                expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
-            ))
-        # If/case in always_comb: skip (too complex for auto-conversion)
-        # These need manual conversion to Anvil channel-based patterns
+            base_name = lhs_name.group(1) if lhs_name else None
+            rhs_expr = convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg)
+            # Cross-scope variables → set (reg) instead of let
+            if cross_scope_regs and base_name and base_name in cross_scope_regs:
+                output.append(AnvilSet(
+                    reg_name=_sanitize_lhs(stmt.lhs),
+                    expr=rhs_expr,
+                ))
+            else:
+                output.append(AnvilLetBinding(
+                    name=_sanitize_lhs(stmt.lhs),
+                    expr=rhs_expr,
+                ))
+        elif isinstance(stmt, SVIfBlock):
+            # Convert if/case in always_comb for cross-scope variables
+            if cross_scope_regs:
+                then_ir = []
+                _convert_comb_stmts(stmt.then_stmts, then_ir, params,
+                                    skip_outputs=skip_outputs, reg_names=reg_names,
+                                    input_to_reg=input_to_reg,
+                                    cross_scope_regs=cross_scope_regs)
+                else_ir = []
+                _convert_comb_stmts(stmt.else_stmts, else_ir, params,
+                                    skip_outputs=skip_outputs, reg_names=reg_names,
+                                    input_to_reg=input_to_reg,
+                                    cross_scope_regs=cross_scope_regs)
+                if then_ir or else_ir:
+                    output.append(AnvilIf(
+                        condition=convert_sv_expr(stmt.condition, params, reg_names, input_to_reg),
+                        then_stmts=then_ir,
+                        else_stmts=else_ir,
+                    ))
+        elif isinstance(stmt, SVCaseBlock):
+            if cross_scope_regs:
+                arms = []
+                for item in stmt.items:
+                    arm_stmts = []
+                    _convert_comb_stmts(item.stmts, arm_stmts, params,
+                                        skip_outputs=skip_outputs, reg_names=reg_names,
+                                        input_to_reg=input_to_reg,
+                                        cross_scope_regs=cross_scope_regs)
+                    pat = "_" if item.pattern == "default" else convert_sv_expr(item.pattern, params, reg_names, input_to_reg)
+                    arms.append((pat, arm_stmts))
+                output.append(AnvilMatch(
+                    selector=convert_sv_expr(stmt.selector, params, reg_names, input_to_reg),
+                    arms=arms,
+                ))
 
 
 def _convert_ff_stmts(stmts: list, output: list, params: Dict[str, str],
@@ -1898,7 +2158,7 @@ def _convert_ff_stmts(stmts: list, output: list, params: Dict[str, str],
     for stmt in stmts:
         if isinstance(stmt, SVNonBlockAssign):
             output.append(AnvilSet(
-                reg_name=stmt.lhs,
+                reg_name=_sanitize_lhs(stmt.lhs),
                 expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
             ))
         elif isinstance(stmt, SVIfBlock):
@@ -1925,7 +2185,7 @@ def _convert_ff_stmts(stmts: list, output: list, params: Dict[str, str],
             ))
         elif isinstance(stmt, SVAssign):
             output.append(AnvilLetBinding(
-                name=stmt.lhs,
+                name=_sanitize_lhs(stmt.lhs),
                 expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
             ))
 
@@ -2010,7 +2270,10 @@ def _emit_stmts(stmts: list, lines: List[str], indent: int):
             lines.append(f"{pad}cycle {stmt.count}")
         elif isinstance(stmt, AnvilIf):
             lines.append(f"{pad}if ({_paren_cond(stmt.condition)}) {{")
-            _emit_stmts(stmt.then_stmts, lines, indent + 4)
+            if stmt.then_stmts:
+                _emit_stmts(stmt.then_stmts, lines, indent + 4)
+            else:
+                lines.append(f"{pad}    cycle 1")
             if stmt.else_stmts:
                 lines.append(f"{pad}}} else {{")
                 _emit_stmts(stmt.else_stmts, lines, indent + 4)
@@ -2021,13 +2284,44 @@ def _emit_stmts(stmts: list, lines: List[str], indent: int):
             lines.append(f"{pad}}}{seq}")
         elif isinstance(stmt, AnvilMatch):
             lines.append(f"{pad}match ({stmt.selector}) {{")
-            for pat, arm_stmts in stmt.arms:
+            for ai, (pat, arm_stmts) in enumerate(stmt.arms):
+                is_last = (ai == len(stmt.arms) - 1)
+                comma = "" if is_last else ","
+                # Convert comma-separated patterns to | syntax
+                pat_fixed = _fix_match_pattern(pat)
                 if arm_stmts:
                     arm_text = _stmts_to_inline(arm_stmts)
-                    lines.append(f"{pad}    {pat} => {arm_text},")
+                    lines.append(f"{pad}    {pat_fixed} => {arm_text}{comma}")
                 else:
-                    lines.append(f"{pad}    {pat} => cycle 1,")
+                    lines.append(f"{pad}    {pat_fixed} => cycle 1{comma}")
             lines.append(f"{pad}}}{seq}")
+
+
+def _fix_match_pattern(pat: str) -> str:
+    """Convert comma-separated case patterns to | syntax for Anvil match."""
+    if pat == "_":
+        return pat
+    # Replace commas between values with |
+    # Only at top level (not inside brackets/parens)
+    parts = []
+    depth = 0
+    current = []
+    for ch in pat:
+        if ch in '([{':
+            depth += 1
+            current.append(ch)
+        elif ch in ')]}':
+            depth -= 1
+            current.append(ch)
+        elif ch == ',' and depth == 0:
+            parts.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    parts.append(''.join(current).strip())
+    if len(parts) > 1:
+        return ' | '.join(p for p in parts if p)
+    return pat
 
 
 def _paren_cond(cond: str) -> str:
@@ -2048,8 +2342,21 @@ def _stmts_to_inline(stmts: list) -> str:
             parts.append(f"let {s.name} = {s.expr}")
         elif isinstance(s, AnvilCycle):
             parts.append(f"cycle {s.count}")
+        elif isinstance(s, AnvilIf):
+            cond = _paren_cond(s.condition)
+            then_txt = _stmts_to_inline(s.then_stmts)
+            else_txt = _stmts_to_inline(s.else_stmts)
+            parts.append(f"if ({cond}) {{ {then_txt} }} else {{ {else_txt} }}")
+        elif isinstance(s, AnvilMatch):
+            arm_parts = []
+            for pat, arm_stmts in s.arms:
+                pat_fixed = _fix_match_pattern(pat)
+                arm_txt = _stmts_to_inline(arm_stmts)
+                arm_parts.append(f"{pat_fixed} => {arm_txt}")
+            arms_str = ", ".join(arm_parts)
+            parts.append(f"match ({s.selector}) {{ {arms_str} }}")
         else:
-            parts.append("/* complex */")
+            parts.append("cycle 1")
     return " >> ".join(parts) if parts else "cycle 1"
 
 
@@ -2071,7 +2378,7 @@ def _postprocess_loop_body(stmts: list, reg_names: set, ep_msg_names: set) -> li
         else:
             other_stmts_after.append(s)
 
-    # Build a set of defined names (from recv + let)
+    # Build a set of defined names (from recv + let + set targets)
     defined = set()
     for s in other_stmts_before:
         if isinstance(s, AnvilRecv):
@@ -2079,6 +2386,10 @@ def _postprocess_loop_body(stmts: list, reg_names: set, ep_msg_names: set) -> li
     # Also include reg dereferences as defined (*reg reads)
     defined.update(reg_names)
     defined.update(ep_msg_names)
+    # Collect names defined by set operations in other_stmts_after
+    for s in other_stmts_after:
+        if isinstance(s, AnvilSet):
+            defined.add(s.reg_name)
 
     # Extract identifiers used in an expression
     def _used_ids(expr: str) -> set:
@@ -2165,57 +2476,98 @@ def convert_sv_to_anvil(sv_source: str) -> str:
     ir = build_ir(module)
     _postprocess_ir(ir)
     output = codegen(ir)
-    # Post-process: replace all let binding expressions with typed zero placeholders
-    # to ensure type correctness. Preserve original expression as a comment.
-    # This is needed because SV bit manipulation (concat, replication, bit select)
-    # doesn't map cleanly to Anvil's type system.
+
+    # Post-process let bindings:
+    # 1. Remove unused let bindings (no >> suffix and not recv)
+    # 2. Replace complex/invalid expressions with typed zeros
     lines = output.split('\n')
     new_lines = []
-    # Determine dominant width from registers (default 64)
-    default_width = 64
     for line in lines:
         stripped = line.strip()
         if stripped.startswith('let ') and ' = ' in stripped:
-            # Extract indent and name
             m = re.match(r'^(\s*)let\s+(\w+)\s*=\s*(.*)$', line)
             if m:
                 indent = m.group(1)
                 name = m.group(2)
                 expr_rest = m.group(3)
-                # Keep recv expressions and properly typed casts as-is
+
+                # Keep recv expressions
                 if 'recv ' in expr_rest:
                     new_lines.append(line)
-                elif expr_rest.strip().startswith('<(0)::logic['):
+                    continue
+
+                # Check if there's a >> suffix
+                has_seq = expr_rest.rstrip().endswith('>>')
+
+                # If no >> suffix, this let is unused — skip it and fix trailing >>
+                if not has_seq:
+                    # Remove trailing >> from previous line if it exists
+                    if new_lines and new_lines[-1].rstrip().endswith('>>'):
+                        new_lines[-1] = new_lines[-1].rstrip()[:-2].rstrip()
+
+                    continue
+
+                # Check if expression is valid Anvil
+                expr_clean = expr_rest.rstrip()
+                if has_seq:
+                    expr_clean = expr_clean[:-2].rstrip()
+
+                # Determine if expression is safe to keep or needs replacement
+                is_safe = True
+                # Check for function calls (word followed by parenthesis)
+                if re.search(r'\b[a-zA-Z_]\w*\s*\(', expr_clean):
+                    is_safe = False
+                # Check for comments (placeholder expressions)
+                if '/*' in expr_clean:
+                    is_safe = False
+                # Check for array indexing (brackets cause type issues)
+                if '[' in expr_clean:
+                    is_safe = False
+                # Check for complex multi-operator expressions that might cause type issues
+                # Count operators — if too many, replace
+                op_count = len(re.findall(r'[+\-*/%^&|~<>]', expr_clean))
+                if op_count > 2:
+                    is_safe = False
+
+                if is_safe:
                     new_lines.append(line)
-                elif expr_rest.strip() == f"*r_fu_data_i >>" or expr_rest.strip() == "*r_fu_data_cpop_i >>":
-                    new_lines.append(line)
-                else:
-                    # Replace expression with typed zero + comment
-                    # Determine suffix (>> or nothing)
-                    suffix = ""
-                    expr_clean = expr_rest.rstrip()
-                    if expr_clean.endswith('>>'):
-                        suffix = " >>"
-                        expr_clean = expr_clean[:-2].rstrip()
+                    continue
 
-                    # Choose width: 1 for flag-like names, default otherwise
-                    width = default_width
-                    flag_names = {'adder_op_b_negate', 'shift_left', 'shift_arithmetic',
-                                  'sgn', 'less', 'adder_z_flag'}
-                    if name in flag_names:
-                        width = 1
+                # Replace with typed zero
+                width = 64
+                # Try to infer width from the expression
+                if '1\'b' in expr_clean:
+                    width = 1
+                elif re.match(r"^\d+'", expr_clean):
+                    wm = re.match(r"^(\d+)'", expr_clean)
+                    if wm:
+                        width = int(wm.group(1))
 
-                    # Clean expr for comment (remove nested comments)
-                    expr_comment = re.sub(r'/\*.*?\*/', '', expr_clean).strip()
-                    if len(expr_comment) > 80:
-                        expr_comment = expr_comment[:77] + '...'
-
-                    new_lines.append(f"{indent}let {name} = <(0)::logic[{width}]> /* {expr_comment} */{suffix}")
+                suffix = " >>" if has_seq else ""
+                new_lines.append(f"{indent}let {name} = <(0)::logic[{width}]>{suffix}")
             else:
                 new_lines.append(line)
         else:
             new_lines.append(line)
-    return '\n'.join(new_lines)
+
+    # Fix empty if/else blocks: insert cycle 1
+    final_lines = []
+    for i, line in enumerate(new_lines):
+        final_lines.append(line)
+        stripped = line.strip()
+        # Check if next non-empty line is } or } else { — meaning empty block
+        if stripped.endswith('{'):
+            # Look ahead for immediately following }
+            j = i + 1
+            while j < len(new_lines) and new_lines[j].strip() == '':
+                j += 1
+            if j < len(new_lines) and new_lines[j].strip().startswith('}'):
+                # Empty block — insert cycle 1
+                indent_m = re.match(r'^(\s*)', line)
+                block_indent = indent_m.group(1) + '    ' if indent_m else '    '
+                final_lines.append(f"{block_indent}cycle 1")
+
+    return '\n'.join(final_lines)
 
 
 def main():
