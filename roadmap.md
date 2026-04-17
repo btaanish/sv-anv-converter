@@ -3,20 +3,14 @@
 ## Project Goal
 Convert three RISC-V processor implementations (BOOM, Rocket Chip, CVA6) from their source HDL to Anvil, then verify equivalence by compiling Anvil back to SystemVerilog.
 
-## ⚠ CRITICAL COURSE CORRECTION (2026-04-17)
+## Course Corrections
 
-**All 27 converted .anvil files fail to compile.** Zero files pass `anvil -just-check`. The converter produces fundamentally invalid Anvil syntax:
-- Uses `right logic` / `left logic` (bare types after direction) — Anvil requires channel-typed endpoints
-- Uses `(logic[N])` parenthesized types incorrectly
-- Uses SV-style `ariane_pkg::` scoping — not valid Anvil
-- Treats Anvil like SV with different keywords — but Anvil is channel-based with send/recv, not port-based
+### 2026-04-17 (early): All 27 .anvil files failed to compile
+Root causes: regex-based converter, no compiler validation, wrong Anvil semantics. Led to M3.
 
-**Root causes:**
-1. sv2anvil.py is regex-based (human feedback #61/#62) — needs proper parser
-2. Workers and converter both lack understanding of actual Anvil semantics
-3. "Verification" never actually ran the compiler — only compared logic structure
-
-**All M1-M2.2 "complete" milestones are invalid.** The .anvil files exist but none compile. We are effectively starting over on the conversion quality front.
+### 2026-04-17 (late): M3 complete, converter improved to 8/43 pass rate
+AST-based converter rewrite (Maya), hand-written references (Dana, Leo), mapping guide (Finn).
+Remaining 35 failures: 17 undefined-identifier (cross-scope let bindings), 6 syntax errors (! and $ chars), 3 type mismatches.
 
 ## Milestones
 
@@ -26,24 +20,21 @@ Convert three RISC-V processor implementations (BOOM, Rocket Chip, CVA6) from th
 ### M1.1–M2.2: Previous conversion batches
 **Status:** INVALIDATED — all 27 .anvil files fail to compile. Code exists but is syntactically wrong.
 
-### M3: Anvil Compiler Validation & Reference Conversion (budget: 8 cycles) — CURRENT
-**Status:** IN PROGRESS
-**Goal:** Establish a correct Anvil conversion workflow by:
-1. Writing 1-2 small CVA6 modules in valid Anvil BY HAND, verified against the actual compiler (`anvil -just-check`)
-2. Understanding Anvil's channel-based communication model vs SV's port model
-3. Documenting the correct SV→Anvil mapping patterns (ports→channels, always_comb→let, always_ff→reg+loop, etc.)
-4. Rebuilding sv2anvil.py as a proper AST-based parser (not regex), targeting compilable output
-5. All output MUST pass `anvil -just-check` — no exceptions
+### M3: Anvil Compiler Validation & Reference Conversion (budget: 8 cycles)
+**Status:** COMPLETE ✓
+**Results:**
+- 2 hand-written modules compile (decoder_stub, regfile_ff)
+- sv2anvil.py rewritten as AST-based (Lexer→Parser→IR→Codegen)
+- Mapping guide at docs/sv_to_anvil_mapping.md
+- Converter passes 8/43 CVA6 core modules (alu, aes, alu_wrapper, ariane_regfile_ff, compressed_decoder, cva6_accel_first_pass_decoder_stub, cvxif_compressed_if_driver, cvxif_fu)
+- 9 ground-truth Anvil examples in anvil_ground_truth/examples/
 
-**Acceptance criteria:**
-- At least 2 CVA6 modules compile with `anvil -just-check` with zero errors
-- sv2anvil.py rewritten with proper SV parser (e.g., pyverilog or custom AST)
-- A mapping guide doc exists showing correct SV→Anvil patterns
-- The converter's output for alu.sv passes `anvil -just-check`
-
-### M4: Re-convert CVA6 Core with Validated Toolchain (budget: TBD)
+### M4: Fix Converter & Achieve 43/43 CVA6 Core Compilation (budget: 8 cycles) — CURRENT
 **Status:** NOT STARTED
-**Goal:** Re-convert all 43 CVA6 core modules using the corrected converter and manual cleanup. Every file must pass `anvil -just-check`.
+**Goal:** Fix sv2anvil.py to handle remaining 35 failing modules and produce compilable output for all 43 CVA6 core modules. Two parallel tracks:
+1. **Converter fixes:** Fix the 3 error categories — undefined identifiers (cross-scope let→reg promotion), syntax errors (! → ~, $ removal), type mismatches
+2. **Manual fixes:** For modules the converter can't fully handle, hand-fix the output
+**Acceptance criteria:** All 43 files in converted/ pass `anvil -just-check` with exit code 0
 
 ### M5: CVA6 Subdirectories (budget: TBD)
 **Status:** NOT STARTED
@@ -68,9 +59,11 @@ Convert three RISC-V processor implementations (BOOM, Rocket Chip, CVA6) from th
 - **Previous lessons still apply:** 1 module per worker, parallel conversion + sequential verification, scale workers for throughput.
 - **Planning budget:** 3 Athena cycles for M1 planning was too many. Target 1 cycle for future milestones.
 - **Manual conversion >> auto conversion:** This is even more true now. Need reference manual conversions before automating.
+- **Cross-scope variable references are the #1 converter issue.** SV `always_comb` assigns variables used in `always_ff`. Anvil `let` bindings are scoped — converter must promote these to `reg` or restructure scopes.
+- **Anvil negation is `~`, not `!`.** The converter must translate SV `!` to Anvil `~` for logical negation.
 
 ## Progress Tracking
-- CVA6 top-level core: 0/43 with valid Anvil (27 files exist but none compile)
+- CVA6 top-level core: 8/43 compile from converter, 2/43 hand-written compile (10 total compiling)
 - CVA6 subdirectories: 0/~71 converted (0%)
 - BOOM: not started
 - Rocket Chip: not started
