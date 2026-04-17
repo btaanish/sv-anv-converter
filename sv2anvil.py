@@ -1270,7 +1270,7 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     e = re.sub(r"\w+::", "", e)
 
     # Replication {N{expr}} → comment (before concatenation)
-    e = re.sub(r"\{(\d+)\{([^}]+)\}\}",
+    e = re.sub(r"\{([^{}]+)\{([^}]+)\}\}",
                lambda m: f"/* rep {m.group(1)}x{m.group(2)} */",
                e)
 
