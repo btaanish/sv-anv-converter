@@ -1,0 +1,57 @@
+/* Example 6: Channel synchronization patterns */
+chan foobar_ch {
+    left req : (logic[8]@#1) @dyn - @#1,
+    right res : (logic[8]@#1) @#req - @#req
+}
+
+proc Foo(ep : left foobar_ch) {
+    reg cycle_count : logic[8];
+    reg prev_x : logic[8];
+    loop {
+        if (call is_even(*cycle_count)) {
+            cycle 2
+        } else {
+            cycle 3
+        } >>
+        let x = recv ep.req >>
+        let ans = call answer(*prev_x) >>
+        send ep.res (ans) >>
+        dprint"[Cycle %d] Received %d, Sent %d" (*cycle_count, *prev_x, ans) >>
+        set prev_x := x
+    }
+    loop {
+        set cycle_count := *cycle_count + 8'd1
+    }
+}
+
+func is_even(x) {
+    x & 8'd1 == 8'd0
+}
+
+func answer(x) {
+    if (call is_even(x)) {
+        8'd42
+    } else {
+        8'd0
+    }
+}
+
+proc Top() {
+    chan ep_le -- ep_ri : foobar_ch;
+    spawn Foo(ep_le);
+    reg input : logic[8];
+    reg counter : logic[8];
+    loop {
+        send ep_ri.req (*input) >>
+        let data = recv ep_ri.res >>
+        dprint"[Cycle %d] Answer: %d" (*counter, data) >>
+        set input := *input + 8'd1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+    loop {
+        cycle 20 >>
+        dfinish
+    }
+}

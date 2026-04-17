@@ -1,0 +1,9 @@
+/* Example 1: Hello World - Minimal valid Anvil proc */
+proc Top() {
+    reg counter : logic[8];
+    loop {
+        let cnt = *counter + 8'd1;
+        dprint"[Cycle %d] Hello World in Anvil!" (*counter) >>
+        set counter := *counter + 8'd1
+    }
+}

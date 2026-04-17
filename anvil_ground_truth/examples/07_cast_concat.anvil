@@ -1,0 +1,17 @@
+/* Example 7: Casting and concatenation */
+proc Top() {
+    reg a : logic[4];
+    reg b : logic[4];
+    loop {
+        let wide = <(*a)::logic[8]>;
+        let narrow = <(*a)::logic[2]>;
+        let joined = #{*a, *b};
+        dprint"a=%b, wide=%b, narrow=%b, joined=%b" (*a, wide, narrow, joined) >>
+        set a := *a + 4'd1;
+        set b := *b + 4'd3
+    }
+    loop {
+        cycle 10 >>
+        dfinish
+    }
+}

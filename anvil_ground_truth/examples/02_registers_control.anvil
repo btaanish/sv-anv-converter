@@ -1,0 +1,30 @@
+/* Example 2: Registers, if-else, match, arithmetic */
+proc Top() {
+    reg counter : logic[8];
+    loop {
+        if (*counter & 8'd1 == 8'd0) {
+            dprint"[Cycle %d] Even cycle" (*counter) >>
+            cycle 3
+        } else {
+            dprint"[Cycle %d] Odd cycle" (*counter) >>
+            cycle 1
+        } >>
+        cycle 1
+    }
+    loop {
+        match (*counter) {
+            8'd0 => dprint"[Cycle %d] Zero" (*counter),
+            8'd1 => dprint"[Cycle %d] One" (*counter),
+            8'd2 => dprint"[Cycle %d] Two" (*counter),
+            _     => dprint"[Cycle %d] Many" (*counter)
+        } >>
+        cycle 1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+    loop {
+        cycle 20 >>
+        dfinish
+    }
+}

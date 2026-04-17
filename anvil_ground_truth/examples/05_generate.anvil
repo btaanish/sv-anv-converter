@@ -1,0 +1,21 @@
+/* Example 5: Generate constructs, arrays, casting */
+type byte = (logic[8]);
+
+proc Top() {
+    reg mem : byte[4];
+    reg counter : logic[8];
+    loop {
+        generate (i : 0, 3, 1) {
+            set mem[i] := <(i)::logic[8]>
+        } >>
+        dprint"[Cycle %d] Memory: %d %d %d %d" (*counter, *mem[0], *mem[1], *mem[2], *mem[3]) >>
+        cycle 1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+    loop {
+        cycle 10 >>
+        dfinish
+    }
+}

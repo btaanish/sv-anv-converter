@@ -1,0 +1,41 @@
+/* Example 8: Try send/recv (non-blocking communication) */
+chan foobar_ch {
+    left req : (logic[8]@#1),
+    right res : (logic@#1)
+}
+
+proc Foo(ep : left foobar_ch) {
+    reg counter : logic[8];
+    loop {
+        try x = recv ep.req {
+            dprint"[Cycle %d][Foo] Received: %d" (*counter, x)
+        } else {
+            dprint"[Cycle %d][Foo] No request" (*counter)
+        } >>
+        try send ep.res (1'd1) {
+            dprint"[Cycle %d][Foo] Sent response" (*counter)
+        } else {
+            dprint"[Cycle %d][Foo] No receiver ready" (*counter)
+        } >>
+        cycle 1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+}
+
+proc Top() {
+    chan ep_le -- ep_ri : foobar_ch;
+    spawn Foo(ep_le);
+    loop {
+        send ep_ri.req (8'd42) >>
+        cycle 1 >>
+        send ep_ri.req (8'd99) >>
+        let x = recv ep_ri.res >>
+        cycle 1
+    }
+    loop {
+        cycle 10 >>
+        dfinish
+    }
+}
