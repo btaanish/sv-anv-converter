@@ -85,7 +85,7 @@ proc store_buffer (                                             // [AUTO]
     // ----------------------------------------
 
     // Store buffer is empty when speculative queue has no entries and commit queue is drained
-    let store_buffer_empty_o = (speculative_status_cnt_q == 0) & no_st_pending_o; // [AUTO]
+    let store_buffer_empty_o = (*speculative_status_cnt_q == 0) & no_st_pending_o; // [AUTO]
 
     // D-cache request port — static assignments                // [AUTO]
     let req_port_o.kill_req = 1'b0;                             // [AUTO]
@@ -95,42 +95,42 @@ proc store_buffer (                                             // [AUTO]
     let req_port_o.data_wuser = '0;                             // [AUTO]
 
     // D-cache address/data driven from head of commit queue    // [MANUAL]
-    let req_port_o.address_index = (*commit_queue_q)[commit_read_pointer_q].address[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0]; // [MANUAL]
-    let req_port_o.address_tag = (*commit_queue_q)[commit_read_pointer_q].address[CVA6Cfg.DCACHE_TAG_WIDTH + CVA6Cfg.DCACHE_INDEX_WIDTH - 1 : CVA6Cfg.DCACHE_INDEX_WIDTH]; // [MANUAL]
-    let req_port_o.data_wdata = (*commit_queue_q)[commit_read_pointer_q].data; // [MANUAL]
-    let req_port_o.data_be = (*commit_queue_q)[commit_read_pointer_q].be; // [MANUAL]
-    let req_port_o.data_size = (*commit_queue_q)[commit_read_pointer_q].data_size; // [MANUAL]
+    let req_port_o.address_index = (*commit_queue_q)[*commit_read_pointer_q].address[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0]; // [MANUAL]
+    let req_port_o.address_tag = (*commit_queue_q)[*commit_read_pointer_q].address[CVA6Cfg.DCACHE_TAG_WIDTH + CVA6Cfg.DCACHE_INDEX_WIDTH - 1 : CVA6Cfg.DCACHE_INDEX_WIDTH]; // [MANUAL]
+    let req_port_o.data_wdata = (*commit_queue_q)[*commit_read_pointer_q].data; // [MANUAL]
+    let req_port_o.data_be = (*commit_queue_q)[*commit_read_pointer_q].be; // [MANUAL]
+    let req_port_o.data_size = (*commit_queue_q)[*commit_read_pointer_q].data_size; // [MANUAL]
 
     // RVFI probe — read address from speculative queue head    // [MANUAL]
-    let rvfi_mem_paddr_o = (*speculative_queue_q)[speculative_read_pointer_q].address; // [MANUAL]
+    let rvfi_mem_paddr_o = (*speculative_queue_q)[*speculative_read_pointer_q].address; // [MANUAL]
 
     // ----------------------------------------
     // Speculative Queue — Core Interface (always_comb : core_if)
     // ----------------------------------------
 
     // Default: hold current state                              // [MANUAL]
-    let speculative_status_cnt = speculative_status_cnt_q;      // [MANUAL]
-    let speculative_read_pointer_n = speculative_read_pointer_q; // [MANUAL]
-    let speculative_write_pointer_n = speculative_write_pointer_q; // [MANUAL]
+    let speculative_status_cnt = *speculative_status_cnt_q;      // [MANUAL]
+    let speculative_read_pointer_n = *speculative_read_pointer_q; // [MANUAL]
+    let speculative_write_pointer_n = *speculative_write_pointer_q; // [MANUAL]
     let speculative_queue_n = *speculative_queue_q;             // [MANUAL]
 
     // Accept new store entry                                   // [MANUAL]
     if valid_i {                                                // [MANUAL]
-        let speculative_queue_n[speculative_write_pointer_q].address = paddr_i; // [MANUAL]
-        let speculative_queue_n[speculative_write_pointer_q].data = data_i; // [MANUAL]
-        let speculative_queue_n[speculative_write_pointer_q].be = be_i; // [MANUAL]
-        let speculative_queue_n[speculative_write_pointer_q].data_size = data_size_i; // [MANUAL]
-        let speculative_queue_n[speculative_write_pointer_q].valid = 1'b1; // [MANUAL]
-        let speculative_queue_n[speculative_write_pointer_q].cbo_op = cbo_op_i; // [MANUAL]
-        let speculative_queue_n[speculative_write_pointer_q].wait_rvalid = 1'b0; // [MANUAL]
-        let speculative_write_pointer_n = speculative_write_pointer_q + 1'b1; // [MANUAL]
+        let speculative_queue_n[*speculative_write_pointer_q].address = paddr_i; // [MANUAL]
+        let speculative_queue_n[*speculative_write_pointer_q].data = data_i; // [MANUAL]
+        let speculative_queue_n[*speculative_write_pointer_q].be = be_i; // [MANUAL]
+        let speculative_queue_n[*speculative_write_pointer_q].data_size = data_size_i; // [MANUAL]
+        let speculative_queue_n[*speculative_write_pointer_q].valid = 1'b1; // [MANUAL]
+        let speculative_queue_n[*speculative_write_pointer_q].cbo_op = cbo_op_i; // [MANUAL]
+        let speculative_queue_n[*speculative_write_pointer_q].wait_rvalid = 1'b0; // [MANUAL]
+        let speculative_write_pointer_n = *speculative_write_pointer_q + 1'b1; // [MANUAL]
         let speculative_status_cnt = speculative_status_cnt + 1; // [MANUAL]
     }
 
     // Evict entry on commit — moves to commit queue            // [MANUAL]
     if commit_i {                                               // [MANUAL]
-        let speculative_queue_n[speculative_read_pointer_q].valid = 1'b0; // [MANUAL]
-        let speculative_read_pointer_n = speculative_read_pointer_q + 1'b1; // [MANUAL]
+        let speculative_queue_n[*speculative_read_pointer_q].valid = 1'b0; // [MANUAL]
+        let speculative_read_pointer_n = *speculative_read_pointer_q + 1'b1; // [MANUAL]
         let speculative_status_cnt = speculative_status_cnt - 1; // [MANUAL]
     }
 
@@ -141,7 +141,7 @@ proc store_buffer (                                             // [AUTO]
         for i in 0..DEPTH_SPEC {                                // [MANUAL]
             let speculative_queue_n[i].valid = 1'b0;            // [MANUAL]
         }                                                       // [MANUAL]
-        let speculative_write_pointer_n = speculative_read_pointer_q; // [MANUAL]
+        let speculative_write_pointer_n = *speculative_read_pointer_q; // [MANUAL]
         let speculative_status_cnt_n = '0;                      // [MANUAL]
     }
 
@@ -153,46 +153,46 @@ proc store_buffer (                                             // [AUTO]
     // ----------------------------------------
 
     // Default: hold current state                              // [MANUAL]
-    let commit_status_cnt = commit_status_cnt_q;                // [MANUAL]
-    let commit_ready_o = (commit_status_cnt_q < DEPTH_COMMIT);  // [AUTO]
-    let no_st_pending_o = (commit_status_cnt_q == 0);           // [AUTO]
-    let commit_read_pointer_n = commit_read_pointer_q;          // [MANUAL]
-    let commit_write_pointer_n = commit_write_pointer_q;        // [MANUAL]
+    let commit_status_cnt = *commit_status_cnt_q;                // [MANUAL]
+    let commit_ready_o = (*commit_status_cnt_q < DEPTH_COMMIT);  // [AUTO]
+    let no_st_pending_o = (*commit_status_cnt_q == 0);           // [AUTO]
+    let commit_read_pointer_n = *commit_read_pointer_q;          // [MANUAL]
+    let commit_write_pointer_n = *commit_write_pointer_q;        // [MANUAL]
     let commit_queue_n = *commit_queue_q;                       // [MANUAL]
 
     let req_port_o.data_req = 1'b0;                             // [AUTO]
-    let req_port_o.cbo_op = (*commit_queue_q)[commit_read_pointer_q].cbo_op; // [MANUAL]
+    let req_port_o.cbo_op = (*commit_queue_q)[*commit_read_pointer_q].cbo_op; // [MANUAL]
 
     // Issue store to memory when head entry is valid and not stalled // [MANUAL]
-    if (*commit_queue_q)[commit_read_pointer_q].valid && !stall_st_pending_i && !(*commit_queue_q)[commit_read_pointer_q].wait_rvalid { // [MANUAL]
+    if (*commit_queue_q)[*commit_read_pointer_q].valid && !stall_st_pending_i && !(*commit_queue_q)[*commit_read_pointer_q].wait_rvalid { // [MANUAL]
         let req_port_o.data_req = 1'b1;                         // [MANUAL]
         if req_port_i.data_gnt {                                // [MANUAL]
-            if (*commit_queue_q)[commit_read_pointer_q].cbo_op == ariane_pkg::CBO_NONE || req_port_i.data_rvalid { // [MANUAL]
+            if (*commit_queue_q)[*commit_read_pointer_q].cbo_op == ariane_pkg::CBO_NONE || req_port_i.data_rvalid { // [MANUAL]
                 // Not CBO or rvalid received — evict from commit buffer // [MANUAL]
-                let commit_queue_n[commit_read_pointer_q].valid = 1'b0; // [MANUAL]
-                let commit_read_pointer_n = commit_read_pointer_q + 1'b1; // [MANUAL]
+                let commit_queue_n[*commit_read_pointer_q].valid = 1'b0; // [MANUAL]
+                let commit_read_pointer_n = *commit_read_pointer_q + 1'b1; // [MANUAL]
                 let commit_status_cnt = commit_status_cnt - 1;  // [MANUAL]
-            } else if (*commit_queue_q)[commit_read_pointer_q].cbo_op != ariane_pkg::CBO_NONE { // [MANUAL]
+            } else if (*commit_queue_q)[*commit_read_pointer_q].cbo_op != ariane_pkg::CBO_NONE { // [MANUAL]
                 // CBO granted — wait for rvalid                 // [MANUAL]
-                let commit_queue_n[commit_read_pointer_q].wait_rvalid = 1'b1; // [MANUAL]
+                let commit_queue_n[*commit_read_pointer_q].wait_rvalid = 1'b1; // [MANUAL]
             }
         }
     }
 
     // CBO wait-for-rvalid path                                 // [MANUAL]
-    if (*commit_queue_q)[commit_read_pointer_q].valid && (*commit_queue_q)[commit_read_pointer_q].wait_rvalid { // [MANUAL]
+    if (*commit_queue_q)[*commit_read_pointer_q].valid && (*commit_queue_q)[*commit_read_pointer_q].wait_rvalid { // [MANUAL]
         if req_port_i.data_rvalid {                             // [MANUAL]
             // CMO committed — evict entry                       // [MANUAL]
-            let commit_queue_n[commit_read_pointer_q].valid = 1'b0; // [MANUAL]
-            let commit_read_pointer_n = commit_read_pointer_q + 1'b1; // [MANUAL]
+            let commit_queue_n[*commit_read_pointer_q].valid = 1'b0; // [MANUAL]
+            let commit_read_pointer_n = *commit_read_pointer_q + 1'b1; // [MANUAL]
             let commit_status_cnt = commit_status_cnt - 1;      // [MANUAL]
         }
     }
 
     // Move entry from speculative to commit queue on commit    // [MANUAL]
     if commit_i {                                               // [MANUAL]
-        let commit_queue_n[commit_write_pointer_q] = (*speculative_queue_q)[speculative_read_pointer_q]; // [MANUAL]
-        let commit_write_pointer_n = commit_write_pointer_n + 1'b1; // [MANUAL]
+        let commit_queue_n[*commit_write_pointer_q] = (*speculative_queue_q)[*speculative_read_pointer_q]; // [MANUAL]
+        let commit_write_pointer_n = *commit_write_pointer_q + 1'b1; // [MANUAL]
         let commit_status_cnt = commit_status_cnt + 1;          // [MANUAL]
     }
 
