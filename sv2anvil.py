@@ -4,9 +4,6 @@
 Usage:
     python3 sv2anvil.py input.sv output.anvil
 
-This is a regex-based best-effort converter.  It handles the most common SV
-constructs and emits syntactically valid Anvil.  Unsupported constructs are
-printed as warnings to stderr and inserted as comments in the output.
 """
 
 import re
