@@ -146,7 +146,7 @@ proc scoreboard (
     // ---- Issue pointer chain ----
     // [MANUAL] Converted from genvar for-loop
     let issue_pointer_0 = *issue_pointer_q;
-    generate (i : 0, CVA6Cfg.NrIssuePorts, 1) {
+    generate (i : 0, CVA6Cfg.NrIssuePorts + 1, 1) {
         let issue_pointer_next[i] = issue_pointer_0 + <i :: (logic[CVA6Cfg.TRANS_ID_BITS])>;
     }
 
