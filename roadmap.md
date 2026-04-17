@@ -34,30 +34,42 @@ Convert three RISC-V processor implementations (BOOM, Rocket Chip, CVA6) from th
 
 **Converted so far: 6/43 top-level core modules** (alu, ariane_regfile_ff, branch_unit, csr_buffer, mult, multiplier)
 
-### M2.1: CVA6 Core Batch 2 — Small Modules (budget: 6 cycles)
-**Status:** NEXT
+### M2.1: CVA6 Core Batch 2 — Small Modules (budget: 6 cycles, used: 4)
+**Status:** COMPLETE (verified via PRs #15-#23)
 **Goal:** Convert the next 8 small CVA6 core modules (under 150 lines each).
+- [x] cva6_accel_first_pass_decoder_stub.sv (PR #15)
+- [x] cvxif_compressed_if_driver.sv (PR #16)
+- [x] cvxif_issue_register_commit_if_driver.sv (PR #17)
+- [x] alu_wrapper.sv (PR #18)
+- [x] raw_checker.sv (PR #19, fix PR #23)
+- [x] cvxif_fu.sv (PR #20)
+- [x] amo_buffer.sv (PR #21)
+- [x] ariane_regfile_fpga.sv (PR #22)
+
+**Converted so far: 14/43 top-level core modules (33%)**
+
+### M2.2: CVA6 Core Batch 3 — Medium-Small Modules (budget: 6 cycles)
+**Status:** NEXT
+**Goal:** Convert 6 medium-small CVA6 modules (133-234 lines).
 Target modules:
-- cva6_accel_first_pass_decoder_stub.sv (34 lines)
-- cvxif_compressed_if_driver.sv (66 lines)
-- cvxif_issue_register_commit_if_driver.sv (66 lines)
-- alu_wrapper.sv (71 lines)
-- raw_checker.sv (73 lines)
-- cvxif_fu.sv (79 lines)
-- amo_buffer.sv (83 lines)
-- ariane_regfile_fpga.sv (150 lines)
+- zcmt_decoder.sv (133 lines)
+- cva6_rvfi_probes.sv (145 lines)
+- lsu_bypass.sv (145 lines)
+- perf_counters.sv (217 lines)
+- cva6_fifo_v3.sv (231 lines)
+- aes.sv (234 lines)
 
-### M2.2: CVA6 Core Batch 3 — Medium Modules (budget: TBD)
+### M2.3: CVA6 Core Batch 4 — Medium-Large Modules (budget: TBD)
 **Status:** NOT STARTED
-**Goal:** Convert medium-sized CVA6 modules (150-350 lines).
-Target: zcmt_decoder, cva6_rvfi_probes, lsu_bypass, perf_counters, cva6_fifo_v3, aes, controller, serdiv, axi_shim, issue_stage, store_buffer, scoreboard, instr_realign
+**Goal:** Convert 7 medium-large CVA6 modules (277-365 lines).
+Target: controller, serdiv, axi_shim, issue_stage, store_buffer, scoreboard, instr_realign
 
-### M2.3: CVA6 Core Batch 4 — Large Modules (budget: TBD)
+### M2.4: CVA6 Core Batch 5 — Large Modules (budget: TBD)
 **Status:** NOT STARTED
-**Goal:** Convert large CVA6 modules (350+ lines).
+**Goal:** Convert large CVA6 modules (400+ lines).
 Target: store_unit, commit_stage, acc_dispatcher, id_stage, trigger_module, fpu_wrap, load_unit, cva6_rvfi, ex_stage, macro_decoder, load_store_unit, compressed_decoder, issue_read_operands, cva6.sv, decoder, csr_regfile
 
-### M2.4: CVA6 Subdirectories (budget: TBD)
+### M2.5: CVA6 Subdirectories (budget: TBD)
 **Status:** NOT STARTED
 **Goal:** Convert frontend/, cache_subsystem/, cva6_mmu/, pmp/, cvxif_example/, include/ packages.
 
@@ -81,9 +93,11 @@ Target: store_unit, commit_stage, acc_dispatcher, id_stage, trigger_module, fpu_
 - **1 module per worker per cycle:** M1.2 succeeded by assigning exactly 1 module per worker. Continue this pattern.
 - **Parallel conversion + sequential verification works well:** Convert in parallel, verify fixes sequentially.
 - **Scale workers for throughput:** With 8 modules to convert, hire 8 workers (1 each) rather than overloading fewer workers.
+- **M2.1 completed efficiently in ~4 cycles:** 8 small modules, 1 bug found in verification (raw_checker generate vs generate_seq). Pattern works well.
+- **generate vs generate_seq matters:** Parallel generate produces a vector; generate_seq does accumulation. Workers need to recognize SV always_comb scan loops as needing generate_seq.
 
 ## Progress Tracking
-- CVA6 top-level core: 6/43 converted (14%)
+- CVA6 top-level core: 14/43 converted (33%)
 - CVA6 subdirectories: 0/~71 converted (0%)
 - BOOM: not started
 - Rocket Chip: not started
