@@ -3,106 +3,74 @@
 ## Project Goal
 Convert three RISC-V processor implementations (BOOM, Rocket Chip, CVA6) from their source HDL to Anvil, then verify equivalence by compiling Anvil back to SystemVerilog.
 
+## ⚠ CRITICAL COURSE CORRECTION (2026-04-17)
+
+**All 27 converted .anvil files fail to compile.** Zero files pass `anvil -just-check`. The converter produces fundamentally invalid Anvil syntax:
+- Uses `right logic` / `left logic` (bare types after direction) — Anvil requires channel-typed endpoints
+- Uses `(logic[N])` parenthesized types incorrectly
+- Uses SV-style `ariane_pkg::` scoping — not valid Anvil
+- Treats Anvil like SV with different keywords — but Anvil is channel-based with send/recv, not port-based
+
+**Root causes:**
+1. sv2anvil.py is regex-based (human feedback #61/#62) — needs proper parser
+2. Workers and converter both lack understanding of actual Anvil semantics
+3. "Verification" never actually ran the compiler — only compared logic structure
+
+**All M1-M2.2 "complete" milestones are invalid.** The .anvil files exist but none compile. We are effectively starting over on the conversion quality front.
+
 ## Milestones
 
 ### M1: Research & Foundation (budget: 4 impl cycles)
-**Status:** COMPLETE
-**Goal:** Deeply understand Anvil language, the three target repos, and create the initial sv2anvil.py converter and worker skill files.
-- [x] Research Anvil language: syntax, semantics, compilation, timing model
-- [x] Analyze BOOM, Rocket Chip, CVA6 repo structures
-- [x] Create initial sv2anvil.py converter (PR #2)
-- [x] Create agent_spec.md, worker_skill.md, timing_handling.md (PR #3)
-- [x] Convert CVA6 ALU as proof-of-concept (PR #4)
-- [x] Clone CVA6 repo and research Anvil compiler (PR #1)
+**Status:** COMPLETE (but output quality invalidated — see course correction above)
 
-### M1.1: sv2anvil.py Bug Fixes (budget: 4 fix cycles)
-**Status:** COMPLETE
-**Goal:** Fix critical bugs found during verification.
-- [x] 5 bugs fixed (ternary/bit-slice, flattened always_comb, multi-line if, case arm ternary, default binding)
-- [x] PR #5 merged
+### M1.1–M2.2: Previous conversion batches
+**Status:** INVALIDATED — all 27 .anvil files fail to compile. Code exists but is syntactically wrong.
 
-### M1.2: Merge Fixes + Convert First 5 CVA6 Modules (budget: 4 cycles)
-**Status:** COMPLETE (verified, fixes merged via PRs #6-14)
-**Goal:** Fix remaining sv2anvil.py gaps and convert 5 CVA6 modules.
-- [x] sv2anvil.py v2: inside operator, replication, let vs reg (PR #6)
-- [x] branch_unit.anvil (PR #7)
-- [x] csr_buffer.anvil (PR #8)
-- [x] ariane_regfile_ff.anvil (PR #9)
-- [x] multiplier.anvil (PR #10)
-- [x] mult.anvil (PR #11)
-- [x] Verification fixes: regfile, multiplier, mult (PRs #12-14)
+### M3: Anvil Compiler Validation & Reference Conversion (budget: 8 cycles) — CURRENT
+**Status:** IN PROGRESS
+**Goal:** Establish a correct Anvil conversion workflow by:
+1. Writing 1-2 small CVA6 modules in valid Anvil BY HAND, verified against the actual compiler (`anvil -just-check`)
+2. Understanding Anvil's channel-based communication model vs SV's port model
+3. Documenting the correct SV→Anvil mapping patterns (ports→channels, always_comb→let, always_ff→reg+loop, etc.)
+4. Rebuilding sv2anvil.py as a proper AST-based parser (not regex), targeting compilable output
+5. All output MUST pass `anvil -just-check` — no exceptions
 
-**Converted so far: 6/43 top-level core modules** (alu, ariane_regfile_ff, branch_unit, csr_buffer, mult, multiplier)
+**Acceptance criteria:**
+- At least 2 CVA6 modules compile with `anvil -just-check` with zero errors
+- sv2anvil.py rewritten with proper SV parser (e.g., pyverilog or custom AST)
+- A mapping guide doc exists showing correct SV→Anvil patterns
+- The converter's output for alu.sv passes `anvil -just-check`
 
-### M2.1: CVA6 Core Batch 2 — Small Modules (budget: 6 cycles, used: 4)
-**Status:** COMPLETE (verified via PRs #15-#23)
-**Goal:** Convert the next 8 small CVA6 core modules (under 150 lines each).
-- [x] cva6_accel_first_pass_decoder_stub.sv (PR #15)
-- [x] cvxif_compressed_if_driver.sv (PR #16)
-- [x] cvxif_issue_register_commit_if_driver.sv (PR #17)
-- [x] alu_wrapper.sv (PR #18)
-- [x] raw_checker.sv (PR #19, fix PR #23)
-- [x] cvxif_fu.sv (PR #20)
-- [x] amo_buffer.sv (PR #21)
-- [x] ariane_regfile_fpga.sv (PR #22)
-
-**Converted so far: 14/43 top-level core modules (33%)**
-
-### M2.2: CVA6 Core Batch 3 — Medium-Small Modules (budget: 6 cycles, used: 4)
-**Status:** COMPLETE (PRs #24-#29, verified: perf_counters PASS, lsu_bypass CONDITIONAL PASS — 1 bug)
-**Goal:** Convert 6 medium-small CVA6 modules (133-234 lines).
-- [x] zcmt_decoder.sv (PR #24)
-- [x] cva6_rvfi_probes.sv (PR #25)
-- [x] lsu_bypass.sv (PR #26) — ⚠️ pop_both edge case bug found in verification
-- [x] perf_counters.sv (PR #27)
-- [x] cva6_fifo_v3.sv (PR #28)
-- [x] aes.sv (PR #29)
-- Note: Only 2/6 modules verified by Apollo (lsu_bypass, perf_counters). Remaining 4 unverified.
-
-**Converted so far: 20/43 top-level core modules (47%)**
-
-### M2.3: CVA6 Core Batch 4 — Medium-Large Modules (budget: 8 cycles)
-**Status:** NEXT
-**Goal:** Fix lsu_bypass bug + convert 7 medium-large CVA6 modules (277-365 lines).
-Target: controller, serdiv, axi_shim, issue_stage, store_buffer, scoreboard, instr_realign
-Fix: lsu_bypass.anvil pop_both edge case (found in M2.2 verification)
-
-### M2.4: CVA6 Core Batch 5 — Large Modules (budget: TBD)
+### M4: Re-convert CVA6 Core with Validated Toolchain (budget: TBD)
 **Status:** NOT STARTED
-**Goal:** Convert large CVA6 modules (400+ lines).
-Target: store_unit, commit_stage, acc_dispatcher, id_stage, trigger_module, fpu_wrap, load_unit, cva6_rvfi, ex_stage, macro_decoder, load_store_unit, compressed_decoder, issue_read_operands, cva6.sv, decoder, csr_regfile
+**Goal:** Re-convert all 43 CVA6 core modules using the corrected converter and manual cleanup. Every file must pass `anvil -just-check`.
 
-### M2.5: CVA6 Subdirectories (budget: TBD)
+### M5: CVA6 Subdirectories (budget: TBD)
 **Status:** NOT STARTED
 **Goal:** Convert frontend/, cache_subsystem/, cva6_mmu/, pmp/, cvxif_example/, include/ packages.
 
-### M3: BOOM Conversion (budget: TBD)
+### M6: BOOM Conversion (budget: TBD)
 **Status:** NOT STARTED
 **Goal:** Convert BOOM to Anvil. Chisel-based, needs Chisel→SV→Anvil pipeline.
 
-### M4: Rocket Chip Conversion (budget: TBD)
+### M7: Rocket Chip Conversion (budget: TBD)
 **Status:** NOT STARTED
 **Goal:** Convert Rocket Chip to Anvil. Chisel-based, largest codebase.
 
-### M5: Validation & Polish (budget: TBD)
+### M8: Validation & Polish (budget: TBD)
 **Status:** NOT STARTED
 **Goal:** Full round-trip verification. Compile Anvil→SV, compare with originals.
 
 ## Lessons Learned
+- **CRITICAL: Always compile-check output.** The team produced 27 files over many cycles without ever running the compiler. ALL were invalid. Verification MUST include `anvil -just-check` on every file.
+- **Understand the target language deeply before converting.** Anvil is fundamentally different from SV — it uses channels, send/recv, lifetimes, not ports. A superficial syntax mapping is insufficient.
+- **Regex-based conversion is insufficient.** Human feedback confirmed: need a proper parser that understands SV AST and maps it to Anvil semantics, not just syntax.
+- **Previous lessons still apply:** 1 module per worker, parallel conversion + sequential verification, scale workers for throughput.
 - **Planning budget:** 3 Athena cycles for M1 planning was too many. Target 1 cycle for future milestones.
-- **Verification catches real bugs:** Apollo/Vera found 3 critical sv2anvil.py bugs that Ares's team missed. Verification is essential.
-- **Manual conversion >> auto conversion (for now):** Manual alu.anvil was far better than sv2anvil.py output. Strategy: auto-convert for scaffolding, manual cleanup for correctness.
-- **Fix rounds need focused scope:** M1.1 used 4 cycles for what was 2 cycles of actual work because PR wasn't merged. Ensure PRs get merged within cycle budget.
-- **1 module per worker per cycle:** M1.2 succeeded by assigning exactly 1 module per worker. Continue this pattern.
-- **Parallel conversion + sequential verification works well:** Convert in parallel, verify fixes sequentially.
-- **Scale workers for throughput:** With 8 modules to convert, hire 8 workers (1 each) rather than overloading fewer workers.
-- **M2.1 completed efficiently in ~4 cycles:** 8 small modules, 1 bug found in verification (raw_checker generate vs generate_seq). Pattern works well.
-- **generate vs generate_seq matters:** Parallel generate produces a vector; generate_seq does accumulation. Workers need to recognize SV always_comb scan loops as needing generate_seq.
-- **Verification coverage gap:** M2.2 only verified 2/6 modules. Need to ensure Apollo verifies all modules, not just a subset.
-- **Edge cases in concurrent operations:** lsu_bypass pop_both bug shows simultaneous signal handling needs extra care. Workers should explicitly handle all signal combinations.
+- **Manual conversion >> auto conversion:** This is even more true now. Need reference manual conversions before automating.
 
 ## Progress Tracking
-- CVA6 top-level core: 20/43 converted (47%)
+- CVA6 top-level core: 0/43 with valid Anvil (27 files exist but none compile)
 - CVA6 subdirectories: 0/~71 converted (0%)
 - BOOM: not started
 - Rocket Chip: not started
@@ -112,4 +80,5 @@ Target: store_unit, commit_stage, acc_dispatcher, id_stage, trigger_module, fpu_
 - BOOM = Chisel (38K LOC), needs Chisel→Verilog→Anvil pipeline
 - Rocket Chip = Chisel (55K LOC), largest/most complex, SoC generator
 - Anvil: process-oriented HDL, channels with lifetimes, implicit clk/rst
-- Anvil toolchain v0.1.0 — build from source (OCaml 5.2.0, opam, dune)
+- Anvil toolchain available at `/opt/opam/default/bin/anvil`
+- Anvil key concepts: proc (not module), chan (channels with left/right endpoints), send/recv, reg + set, let bindings, loop, generate/generate_seq, >> (sequence), ; (parallel join)
