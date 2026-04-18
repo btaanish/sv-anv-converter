@@ -1,0 +1,170 @@
+/* Hand-written Anvil stub for ariane_xilinx.sv
+   Xilinx FPGA top-level wrapper for CVA6/Ariane.
+   Concrete config: GENESYSII variant, XLEN=64, AxiAddrWidth=64,
+   AxiDataWidth=64, AxiIdWidthMaster=4, NBSlave=2,
+   AxiIdWidthSlaves=5 (4+clog2(2)), AxiUserWidth=1.
+   Contains: AXI crossbar, debug module (dm_top, dmi_jtag), ariane core,
+   RVFI, ITI, rv_tracer, encapsulator, slicer_DPTI, dpti_ctrl,
+   CLINT, ROM (bootrom_64), ariane_peripherals, axi_riscv_atomics,
+   xlnx_axi_clock_converter, xlnx_clk_gen, xlnx_mig_7_ddr3, fan_ctrl.
+   All submodule instantiations modeled as opaque stubs.
+   Clock/reset implicit. */
+
+chan xilinx_in_ch {
+    /* Clock/reset */
+    left sys_clk_p : (logic@#1) @dyn - @dyn,
+    left sys_clk_n : (logic@#1) @dyn - @dyn,
+    left cpu_resetn : (logic@#1) @dyn - @dyn,
+    /* DDR3 inputs (active signals only; inout modeled as separate in/out) */
+    left ddr3_dq_i : (logic[32]@#1) @dyn - @dyn,
+    left ddr3_dqs_n_i : (logic[4]@#1) @dyn - @dyn,
+    left ddr3_dqs_p_i : (logic[4]@#1) @dyn - @dyn,
+    /* Ethernet inputs */
+    left eth_rxck : (logic@#1) @dyn - @dyn,
+    left eth_rxctl : (logic@#1) @dyn - @dyn,
+    left eth_rxd : (logic[4]@#1) @dyn - @dyn,
+    /* Switches */
+    left sw : (logic[8]@#1) @dyn - @dyn,
+    /* JTAG */
+    left trst_n : (logic@#1) @dyn - @dyn,
+    left tck : (logic@#1) @dyn - @dyn,
+    left tms : (logic@#1) @dyn - @dyn,
+    left tdi : (logic@#1) @dyn - @dyn,
+    /* SPI input */
+    left spi_miso : (logic@#1) @dyn - @dyn,
+    /* DPTI / prog interface */
+    left prog_clko : (logic@#1) @dyn - @dyn,
+    left prog_rxen : (logic@#1) @dyn - @dyn,
+    left prog_txen : (logic@#1) @dyn - @dyn,
+    left prog_spien : (logic@#1) @dyn - @dyn,
+    left prog_d_i : (logic[8]@#1) @dyn - @dyn,
+    /* UART */
+    left rx : (logic@#1) @dyn - @dyn
+}
+
+chan xilinx_out_ch {
+    /* DDR3 outputs */
+    left ddr3_addr : (logic[15]@#1) @dyn - @dyn,
+    left ddr3_ba : (logic[3]@#1) @dyn - @dyn,
+    left ddr3_ras_n : (logic@#1) @dyn - @dyn,
+    left ddr3_cas_n : (logic@#1) @dyn - @dyn,
+    left ddr3_we_n : (logic@#1) @dyn - @dyn,
+    left ddr3_reset_n : (logic@#1) @dyn - @dyn,
+    left ddr3_ck_p : (logic@#1) @dyn - @dyn,
+    left ddr3_ck_n : (logic@#1) @dyn - @dyn,
+    left ddr3_cke : (logic@#1) @dyn - @dyn,
+    left ddr3_cs_n : (logic@#1) @dyn - @dyn,
+    left ddr3_dm : (logic[4]@#1) @dyn - @dyn,
+    left ddr3_odt : (logic@#1) @dyn - @dyn,
+    /* Ethernet outputs */
+    left eth_rst_n : (logic@#1) @dyn - @dyn,
+    left eth_txck : (logic@#1) @dyn - @dyn,
+    left eth_txctl : (logic@#1) @dyn - @dyn,
+    left eth_txd : (logic[4]@#1) @dyn - @dyn,
+    left eth_mdc : (logic@#1) @dyn - @dyn,
+    /* LEDs */
+    left led : (logic[8]@#1) @dyn - @dyn,
+    /* Fan */
+    left fan_pwm : (logic@#1) @dyn - @dyn,
+    /* JTAG output */
+    left tdo : (logic@#1) @dyn - @dyn,
+    /* SPI outputs */
+    left spi_mosi : (logic@#1) @dyn - @dyn,
+    left spi_ss : (logic@#1) @dyn - @dyn,
+    left spi_clk_o : (logic@#1) @dyn - @dyn,
+    /* DPTI / prog outputs */
+    left prog_rdn : (logic@#1) @dyn - @dyn,
+    left prog_wrn : (logic@#1) @dyn - @dyn,
+    left prog_oen : (logic@#1) @dyn - @dyn,
+    left prog_siwun : (logic@#1) @dyn - @dyn,
+    left prog_d_o : (logic[8]@#1) @dyn - @dyn,
+    /* UART output */
+    left tx : (logic@#1) @dyn - @dyn
+}
+
+proc ariane_xilinx(
+    inp : left xilinx_in_ch,
+    out : right xilinx_out_ch
+) {
+    /* Opaque state registers for internal signals */
+    reg r_clk : logic;
+    reg r_rst_n : logic;
+    reg r_ndmreset_n : logic;
+    reg r_pll_locked : logic;
+    reg r_rtc : logic;
+    reg r_irq : logic[2];
+    reg r_timer_irq : logic;
+    reg r_ipi : logic;
+    reg r_debug_req_irq : logic;
+    reg r_rom_rdata : logic[64];
+    reg r_ddr_clock_out : logic;
+    reg r_ddr_sync_reset : logic;
+
+    /* Recv loop: consume all inputs */
+    loop {
+        let _scp = recv inp.sys_clk_p >>
+        let _scn = recv inp.sys_clk_n >>
+        let _crn = recv inp.cpu_resetn >>
+        let _dq = recv inp.ddr3_dq_i >>
+        let _dqsn = recv inp.ddr3_dqs_n_i >>
+        let _dqsp = recv inp.ddr3_dqs_p_i >>
+        let _erxck = recv inp.eth_rxck >>
+        let _erxctl = recv inp.eth_rxctl >>
+        let _erxd = recv inp.eth_rxd >>
+        let _sw = recv inp.sw >>
+        let _trst = recv inp.trst_n >>
+        let _tck = recv inp.tck >>
+        let _tms = recv inp.tms >>
+        let _tdi = recv inp.tdi >>
+        let _smiso = recv inp.spi_miso >>
+        let _pclko = recv inp.prog_clko >>
+        let _prxen = recv inp.prog_rxen >>
+        let _ptxen = recv inp.prog_txen >>
+        let _pspien = recv inp.prog_spien >>
+        let _pd = recv inp.prog_d_i >>
+        let _rx = recv inp.rx >>
+        cycle 1
+    }
+
+    /* Output loop: drive all outputs with stub values */
+    loop {
+        /* DDR3 */
+        send out.ddr3_addr (15'd0) >>
+        send out.ddr3_ba (3'd0) >>
+        send out.ddr3_ras_n (1'b1) >>
+        send out.ddr3_cas_n (1'b1) >>
+        send out.ddr3_we_n (1'b1) >>
+        send out.ddr3_reset_n (1'b0) >>
+        send out.ddr3_ck_p (1'b0) >>
+        send out.ddr3_ck_n (1'b1) >>
+        send out.ddr3_cke (1'b0) >>
+        send out.ddr3_cs_n (1'b1) >>
+        send out.ddr3_dm (4'd0) >>
+        send out.ddr3_odt (1'b0) >>
+        /* Ethernet */
+        send out.eth_rst_n (1'b0) >>
+        send out.eth_txck (1'b0) >>
+        send out.eth_txctl (1'b0) >>
+        send out.eth_txd (4'd0) >>
+        send out.eth_mdc (1'b0) >>
+        /* LEDs */
+        send out.led (8'd0) >>
+        /* Fan */
+        send out.fan_pwm (1'b0) >>
+        /* JTAG */
+        send out.tdo (1'b0) >>
+        /* SPI */
+        send out.spi_mosi (1'b0) >>
+        send out.spi_ss (1'b0) >>
+        send out.spi_clk_o (1'b0) >>
+        /* DPTI / prog */
+        send out.prog_rdn (1'b1) >>
+        send out.prog_wrn (1'b1) >>
+        send out.prog_oen (1'b1) >>
+        send out.prog_siwun (1'b1) >>
+        send out.prog_d_o (8'd0) >>
+        /* UART */
+        send out.tx (1'b1) >>
+        cycle 1
+    }
+}
