@@ -1487,6 +1487,10 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
         for rn in reg_names:
             e = re.sub(r'(?<!\*)\b' + re.escape(rn) + r'\b', f'*{rn}', e)
 
+    # Boolean negation: SV uses !, Anvil uses ~
+    # Replace standalone ! (not !=) with ~
+    e = re.sub(r'!(?!=)', '~', e)
+
     # Arithmetic right shift >>> → >> (Anvil only has >>)
     e = e.replace(">>>", ">>")
 
@@ -1684,7 +1688,7 @@ def build_ir(module: SVModule) -> AnvilIR:
         if lhs_name and lhs_name.group(1) in output_names:
             continue  # handled by send
         anvil_rhs = convert_sv_expr(a.rhs, params, all_reg_names, input_to_reg)
-        main_loop.append(AnvilLetBinding(name=a.lhs, expr=anvil_rhs))
+        main_loop.append(AnvilLetBinding(name=_sanitize_lhs(a.lhs), expr=anvil_rhs))
 
     # Process always_comb blocks → let bindings (skip output assigns)
     for cb in module.always_comb_blocks:
@@ -1873,6 +1877,17 @@ def _find_assign_in_stmts(name: str, stmts: list, params: Dict[str, str],
     return None
 
 
+def _sanitize_lhs(lhs: str) -> str:
+    """Strip dot-access and array-index from LHS names.
+
+    SV allows assignments like ``x.field`` or ``arr[idx]`` but Anvil only
+    supports simple identifiers in ``let`` bindings and ``set`` targets.
+    We strip the suffix and use just the base name.
+    """
+    m = re.match(r'(\w+)', lhs)
+    return m.group(1) if m else lhs
+
+
 def _convert_comb_stmts(stmts: list, output: list, params: Dict[str, str],
                         skip_outputs: Optional[set] = None,
                         reg_names: Optional[set] = None,
@@ -1884,7 +1899,7 @@ def _convert_comb_stmts(stmts: list, output: list, params: Dict[str, str],
             if skip_outputs and lhs_name and lhs_name.group(1) in skip_outputs:
                 continue
             output.append(AnvilLetBinding(
-                name=stmt.lhs,
+                name=_sanitize_lhs(stmt.lhs),
                 expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
             ))
         # If/case in always_comb: skip (too complex for auto-conversion)
@@ -1898,7 +1913,7 @@ def _convert_ff_stmts(stmts: list, output: list, params: Dict[str, str],
     for stmt in stmts:
         if isinstance(stmt, SVNonBlockAssign):
             output.append(AnvilSet(
-                reg_name=stmt.lhs,
+                reg_name=_sanitize_lhs(stmt.lhs),
                 expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
             ))
         elif isinstance(stmt, SVIfBlock):
@@ -1925,7 +1940,7 @@ def _convert_ff_stmts(stmts: list, output: list, params: Dict[str, str],
             ))
         elif isinstance(stmt, SVAssign):
             output.append(AnvilLetBinding(
-                name=stmt.lhs,
+                name=_sanitize_lhs(stmt.lhs),
                 expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
             ))
 
