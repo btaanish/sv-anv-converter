@@ -1,0 +1,310 @@
+/* Hand-written Anvil for te_priority.sv
+   Packet format priority encoder for trace encoder.
+   Determines which trace packet format to emit based on
+   current/last/next cycle signals. Includes address compression.
+   Concrete: XLEN=32, IRETIRE_LEN=32, $clog2(XLEN)=5.
+   Format: F_OPT_EXT=0, F_DIFF_DELTA=1, F_ADDR_ONLY=2, F_SYNC=3.
+   Subformat: SF_START=0, SF_TRAP=1, SF_CONTEXT=2, SF_SUPPORT=3.
+   Qual_status: NO_CHANGE=0, ENDED_REP=1, TRACE_LOST=2, ENDED_NTR=3. */
+
+func lzc8(v) {
+    if ((v >> 32'd7) & 32'd1) != 32'd0 { 5'd0 }
+    else if ((v >> 32'd6) & 32'd1) != 32'd0 { 5'd1 }
+    else if ((v >> 32'd5) & 32'd1) != 32'd0 { 5'd2 }
+    else if ((v >> 32'd4) & 32'd1) != 32'd0 { 5'd3 }
+    else if ((v >> 32'd3) & 32'd1) != 32'd0 { 5'd4 }
+    else if ((v >> 32'd2) & 32'd1) != 32'd0 { 5'd5 }
+    else if ((v >> 32'd1) & 32'd1) != 32'd0 { 5'd6 }
+    else { 5'd7 }
+}
+
+chan priority_in_ch {
+    left valid : (logic@#1) @dyn - @dyn,
+    left lc_exception : (logic@#1) @dyn - @dyn,
+    left lc_updiscon : (logic@#1) @dyn - @dyn,
+    left tc_qualified : (logic@#1) @dyn - @dyn,
+    left tc_exception : (logic@#1) @dyn - @dyn,
+    left tc_retired : (logic[32]@#1) @dyn - @dyn,
+    left tc_first_qualified : (logic@#1) @dyn - @dyn,
+    left tc_privchange : (logic@#1) @dyn - @dyn,
+    left tc_gt_max_resync : (logic@#1) @dyn - @dyn,
+    left tc_et_max_resync : (logic@#1) @dyn - @dyn,
+    left tc_branch_map_empty : (logic@#1) @dyn - @dyn,
+    left tc_branch_map_full : (logic@#1) @dyn - @dyn,
+    left tc_enc_enabled : (logic@#1) @dyn - @dyn,
+    left tc_enc_disabled : (logic@#1) @dyn - @dyn,
+    left tc_opmode_change : (logic@#1) @dyn - @dyn,
+    left tc_final_qualified : (logic@#1) @dyn - @dyn,
+    left tc_packets_lost : (logic@#1) @dyn - @dyn,
+    left nc_exception : (logic@#1) @dyn - @dyn,
+    left nc_privchange : (logic@#1) @dyn - @dyn,
+    left nc_branch_map_empty : (logic@#1) @dyn - @dyn,
+    left nc_qualified : (logic@#1) @dyn - @dyn,
+    left nc_retired : (logic[32]@#1) @dyn - @dyn,
+    left addr_to_compress : (logic[32]@#1) @dyn - @dyn
+}
+
+chan priority_out_ch {
+    left valid : (logic@#1) @dyn - @dyn,
+    left packet_format : (logic[2]@#1) @dyn - @dyn,
+    left packet_f_sync_subformat : (logic[2]@#1) @dyn - @dyn,
+    left thaddr : (logic@#1) @dyn - @dyn,
+    left lc_tc_mux : (logic@#1) @dyn - @dyn,
+    left resync_timer_rst : (logic@#1) @dyn - @dyn,
+    left qual_status : (logic[2]@#1) @dyn - @dyn,
+    left tc_resync : (logic@#1) @dyn - @dyn,
+    left nc_exc_only : (logic@#1) @dyn - @dyn,
+    left nc_ppccd_br : (logic@#1) @dyn - @dyn,
+    left keep_bits : (logic[6]@#1) @dyn - @dyn
+}
+
+proc te_priority(
+    inp : left priority_in_ch,
+    out : right priority_out_ch
+) {
+    /* State registers */
+    reg r_reported : logic;
+    reg r_ended_ntr : logic;
+    reg r_ended_rep : logic;
+    reg r_resync_br : logic;
+
+    /* Snapshot registers for state */
+    reg snap_reported : logic;
+    reg snap_ended_ntr : logic;
+    reg snap_ended_rep : logic;
+    reg snap_resync_br : logic;
+
+    /* Input staging registers */
+    reg r_valid : logic;
+    reg r_lc_exc : logic;
+    reg r_lc_updiscon : logic;
+    reg r_tc_qual : logic;
+    reg r_tc_exc : logic;
+    reg r_tc_retired : logic[32];
+    reg r_tc_first_qual : logic;
+    reg r_tc_privchange : logic;
+    reg r_tc_gt_resync : logic;
+    reg r_tc_et_resync : logic;
+    reg r_tc_bmap_empty : logic;
+    reg r_tc_bmap_full : logic;
+    reg r_tc_enc_en : logic;
+    reg r_tc_enc_dis : logic;
+    reg r_tc_opmode : logic;
+    reg r_tc_final_qual : logic;
+    reg r_tc_pkt_lost : logic;
+    reg r_nc_exc : logic;
+    reg r_nc_privchange : logic;
+    reg r_nc_bmap_empty : logic;
+    reg r_nc_qual : logic;
+    reg r_nc_retired : logic[32];
+    reg r_addr : logic[32];
+
+    loop {
+        /* Snapshot state registers */
+        set snap_reported := *r_reported;
+        set snap_ended_ntr := *r_ended_ntr;
+        set snap_ended_rep := *r_ended_rep;
+        set snap_resync_br := *r_resync_br >>
+
+        /* Receive all inputs */
+        let v0 = recv inp.valid >>
+        set r_valid := v0 >>
+        let v1 = recv inp.lc_exception >>
+        set r_lc_exc := v1 >>
+        let v2 = recv inp.lc_updiscon >>
+        set r_lc_updiscon := v2 >>
+        let v3 = recv inp.tc_qualified >>
+        set r_tc_qual := v3 >>
+        let v4 = recv inp.tc_exception >>
+        set r_tc_exc := v4 >>
+        let v5 = recv inp.tc_retired >>
+        set r_tc_retired := v5 >>
+        let v6 = recv inp.tc_first_qualified >>
+        set r_tc_first_qual := v6 >>
+        let v7 = recv inp.tc_privchange >>
+        set r_tc_privchange := v7 >>
+        let v8 = recv inp.tc_gt_max_resync >>
+        set r_tc_gt_resync := v8 >>
+        let v9 = recv inp.tc_et_max_resync >>
+        set r_tc_et_resync := v9 >>
+        let v10 = recv inp.tc_branch_map_empty >>
+        set r_tc_bmap_empty := v10 >>
+        let v11 = recv inp.tc_branch_map_full >>
+        set r_tc_bmap_full := v11 >>
+        let v12 = recv inp.tc_enc_enabled >>
+        set r_tc_enc_en := v12 >>
+        let v13 = recv inp.tc_enc_disabled >>
+        set r_tc_enc_dis := v13 >>
+        let v14 = recv inp.tc_opmode_change >>
+        set r_tc_opmode := v14 >>
+        let v15 = recv inp.tc_final_qualified >>
+        set r_tc_final_qual := v15 >>
+        let v16 = recv inp.tc_packets_lost >>
+        set r_tc_pkt_lost := v16 >>
+        let v17 = recv inp.nc_exception >>
+        set r_nc_exc := v17 >>
+        let v18 = recv inp.nc_privchange >>
+        set r_nc_privchange := v18 >>
+        let v19 = recv inp.nc_branch_map_empty >>
+        set r_nc_bmap_empty := v19 >>
+        let v20 = recv inp.nc_qualified >>
+        set r_nc_qual := v20 >>
+        let v21 = recv inp.nc_retired >>
+        set r_nc_retired := v21 >>
+        let v22 = recv inp.addr_to_compress >>
+        set r_addr := v22 >>
+
+        /* Compute derived signals */
+        let tc_exc_only = (*r_tc_exc == 1'b1) & (*r_tc_retired == 32'd0);
+        let tc_ppccd = *r_tc_privchange;
+        let tc_resync_br_sig = (*r_tc_et_resync == 1'b1) & (*r_tc_bmap_empty == 1'b0);
+        let tc_er_n = (*r_tc_exc == 1'b1) & (*r_tc_retired != 32'd0);
+        let tc_rpt_br = (*r_tc_bmap_full == 1'b1) & (*r_nc_bmap_empty == 1'b0);
+        let nc_exc_only = (*r_nc_exc == 1'b1) & (*r_nc_retired == 32'd0);
+        let nc_ppccd_br = (*r_nc_privchange == 1'b1) & (*r_nc_bmap_empty == 1'b0);
+        let tc_f3_sf3 = (*r_tc_enc_en == 1'b1) | (*r_tc_enc_dis == 1'b1) |
+                        (*r_tc_opmode == 1'b1) | (*r_tc_final_qual == 1'b1) |
+                        (*r_tc_pkt_lost == 1'b1);
+
+        /* Priority-encoded case index for packet format decision tree.
+           Cases 1-13 emit valid packets; 0 = no packet.
+           1: F3SF3(support), 2: F3SF1(trap,thaddr=0,lc), 3: F3SF0(start,reported),
+           4: F3SF1(trap,thaddr=1), 5: F3SF0(start,first/ppccd/resync),
+           6: F3SF1(trap,updiscon), 7: F1(diff_delta,updiscon),
+           8: F2(addr_only,updiscon), 9: F1(resync/er), 10: F2(resync/er),
+           11: F1(nc_trigger), 12: F2(nc_trigger), 13: F1(rpt_br) */
+        let case_idx =
+            if *r_valid == 1'b0 { 4'd0 }
+            else if tc_f3_sf3 == 1'b1 { 4'd1 }
+            else if *r_tc_qual == 1'b0 { 4'd0 }
+            else if (*r_lc_exc == 1'b1) & (tc_exc_only == 1'b1) { 4'd2 }
+            else if (*r_lc_exc == 1'b1) & (*snap_reported == 1'b1) { 4'd3 }
+            else if *r_lc_exc == 1'b1 { 4'd4 }
+            else if (*r_tc_first_qual == 1'b1) | (tc_ppccd == 1'b1) |
+                    ((*r_tc_gt_resync == 1'b1) & (*snap_resync_br == 1'b0)) { 4'd5 }
+            else if (*r_lc_updiscon == 1'b1) & (tc_exc_only == 1'b1) { 4'd6 }
+            else if (*r_lc_updiscon == 1'b1) & (*r_tc_bmap_empty == 1'b0) { 4'd7 }
+            else if *r_lc_updiscon == 1'b1 { 4'd8 }
+            else if ((*snap_resync_br == 1'b1) | (tc_er_n == 1'b1)) &
+                    (*r_tc_bmap_empty == 1'b0) { 4'd9 }
+            else if (*snap_resync_br == 1'b1) | (tc_er_n == 1'b1) { 4'd10 }
+            else if ((nc_exc_only == 1'b1) | (nc_ppccd_br == 1'b1) |
+                    (*r_nc_qual == 1'b0)) & (*r_tc_bmap_empty == 1'b0) { 4'd11 }
+            else if (nc_exc_only == 1'b1) | (nc_ppccd_br == 1'b1) |
+                    (*r_nc_qual == 1'b0) { 4'd12 }
+            else if tc_rpt_br == 1'b1 { 4'd13 }
+            else { 4'd0 };
+
+        /* Derive outputs from case_idx */
+        let valid_out = if case_idx != 4'd0 { 1'b1 } else { 1'b0 };
+
+        /* packet_format: cases 1-6 F_SYNC(3), odd>=7 F_DIFF_DELTA(1), even>=7 F_ADDR_ONLY(2) */
+        let fmt = if (case_idx >= 4'd1) & (case_idx <= 4'd6) { 2'd3 }
+            else if (case_idx >= 4'd7) & ((case_idx & 4'd1) != 4'd0) { 2'd1 }
+            else if case_idx >= 4'd7 { 2'd2 }
+            else { 2'd0 };
+
+        /* subformat: case 1→SF_SUPPORT(3), cases 2,4,6→SF_TRAP(1), rest→SF_START(0) */
+        let subfmt = if case_idx == 4'd1 { 2'd3 }
+            else if (case_idx == 4'd2) | (case_idx == 4'd4) | (case_idx == 4'd6) { 2'd1 }
+            else { 2'd0 };
+
+        let thaddr_out = if case_idx == 4'd4 { 1'b1 } else { 1'b0 };
+        let lc_tc_mux_out = if case_idx == 4'd6 { 1'b1 } else { 1'b0 };
+        let resync_rst_out = if (case_idx >= 4'd2) & (case_idx <= 4'd6) { 1'b1 } else { 1'b0 };
+
+        let reported_status = if case_idx == 4'd2 { 1'b1 } else { 1'b0 };
+
+        /* qual_status for F3SF3 (case 1) */
+        let qual_out = if case_idx != 4'd1 { 2'd0 }
+            else if *snap_ended_ntr == 1'b1 { 2'd3 }
+            else if *snap_ended_rep == 1'b1 { 2'd1 }
+            else if *r_tc_pkt_lost == 1'b1 { 2'd2 }
+            else { 2'd0 };
+
+        /* tc_resync_o = valid_i & tc_resync_br_q */
+        let tc_resync_out = (*r_valid == 1'b1) & (*snap_resync_br == 1'b1);
+
+        /* Next state: lc_ended_ntr — set for updiscon cases (6,7,8) */
+        let ended_ntr_next = if (case_idx >= 4'd6) & (case_idx <= 4'd8) { 1'b1 }
+            else { 1'b0 };
+
+        /* Next state: lc_ended_rep — set when !nc_qualified in cases 11,12 */
+        let ended_rep_next = if ((case_idx == 4'd11) | (case_idx == 4'd12)) &
+                                (*r_nc_qual == 1'b0) { 1'b1 } else { 1'b0 };
+
+        /* tc_reported update: when (SYNC/TRAP with thaddr=0) or (SYNC/START with !exc_only) */
+        let reported_update = ((fmt == 2'd3) & (subfmt == 2'd1) & (thaddr_out == 1'b0)) |
+                              ((fmt == 2'd3) & (subfmt == 2'd0) & (tc_exc_only == 1'b0));
+        let reported_next = if reported_update == 1'b1 { reported_status }
+            else { *snap_reported };
+
+        /* tc_resync_br: set on et_resync&!bmap_empty, clear on valid diff/addr packet */
+        let resync_br_next =
+            if (valid_out == 1'b1) & ((fmt == 2'd1) | (fmt == 2'd2)) { 1'b0 }
+            else if tc_resync_br_sig == 1'b1 { 1'b1 }
+            else { *snap_resync_br };
+
+        /* Address compression: LZC for leading zeros and leading ones */
+        let addr_val = *r_addr;
+
+        /* Leading zeros */
+        let z_b3 = (addr_val >> 32'd24) & 32'd255;
+        let z_b2 = (addr_val >> 32'd16) & 32'd255;
+        let z_b1 = (addr_val >> 32'd8) & 32'd255;
+        let z_b0 = addr_val & 32'd255;
+        let z_active = if z_b3 != 32'd0 { z_b3 }
+            else if z_b2 != 32'd0 { z_b2 }
+            else if z_b1 != 32'd0 { z_b1 }
+            else { z_b0 };
+        let z_byte_off = if z_b3 != 32'd0 { 5'd0 }
+            else if z_b2 != 32'd0 { 5'd8 }
+            else if z_b1 != 32'd0 { 5'd16 }
+            else { 5'd24 };
+        let z_bit_off = call lzc8(z_active);
+        let addr_zeros = z_byte_off + z_bit_off;
+        let empty_zeros = if addr_val == 32'd0 { 1'b1 } else { 1'b0 };
+
+        /* Leading ones (LZC of ~addr) */
+        let inv_addr = ~addr_val;
+        let o_b3 = (inv_addr >> 32'd24) & 32'd255;
+        let o_b2 = (inv_addr >> 32'd16) & 32'd255;
+        let o_b1 = (inv_addr >> 32'd8) & 32'd255;
+        let o_b0 = inv_addr & 32'd255;
+        let o_active = if o_b3 != 32'd0 { o_b3 }
+            else if o_b2 != 32'd0 { o_b2 }
+            else if o_b1 != 32'd0 { o_b1 }
+            else { o_b0 };
+        let o_byte_off = if o_b3 != 32'd0 { 5'd0 }
+            else if o_b2 != 32'd0 { 5'd8 }
+            else if o_b1 != 32'd0 { 5'd16 }
+            else { 5'd24 };
+        let o_bit_off = call lzc8(o_active);
+        let addr_ones = o_byte_off + o_bit_off;
+        let empty_ones = if inv_addr == 32'd0 { 1'b1 } else { 1'b0 };
+
+        /* Compression: keep_bits = XLEN - max(zeros,ones) + 1, or 1 if all same */
+        let sign_ext = if addr_zeros > addr_ones { addr_zeros } else { addr_ones };
+        let keep_bits = if (empty_zeros == 1'b1) | (empty_ones == 1'b1) { 6'd1 }
+            else { 6'd33 - <(sign_ext)::logic[6]> };
+
+        /* Send all outputs */
+        send out.valid (valid_out);
+        send out.packet_format (fmt);
+        send out.packet_f_sync_subformat (subfmt);
+        send out.thaddr (thaddr_out);
+        send out.lc_tc_mux (lc_tc_mux_out);
+        send out.resync_timer_rst (resync_rst_out);
+        send out.qual_status (qual_out);
+        send out.tc_resync (tc_resync_out);
+        send out.nc_exc_only (nc_exc_only);
+        send out.nc_ppccd_br (nc_ppccd_br);
+        send out.keep_bits (keep_bits) >>
+
+        /* Update state registers */
+        set r_reported := reported_next;
+        set r_ended_ntr := ended_ntr_next;
+        set r_ended_rep := ended_rep_next;
+        set r_resync_br := resync_br_next
+    }
+}
