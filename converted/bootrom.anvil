@@ -1,0 +1,73 @@
+/* Hand-written Anvil for bootrom.sv
+   Auto-generated boot ROM with 186 entries of 64-bit data.
+   On each cycle with req_i asserted, latches address and outputs
+   the corresponding ROM word (or zero if out-of-range).
+   Concrete params: RomSize=186, addr width=8 (clog2(186)=8).
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~50
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] ROM contents modeled as large reg array with fixed init
+       - [MANUAL-CLEANUP-NEEDED] $clog2(186)=8 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] ROM initialization not expressible in Anvil — modeled as opaque
+       - [MANUAL-CLEANUP-NEEDED] addr_i[10:3] used as index (bits 10 down to 3)
+*/
+
+// [MANUAL] Channel for bootrom request inputs
+chan bootrom_req_ch {
+    left req  : (logic@#1) @dyn - @dyn,
+    left addr : (logic[64]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for bootrom read output
+chan bootrom_resp_ch {
+    left rdata : (logic[64]@#1) @dyn - @dyn
+}
+
+proc bootrom(
+    req_in   : left bootrom_req_ch,
+    resp_out : right bootrom_resp_ch
+) {
+    // [MANUAL] Address register (latches on req)
+    reg addr_q : logic[8];
+
+    // [MANUAL] Input staging registers
+    reg r_req  : logic;
+    reg r_addr : logic[64];
+
+    // [MANUAL-CLEANUP-NEEDED] ROM storage modeled as opaque register
+    // Actual ROM has 186 x 64-bit entries initialized with device-tree data.
+    // In Anvil, ROM contents cannot be expressed as const init — modeled as reg.
+    reg rom_data : logic[64];
+
+    // [MANUAL] Recv loop — stage inputs
+    loop {
+        let v_req = recv req_in.req >>
+        set r_req := v_req >>
+        let v_addr = recv req_in.addr >>
+        set r_addr := v_addr
+    }
+
+    // [MANUAL] Address latch logic: latch addr[10:3] when req is asserted
+    loop {
+        if (*r_req == 1'b1) {
+            // [MANUAL] addr_i[$clog2(186)-1+3:3] = addr_i[10:3]
+            set addr_q := <(*r_addr >> 3)::logic[8]>
+        } else {
+            cycle 1
+        }
+    }
+
+    // [MANUAL] Output drive loop — output ROM data or zero if out of range
+    // [MANUAL-CLEANUP-NEEDED] ROM read modeled as opaque — always outputs rom_data reg
+    loop {
+        if (*addr_q < 8'd186) {
+            send resp_out.rdata (*rom_data) >>
+            cycle 1
+        } else {
+            send resp_out.rdata (64'd0) >>
+            cycle 1
+        }
+    }
+}

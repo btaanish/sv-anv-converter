@@ -1,0 +1,168 @@
+/* Hand-written Anvil for axi_lite_interface.sv
+   AXI4-Lite compatible interface — accepts AXI read/write transactions
+   and presents a simple memory-mapped interface (address, en, we, be, data).
+   Concrete params: AXI_ADDR_WIDTH=64, AXI_DATA_WIDTH=64, AXI_ID_WIDTH=10.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~85
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] AXI request/response types flattened to fixed widths
+       - [MANUAL-CLEANUP-NEEDED] Full AXI handshake modeled as channel recv/send
+       - [MANUAL-CLEANUP-NEEDED] FSM states (IDLE/READ/WRITE/WRITE_B) modeled with enum+match
+*/
+
+// [MANUAL] Channel for AXI request input signals (flattened)
+chan axi_lite_req_ch {
+    left aw_valid  : (logic@#1) @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[10]@#1) @dyn - @dyn,
+    left w_valid   : (logic@#1) @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1) @dyn - @dyn,
+    left ar_valid  : (logic@#1) @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[10]@#1) @dyn - @dyn,
+    left r_ready   : (logic@#1) @dyn - @dyn,
+    left b_ready   : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for AXI response output signals (flattened)
+chan axi_lite_resp_ch {
+    left aw_ready  : (logic@#1) @dyn - @dyn,
+    left w_ready   : (logic@#1) @dyn - @dyn,
+    left b_valid   : (logic@#1) @dyn - @dyn,
+    left b_id      : (logic[10]@#1) @dyn - @dyn,
+    left b_resp    : (logic[2]@#1) @dyn - @dyn,
+    left ar_ready  : (logic@#1) @dyn - @dyn,
+    left r_valid   : (logic@#1) @dyn - @dyn,
+    left r_data    : (logic[64]@#1) @dyn - @dyn,
+    left r_id      : (logic[10]@#1) @dyn - @dyn,
+    left r_resp    : (logic[2]@#1) @dyn - @dyn,
+    left r_last    : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for memory-mapped interface
+chan axi_lite_mem_ch {
+    right address : (logic[64]@#1) @dyn - @dyn,
+    right en      : (logic@#1) @dyn - @dyn,
+    right we      : (logic@#1) @dyn - @dyn,
+    right be      : (logic[8]@#1) @dyn - @dyn,
+    right data_o  : (logic[64]@#1) @dyn - @dyn,
+    left data_i   : (logic[64]@#1) @dyn - @dyn
+}
+
+// [MANUAL] FSM states
+enum axi_lite_state {
+    IDLE,
+    READ,
+    WRITE,
+    WRITE_B
+}
+
+proc axi_lite_interface(
+    req_in   : left axi_lite_req_ch,
+    resp_out : right axi_lite_resp_ch,
+    mem_io   : left axi_lite_mem_ch
+) {
+    // [MANUAL] State register
+    reg state : axi_lite_state;
+    // [MANUAL] Latched transaction ID and address
+    reg trans_id : logic[10];
+    reg address  : logic[64];
+
+    // [MANUAL] Input staging registers
+    reg r_aw_valid : logic;
+    reg r_aw_addr  : logic[64];
+    reg r_aw_id    : logic[10];
+    reg r_w_valid  : logic;
+    reg r_w_data   : logic[64];
+    reg r_w_strb   : logic[8];
+    reg r_ar_valid : logic;
+    reg r_ar_addr  : logic[64];
+    reg r_ar_id    : logic[10];
+    reg r_r_ready  : logic;
+    reg r_b_ready  : logic;
+    reg r_data_i   : logic[64];
+
+    // [MANUAL] Recv loop — stage all inputs
+    loop {
+        let v0 = recv req_in.aw_valid >>
+        set r_aw_valid := v0 >>
+        let v1 = recv req_in.aw_addr >>
+        set r_aw_addr := v1 >>
+        let v2 = recv req_in.aw_id >>
+        set r_aw_id := v2 >>
+        let v3 = recv req_in.w_valid >>
+        set r_w_valid := v3 >>
+        let v4 = recv req_in.w_data >>
+        set r_w_data := v4 >>
+        let v5 = recv req_in.w_strb >>
+        set r_w_strb := v5 >>
+        let v6 = recv req_in.ar_valid >>
+        set r_ar_valid := v6 >>
+        let v7 = recv req_in.ar_addr >>
+        set r_ar_addr := v7 >>
+        let v8 = recv req_in.ar_id >>
+        set r_ar_id := v8 >>
+        let v9 = recv req_in.r_ready >>
+        set r_r_ready := v9 >>
+        let v10 = recv req_in.b_ready >>
+        set r_b_ready := v10 >>
+        let v11 = recv mem_io.data_i >>
+        set r_data_i := v11
+    }
+
+    // [MANUAL] FSM + output logic
+    loop {
+        match (*state) {
+            axi_lite_state::IDLE => {
+                if (*r_aw_valid == 1'b1) {
+                    set address := *r_aw_addr >>
+                    set trans_id := *r_aw_id >>
+                    set state := axi_lite_state::WRITE
+                } else if (*r_ar_valid == 1'b1) {
+                    set address := *r_ar_addr >>
+                    set trans_id := *r_ar_id >>
+                    set state := axi_lite_state::READ
+                } else {
+                    cycle 1
+                }
+            },
+            axi_lite_state::READ => {
+                if (*r_r_ready == 1'b1) {
+                    set state := axi_lite_state::IDLE
+                } else {
+                    cycle 1
+                }
+            },
+            axi_lite_state::WRITE => {
+                if (*r_w_valid == 1'b1) {
+                    set state := axi_lite_state::WRITE_B
+                } else {
+                    cycle 1
+                }
+            },
+            _ => {
+                if (*r_b_ready == 1'b1) {
+                    set state := axi_lite_state::IDLE
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // [MANUAL] Output drive loop
+    loop {
+        send resp_out.b_id (*trans_id) >>
+        send resp_out.r_id (*trans_id) >>
+        send resp_out.r_last (1'b1) >>
+        send resp_out.b_resp (2'b00) >>
+        send resp_out.r_resp (2'b00) >>
+        send resp_out.r_data (*r_data_i) >>
+        send mem_io.data_o (*r_w_data) >>
+        send mem_io.be (*r_w_strb) >>
+        cycle 1
+    }
+}
