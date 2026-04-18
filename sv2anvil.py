@@ -2307,6 +2307,17 @@ def convert_sv_to_anvil(sv_source: str) -> str:
     new_lines = []
     # Determine dominant width from registers (default 64)
     default_width = 64
+
+    # Build register type map from reg declarations
+    reg_type_map = {}  # reg_name -> anvil_type_str (e.g. "logic[32]")
+    for line in lines:
+        rm = re.match(r'\s*reg\s+(\w+)\s*:\s*(.+?)\s*;', line)
+        if rm:
+            reg_type_map[rm.group(1)] = rm.group(2)
+
+    # Collect all identifiers used in the output (for unused let detection)
+    all_output_text = output
+
     for line in lines:
         stripped = line.strip()
         if stripped.startswith('let ') and ' = ' in stripped:
@@ -2347,6 +2358,29 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     new_lines.append(f"{indent}let {_sanitize_ident(name)} = <(0)::logic[{width}]> /* {expr_comment} */{suffix}")
             else:
                 new_lines.append(line)
+        elif stripped.startswith('set ') and ' := ' in stripped:
+            # Cast set expressions to match register type
+            sm = re.match(r'^(\s*)set\s+(\w+)\s*:=\s*(.*)$', line)
+            if sm:
+                indent_s = sm.group(1)
+                reg_name = sm.group(2)
+                expr_rest = sm.group(3)
+                suffix = ""
+                expr_clean = expr_rest.rstrip()
+                if expr_clean.endswith('>>'):
+                    suffix = " >>"
+                    expr_clean = expr_clean[:-2].rstrip()
+
+                reg_type = reg_type_map.get(reg_name, f"logic[{default_width}]")
+
+                # If the expression is already properly typed, keep it
+                if expr_clean.startswith(f'<(') and f')::{reg_type}>' in expr_clean:
+                    new_lines.append(line)
+                else:
+                    # Wrap in cast to match register type
+                    new_lines.append(f"{indent_s}set {reg_name} := <({expr_clean})::{reg_type}>{suffix}")
+            else:
+                new_lines.append(line)
         else:
             new_lines.append(line)
     result = '\n'.join(new_lines)
@@ -2377,7 +2411,37 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         # Fix SV type casts: <(type_name ( expr ))::type> → <(0)::type>
         code_part = re.sub(r'<\((\w+_t\s*\([^)]*\))\)::(logic\[\d+\])>', r'<(0)::\2>', code_part)
         cleaned_lines.append(code_part + comment_part)
-    return '\n'.join(cleaned_lines)
+
+    # Remove unused let bindings (Anvil rejects them)
+    # Multiple passes since removing one let might make another unused
+    for _pass in range(5):
+        full_text = '\n'.join(cleaned_lines)
+        new_cleaned = []
+        removed = False
+        for line in cleaned_lines:
+            m = re.match(r'\s*let\s+(\w+)\s*=\s*', line)
+            if m:
+                let_name = m.group(1)
+                # Check if this name is used elsewhere in the output
+                # (not just in the let definition itself)
+                # Use word boundary check
+                pattern = r'\b' + re.escape(let_name) + r'\b'
+                # Count occurrences: should be >1 (the definition + at least one use)
+                occurrences = len(re.findall(pattern, full_text))
+                if occurrences <= 1:
+                    removed = True
+                    continue  # skip this unused let
+            new_cleaned.append(line)
+        cleaned_lines = new_cleaned
+        if not removed:
+            break
+
+    # Fix sequencing: ensure >> connectors are correct after let removal
+    result_text = '\n'.join(cleaned_lines)
+    # Remove trailing >> before a closing brace
+    result_text = re.sub(r'\s*>>\s*\n(\s*\})', r'\n\1', result_text)
+
+    return result_text
 
 
 def main():
