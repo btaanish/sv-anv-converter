@@ -2410,6 +2410,26 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         code_part = re.sub(r'<\(([^)]*)\)::(logic\[\d+\])>', _fix_struct_cast, code_part)
         # Fix SV type casts: <(type_name ( expr ))::type> → <(0)::type>
         code_part = re.sub(r'<\((\w+_t\s*\([^)]*\))\)::(logic\[\d+\])>', r'<(0)::\2>', code_part)
+
+        # Fix single-index array access: *reg [ N - 1 ] → <(*reg)::logic>
+        # This pattern appears when SV has reg_q[STAGES-1] for single-bit extraction
+        def _fix_single_index(m):
+            var = m.group(1)
+            return f"<({var})::logic>"
+        code_part = re.sub(r'(\*\w+)\s*\[\s*[^:\]]+\s*\]', _fix_single_index, code_part)
+
+        # Fix struct field access on registers: *reg.field → *reg
+        code_part = re.sub(r'(\*\w+)\.\w+', r'\1', code_part)
+
+        # Fix $clog2 that wasn't evaluated: $clog2 ( N ) → 1
+        code_part = re.sub(r'\$clog2\s*\(\s*[^)]+\s*\)', "1", code_part)
+
+        # Fix bare 0 in comparisons only: == 0, != 0, > 0, < 0 → use 1'b0
+        # These appear when parameter substitution creates expressions like `N > 0`
+        code_part = re.sub(r'([=!<>]=?\s*)0(?!\w|\')', r"\g<1>1'b0", code_part)
+        # Fix standalone 0 in logical expressions: && 0, || 0
+        code_part = re.sub(r'(&&\s*|&\s*|\|\|\s*|\|\s*)0(?!\w|\')', r"\g<1>1'b0", code_part)
+
         cleaned_lines.append(code_part + comment_part)
 
     # Remove unused let bindings (Anvil rejects them)
