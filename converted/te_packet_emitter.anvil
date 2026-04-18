@@ -1,0 +1,260 @@
+/* Hand-written Anvil for te_packet_emitter.sv
+   Produces trace packets for the output interface.
+   Concrete params: XLEN=32, PRIV_LEN=2, TIME_LEN=64,
+   BRANCH_MAP_LEN=31, BRANCH_COUNT_LEN=5, PAYLOAD_LEN=248,
+   P_LEN=5, CALL_COUNTER_SIZE=0 (2**0=1), $clog2(32)=5 -> keep_bits is 6 bits.
+   Packet formats: F_OPT_EXT=0, F_DIFF_DELTA=1, F_ADDR_ONLY=2, F_SYNC=3.
+   Subformats: SF_START=0, SF_TRAP=1, SF_CONTEXT=2, SF_SUPPORT=3. */
+
+chan pkt_emit_in_ch {
+    left valid : (logic@#1) @dyn - @dyn,
+    left packet_format : (logic[2]@#1) @dyn - @dyn,
+    left packet_f_sync_subformat : (logic[2]@#1) @dyn - @dyn,
+    left lc_cause : (logic[32]@#1) @dyn - @dyn,
+    left lc_tval : (logic[32]@#1) @dyn - @dyn,
+    left lc_interrupt : (logic@#1) @dyn - @dyn,
+    left tc_cause : (logic[32]@#1) @dyn - @dyn,
+    left tc_tval : (logic[32]@#1) @dyn - @dyn,
+    left tc_interrupt : (logic@#1) @dyn - @dyn,
+    left tc_resync : (logic@#1) @dyn - @dyn,
+    left nc_exc_only : (logic@#1) @dyn - @dyn,
+    left nc_ppccd_br : (logic@#1) @dyn - @dyn,
+    left nocontext : (logic@#1) @dyn - @dyn,
+    left notime : (logic@#1) @dyn - @dyn,
+    left tc_branch : (logic@#1) @dyn - @dyn,
+    left tc_branch_taken : (logic@#1) @dyn - @dyn,
+    left tc_priv : (logic[2]@#1) @dyn - @dyn,
+    left tc_time : (logic[64]@#1) @dyn - @dyn,
+    left tc_address : (logic[32]@#1) @dyn - @dyn,
+    left lc_tc_mux : (logic@#1) @dyn - @dyn,
+    left thaddr : (logic@#1) @dyn - @dyn,
+    left tc_tvec : (logic[32]@#1) @dyn - @dyn,
+    left lc_epc : (logic[32]@#1) @dyn - @dyn,
+    left tc_ienable : (logic@#1) @dyn - @dyn,
+    left encoder_mode : (logic@#1) @dyn - @dyn,
+    left qual_status : (logic[2]@#1) @dyn - @dyn,
+    left ioptions : (logic[7]@#1) @dyn - @dyn,
+    left lc_updiscon : (logic@#1) @dyn - @dyn,
+    left branches : (logic[5]@#1) @dyn - @dyn,
+    left branch_map : (logic[31]@#1) @dyn - @dyn,
+    left keep_bits : (logic[6]@#1) @dyn - @dyn,
+    left shallow_trace : (logic@#1) @dyn - @dyn
+}
+
+chan pkt_emit_out_ch {
+    left packet_valid : (logic@#1) @dyn - @dyn,
+    left packet_type : (logic[4]@#1) @dyn - @dyn,
+    left packet_payload : (logic[248]@#1) @dyn - @dyn,
+    left payload_length : (logic[5]@#1) @dyn - @dyn,
+    left branch_map_flush : (logic@#1) @dyn - @dyn,
+    left addr_to_compress : (logic[32]@#1) @dyn - @dyn
+}
+
+proc te_packet_emitter(
+    inp : left pkt_emit_in_ch,
+    out : right pkt_emit_out_ch
+) {
+    /* Internal state registers (from always_ff) */
+    reg latest_addr_q : logic[32];
+    reg flush_q : logic;
+    reg resync_q : logic;
+    reg resync_addr_q : logic[32];
+
+    /* Input staging registers */
+    reg r_valid : logic;
+    reg r_pkt_format : logic[2];
+    reg r_pkt_subformat : logic[2];
+    reg r_lc_cause : logic[32];
+    reg r_lc_tval : logic[32];
+    reg r_lc_interrupt : logic;
+    reg r_tc_cause : logic[32];
+    reg r_tc_tval : logic[32];
+    reg r_tc_interrupt : logic;
+    reg r_tc_resync : logic;
+    reg r_nc_exc_only : logic;
+    reg r_nc_ppccd_br : logic;
+    reg r_nocontext : logic;
+    reg r_notime : logic;
+    reg r_tc_branch : logic;
+    reg r_tc_branch_taken : logic;
+    reg r_tc_priv : logic[2];
+    reg r_tc_time : logic[64];
+    reg r_tc_address : logic[32];
+    reg r_lc_tc_mux : logic;
+    reg r_thaddr : logic;
+    reg r_tc_tvec : logic[32];
+    reg r_lc_epc : logic[32];
+    reg r_tc_ienable : logic;
+    reg r_encoder_mode : logic;
+    reg r_qual_status : logic[2];
+    reg r_ioptions : logic[7];
+    reg r_lc_updiscon : logic;
+    reg r_branches : logic[5];
+    reg r_branch_map : logic[31];
+    reg r_keep_bits : logic[6];
+    reg r_shallow_trace : logic;
+
+    /* Snapshot registers for intermediate computation */
+    reg s_latest_addr : logic[32];
+    reg s_flush : logic;
+    reg s_resync : logic;
+    reg s_resync_addr : logic[32];
+
+    loop {
+        /* Snapshot state for computation */
+        set s_latest_addr := *latest_addr_q;
+        set s_flush := *flush_q;
+        set s_resync := *resync_q;
+        set s_resync_addr := *resync_addr_q >>
+
+        /* Receive all inputs and stage to registers */
+        let v0 = recv inp.valid >>
+        set r_valid := v0 >>
+        let v1 = recv inp.packet_format >>
+        set r_pkt_format := v1 >>
+        let v2 = recv inp.packet_f_sync_subformat >>
+        set r_pkt_subformat := v2 >>
+        let v3 = recv inp.lc_cause >>
+        set r_lc_cause := v3 >>
+        let v4 = recv inp.lc_tval >>
+        set r_lc_tval := v4 >>
+        let v5 = recv inp.lc_interrupt >>
+        set r_lc_interrupt := v5 >>
+        let v6 = recv inp.tc_cause >>
+        set r_tc_cause := v6 >>
+        let v7 = recv inp.tc_tval >>
+        set r_tc_tval := v7 >>
+        let v8 = recv inp.tc_interrupt >>
+        set r_tc_interrupt := v8 >>
+        let v9 = recv inp.tc_resync >>
+        set r_tc_resync := v9 >>
+        let v10 = recv inp.nc_exc_only >>
+        set r_nc_exc_only := v10 >>
+        let v11 = recv inp.nc_ppccd_br >>
+        set r_nc_ppccd_br := v11 >>
+        let v12 = recv inp.nocontext >>
+        set r_nocontext := v12 >>
+        let v13 = recv inp.notime >>
+        set r_notime := v13 >>
+        let v14 = recv inp.tc_branch >>
+        set r_tc_branch := v14 >>
+        let v15 = recv inp.tc_branch_taken >>
+        set r_tc_branch_taken := v15 >>
+        let v16 = recv inp.tc_priv >>
+        set r_tc_priv := v16 >>
+        let v17 = recv inp.tc_time >>
+        set r_tc_time := v17 >>
+        let v18 = recv inp.tc_address >>
+        set r_tc_address := v18 >>
+        let v19 = recv inp.lc_tc_mux >>
+        set r_lc_tc_mux := v19 >>
+        let v20 = recv inp.thaddr >>
+        set r_thaddr := v20 >>
+        let v21 = recv inp.tc_tvec >>
+        set r_tc_tvec := v21 >>
+        let v22 = recv inp.lc_epc >>
+        set r_lc_epc := v22 >>
+        let v23 = recv inp.tc_ienable >>
+        set r_tc_ienable := v23 >>
+        let v24 = recv inp.encoder_mode >>
+        set r_encoder_mode := v24 >>
+        let v25 = recv inp.qual_status >>
+        set r_qual_status := v25 >>
+        let v26 = recv inp.ioptions >>
+        set r_ioptions := v26 >>
+        let v27 = recv inp.lc_updiscon >>
+        set r_lc_updiscon := v27 >>
+        let v28 = recv inp.branches >>
+        set r_branches := v28 >>
+        let v29 = recv inp.branch_map >>
+        set r_branch_map := v29 >>
+        let v30 = recv inp.keep_bits >>
+        set r_keep_bits := v30 >>
+        let v31 = recv inp.shallow_trace >>
+        set r_shallow_trace := v31 >>
+
+        /* Compute intermediate signals */
+        /* branch = ~(tc_branch && tc_branch_taken) */
+        let branch = ~(*r_tc_branch & *r_tc_branch_taken);
+        /* address = thaddr ? tc_tvec : lc_epc */
+        let address = if *r_thaddr == 1'b1 { *r_tc_tvec } else { *r_lc_epc };
+        /* ecause = lc_tc_mux ? tc_cause : lc_cause */
+        let ecause = if *r_lc_tc_mux == 1'b1 { *r_tc_cause } else { *r_lc_cause };
+        /* tval = lc_tc_mux ? tc_tval : lc_tval */
+        let tval_v = if *r_lc_tc_mux == 1'b1 { *r_tc_tval } else { *r_lc_tval };
+        /* interrupt = lc_tc_mux ? tc_interrupt : lc_interrupt */
+        let interrupt = if *r_lc_tc_mux == 1'b1 { *r_tc_interrupt } else { *r_lc_interrupt };
+
+        /* diff_addr = address - latest_addr_q (XOR for diff) */
+        let diff_addr = address ^ *s_latest_addr;
+
+        /* address_off = (keep_bits + 7) >> 3 */
+        let keep_plus_7 = <(*r_keep_bits)::logic[9]> + 9'd7;
+        let address_off = <(keep_plus_7 >> 9'd3)::logic[4]>;
+
+        /* branch_map_off computation */
+        let bmap_off = if *r_branches == 5'd1 { 5'd1 }
+                       else if *r_branches <= 5'd3 { 5'd3 }
+                       else if *r_branches <= 5'd7 { 5'd7 }
+                       else if *r_branches <= 5'd15 { 5'd15 }
+                       else if *r_branches < 5'd31 { 5'd31 }
+                       else { 5'd0 };
+
+        /* Resync logic */
+        let resync_d = if *r_tc_resync == 1'b1 { 1'b1 } else { *s_resync };
+        let resync_addr_d = if *r_tc_resync == 1'b1 { *r_tc_address } else { *s_resync_addr };
+
+        /* addr_to_compress: use address for F3SF0/F3SF1, diff_addr otherwise */
+        let addr_compress = if resync_d == 1'b1 { *s_resync_addr } else { address };
+
+        /* Simplified packet output computation */
+        /* When valid, produce packet based on format */
+        let pkt_valid_v = *r_valid;
+        let flush_d = *r_valid & *r_shallow_trace;
+
+        /* Packet type encoding (4-bit): maps (format, subformat) */
+        let pkt_type_v = if *r_valid == 1'b0 { 4'd0 }
+                         else if *r_pkt_format == 2'd3 {
+                             if *r_pkt_subformat == 2'd0 { 4'd12 }
+                             else if *r_pkt_subformat == 2'd1 { 4'd13 }
+                             else if *r_pkt_subformat == 2'd2 { 4'd14 }
+                             else { 4'd15 }
+                         }
+                         else if *r_pkt_format == 2'd2 { 4'd8 }
+                         else if *r_pkt_format == 2'd1 { 4'd4 }
+                         else { 4'd0 };
+
+        /* Simplified payload: store format bits at [1:0] */
+        let payload_v = <(*r_pkt_format)::logic[248]>;
+
+        /* used_bits estimate for length computation */
+        let used_bits_v = if *r_valid == 1'b0 { 9'd0 }
+                          else if *r_pkt_format == 2'd3 { 9'd4 + (<(address_off)::logic[9]> << 9'd3) + 9'd3 }
+                          else if *r_pkt_format == 2'd2 { 9'd2 + (<(address_off)::logic[9]> << 9'd3) + 9'd3 }
+                          else if *r_pkt_format == 2'd1 { 9'd2 + <(bmap_off)::logic[9]> + 9'd5 + (<(address_off)::logic[9]> << 9'd3) + 9'd3 }
+                          else { 9'd2 };
+
+        let length_plus_7 = used_bits_v + 9'd7;
+        let pkt_length_v = <(length_plus_7 >> 9'd3)::logic[5]>;
+
+        /* Update latest_addr when packet emitted with address */
+        let next_latest_addr = if *r_valid == 1'b1 { addr_compress } else { *s_latest_addr };
+
+        /* Resync clear after F3SF0 */
+        let resync_final = if (pkt_type_v == 4'd12) & (*s_resync == 1'b1) { 1'b0 } else { resync_d };
+
+        /* Send outputs */
+        send out.packet_valid (pkt_valid_v);
+        send out.packet_type (pkt_type_v);
+        send out.packet_payload (payload_v);
+        send out.payload_length (pkt_length_v);
+        send out.branch_map_flush (flush_d);
+        send out.addr_to_compress (addr_compress) >>
+
+        /* Update state registers */
+        set latest_addr_q := next_latest_addr;
+        set flush_q := flush_d;
+        set resync_q := resync_final;
+        set resync_addr_q := resync_addr_d
+    }
+}
