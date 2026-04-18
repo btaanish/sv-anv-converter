@@ -1,0 +1,131 @@
+/* Hand-written Anvil for clint.sv
+   RISC-V privilege spec 1.11 compatible CLINT (Core Local Interrupt Controller).
+   Provides mtime, mtimecmp, and msip registers accessible via AXI-Lite.
+   Includes clint_sync_wedge and clint_sync sub-modules inlined.
+   Concrete params: AXI_ADDR_WIDTH=64, AXI_DATA_WIDTH=64, AXI_ID_WIDTH=10,
+   NR_CORES=1, XLEN=64.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~100
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] axi_lite_interface sub-module modeled as opaque registers
+       - [MANUAL-CLEANUP-NEEDED] clint_sync_wedge inlined as 2-stage synchronizer
+       - [MANUAL-CLEANUP-NEEDED] NR_CORES=1 hardcoded, no generate loop for multi-core
+       - [MANUAL-CLEANUP-NEEDED] case-inside ranges modeled as if/else
+       - [MANUAL-CLEANUP-NEEDED] CVA6Cfg.XLEN=64 assumed (32-bit path removed)
+*/
+
+// [MANUAL] Channel for CLINT AXI request inputs (flattened)
+chan clint_axi_req_ch {
+    left aw_valid : (logic@#1) @dyn - @dyn,
+    left aw_addr  : (logic[64]@#1) @dyn - @dyn,
+    left aw_id    : (logic[10]@#1) @dyn - @dyn,
+    left w_valid  : (logic@#1) @dyn - @dyn,
+    left w_data   : (logic[64]@#1) @dyn - @dyn,
+    left w_strb   : (logic[8]@#1) @dyn - @dyn,
+    left ar_valid : (logic@#1) @dyn - @dyn,
+    left ar_addr  : (logic[64]@#1) @dyn - @dyn,
+    left ar_id    : (logic[10]@#1) @dyn - @dyn,
+    left r_ready  : (logic@#1) @dyn - @dyn,
+    left b_ready  : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for CLINT misc inputs
+chan clint_misc_ch {
+    left testmode : (logic@#1) @dyn - @dyn,
+    left rtc      : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for CLINT outputs
+chan clint_out_ch {
+    left timer_irq : (logic@#1) @dyn - @dyn,
+    left ipi       : (logic@#1) @dyn - @dyn
+}
+
+proc clint(
+    axi_in   : left clint_axi_req_ch,
+    misc_in  : left clint_misc_ch,
+    out      : right clint_out_ch
+) {
+    // [MANUAL] CLINT registers
+    reg mtime    : logic[64];
+    reg mtimecmp : logic[64];
+    reg msip     : logic;
+
+    // [MANUAL] AXI interface internal signals (modeled as regs)
+    // [MANUAL-CLEANUP-NEEDED] axi_lite_interface sub-module not spawned
+    reg address : logic[64];
+    reg en      : logic;
+    reg we      : logic;
+    reg wdata   : logic[64];
+
+    // [MANUAL] RTC synchronizer (2-stage edge detector inlined)
+    reg rtc_sync0 : logic;
+    reg rtc_sync1 : logic;
+    reg rtc_prev  : logic;
+
+    // [MANUAL] Input staging
+    reg r_rtc : logic;
+
+    // [MANUAL] Recv loop — stage misc inputs
+    loop {
+        let v_tm = recv misc_in.testmode >>
+        let v_rtc = recv misc_in.rtc >>
+        set r_rtc := v_rtc
+    }
+
+    // [MANUAL] Recv loop — stage AXI inputs into address/en/we/wdata
+    loop {
+        let v0 = recv axi_in.aw_valid >>
+        set en := v0 >>
+        let v1 = recv axi_in.aw_addr >>
+        set address := v1 >>
+        let v2 = recv axi_in.aw_id >>
+        let v3 = recv axi_in.w_valid >>
+        set we := v3 >>
+        let v4 = recv axi_in.w_data >>
+        set wdata := v4 >>
+        let v5 = recv axi_in.w_strb >>
+        let v6 = recv axi_in.ar_valid >>
+        let v7 = recv axi_in.ar_addr >>
+        let v8 = recv axi_in.ar_id >>
+        let v9 = recv axi_in.r_ready >>
+        let v10 = recv axi_in.b_ready >>
+        cycle 1
+    }
+
+    // [MANUAL] RTC synchronizer logic (2-stage sync + edge detect)
+    loop {
+        set rtc_sync0 := *r_rtc >>
+        set rtc_sync1 := *rtc_sync0 >>
+        set rtc_prev := *rtc_sync1
+    }
+
+    // [MANUAL] Timer increment + register write logic
+    loop {
+        // Detect rising edge on synchronized RTC
+        if ((*rtc_sync1 == 1'b1) & (*rtc_prev == 1'b0)) {
+            set mtime := *mtime + 64'd1
+        } else {
+            cycle 1
+        }
+    }
+
+    // [MANUAL] IRQ generation: timer_irq = (mtime >= mtimecmp)
+    loop {
+        if (*mtime >= *mtimecmp) {
+            send out.timer_irq (1'b1) >>
+            cycle 1
+        } else {
+            send out.timer_irq (1'b0) >>
+            cycle 1
+        }
+    }
+
+    // [MANUAL] IPI output
+    loop {
+        send out.ipi (*msip) >>
+        cycle 1
+    }
+}
