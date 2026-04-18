@@ -1242,6 +1242,8 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
 
     # '0 → explicit zero
     e = re.sub(r"'\{default\s*:\s*'0\s*\}", "0", e)
+    # Unsized literals: 'bXXX → 1'bXXX, 'hXXX → 1'hXXX, 'dXXX → 1'dXXX, 'oXXX → 1'oXXX
+    e = re.sub(r"'([bdho])([0-9a-fA-F_xXzZ]+)", r"1'\1\2", e)
     e = re.sub(r"'0", "1'b0", e)
     e = re.sub(r"'1", "1'b1", e)
 
