@@ -1,0 +1,418 @@
+/* Hand-written Anvil for axi_atop_filter.sv
+   AXI atomic operations (ATOP) filter: intercepts write transactions with
+   non-zero aw_atop, responds with SLVERR, ensures aw_atop=0 on master port.
+   Concrete params: AxiIdWidth=4, AxiMaxWriteTxns=4.
+
+   Architecture:
+     Write path FSM (w_state):
+       W_FEEDTHROUGH -> BLOCK_AW -> ABSORB_W -> HOLD_B -> INJECT_B -> WAIT_R
+     Read path FSM (r_state):
+       R_FEEDTHROUGH -> INJECT_R -> R_HOLD
+     W counter tracks outstanding downstream write bursts.
+     stream_register holds R response commands for atomic ops needing R beats.
+
+   Conversion notes:
+     - Two FSMs modeled with enum+match
+     - W counter modeled as register with increment/decrement
+     - stream_register modeled as single-entry FIFO register
+*/
+
+// Slave request input
+chan atop_slv_req_ch {
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_atop   : (logic[6]@#1)  @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Slave response output
+chan atop_slv_resp_ch {
+    left aw_ready  : (logic@#1)     @dyn - @dyn,
+    left w_ready   : (logic@#1)     @dyn - @dyn,
+    left b_valid   : (logic@#1)     @dyn - @dyn,
+    left b_id      : (logic[4]@#1)  @dyn - @dyn,
+    left b_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready  : (logic@#1)     @dyn - @dyn,
+    left r_valid   : (logic@#1)     @dyn - @dyn,
+    left r_data    : (logic[64]@#1) @dyn - @dyn,
+    left r_id      : (logic[4]@#1)  @dyn - @dyn,
+    left r_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left r_last    : (logic@#1)     @dyn - @dyn
+}
+
+// Master request output
+chan atop_mst_req_ch {
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Master response input
+chan atop_mst_resp_ch {
+    left aw_ready  : (logic@#1)     @dyn - @dyn,
+    left w_ready   : (logic@#1)     @dyn - @dyn,
+    left b_valid   : (logic@#1)     @dyn - @dyn,
+    left b_id      : (logic[4]@#1)  @dyn - @dyn,
+    left b_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready  : (logic@#1)     @dyn - @dyn,
+    left r_valid   : (logic@#1)     @dyn - @dyn,
+    left r_data    : (logic[64]@#1) @dyn - @dyn,
+    left r_id      : (logic[4]@#1)  @dyn - @dyn,
+    left r_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left r_last    : (logic@#1)     @dyn - @dyn
+}
+
+// Write path FSM states
+enum atop_w_state {
+    W_FEEDTHROUGH,
+    BLOCK_AW,
+    ABSORB_W,
+    HOLD_B,
+    INJECT_B,
+    WAIT_R
+}
+
+// Read path FSM states
+enum atop_r_state {
+    R_FEEDTHROUGH,
+    INJECT_R,
+    R_HOLD
+}
+
+proc axi_atop_filter(
+    slv_req  : left atop_slv_req_ch,
+    slv_resp : right atop_slv_resp_ch,
+    mst_req  : right atop_mst_req_ch,
+    mst_resp : left atop_mst_resp_ch
+) {
+    // Input staging: slave request
+    reg r_aw_valid : logic;
+    reg r_aw_addr  : logic[64];
+    reg r_aw_id    : logic[4];
+    reg r_aw_len   : logic[8];
+    reg r_aw_atop  : logic[6];
+    reg r_w_valid  : logic;
+    reg r_w_data   : logic[64];
+    reg r_w_strb   : logic[8];
+    reg r_w_last   : logic;
+    reg r_b_ready  : logic;
+    reg r_ar_valid : logic;
+    reg r_ar_addr  : logic[64];
+    reg r_ar_id    : logic[4];
+    reg r_ar_len   : logic[8];
+    reg r_r_ready  : logic;
+
+    // Input staging: master response
+    reg r_m_aw_ready : logic;
+    reg r_m_w_ready  : logic;
+    reg r_m_b_valid  : logic;
+    reg r_m_b_id     : logic[4];
+    reg r_m_b_resp   : logic[2];
+    reg r_m_ar_ready : logic;
+    reg r_m_r_valid  : logic;
+    reg r_m_r_data   : logic[64];
+    reg r_m_r_id     : logic[4];
+    reg r_m_r_resp   : logic[2];
+    reg r_m_r_last   : logic;
+
+    // FSM state registers
+    reg w_state : atop_w_state;
+    reg r_state : atop_r_state;
+
+    // Stored ID for B and R responses to atomic ops
+    reg id_q : logic[4];
+
+    // W counter: tracks outstanding downstream write bursts
+    reg w_cnt : logic[4];
+
+    // R beats counter for injected R responses
+    reg r_beats : logic[8];
+
+    // R response command FIFO (depth 1)
+    reg r_cmd_valid : logic;
+    reg r_cmd_len   : logic[8];
+
+    // Output staging
+    reg o_s_aw_ready : logic;
+    reg o_s_w_ready  : logic;
+    reg o_s_b_valid  : logic;
+    reg o_s_b_id     : logic[4];
+    reg o_s_b_resp   : logic[2];
+    reg o_s_ar_ready : logic;
+    reg o_s_r_valid  : logic;
+    reg o_s_r_data   : logic[64];
+    reg o_s_r_id     : logic[4];
+    reg o_s_r_resp   : logic[2];
+    reg o_s_r_last   : logic;
+
+    reg o_m_aw_valid : logic;
+    reg o_m_aw_addr  : logic[64];
+    reg o_m_aw_id    : logic[4];
+    reg o_m_w_valid  : logic;
+    reg o_m_w_data   : logic[64];
+    reg o_m_w_strb   : logic[8];
+    reg o_m_w_last   : logic;
+    reg o_m_b_ready  : logic;
+    reg o_m_ar_valid : logic;
+    reg o_m_ar_addr  : logic[64];
+    reg o_m_ar_id    : logic[4];
+    reg o_m_r_ready  : logic;
+
+    // Recv slave request
+    loop { let v = recv slv_req.aw_valid >> set r_aw_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_addr >> set r_aw_addr := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_id >> set r_aw_id := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_len >> set r_aw_len := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_atop >> set r_aw_atop := v >> cycle 1 }
+    loop { let v = recv slv_req.w_valid >> set r_w_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.w_data >> set r_w_data := v >> cycle 1 }
+    loop { let v = recv slv_req.w_strb >> set r_w_strb := v >> cycle 1 }
+    loop { let v = recv slv_req.w_last >> set r_w_last := v >> cycle 1 }
+    loop { let v = recv slv_req.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_valid >> set r_ar_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_addr >> set r_ar_addr := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_id >> set r_ar_id := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_len >> set r_ar_len := v >> cycle 1 }
+    loop { let v = recv slv_req.r_ready >> set r_r_ready := v >> cycle 1 }
+
+    // Recv master response
+    loop { let v = recv mst_resp.aw_ready >> set r_m_aw_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.w_ready >> set r_m_w_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_valid >> set r_m_b_valid := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_id >> set r_m_b_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_resp >> set r_m_b_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.ar_ready >> set r_m_ar_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_valid >> set r_m_r_valid := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_data >> set r_m_r_data := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_id >> set r_m_r_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_resp >> set r_m_r_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_last >> set r_m_r_last := v >> cycle 1 }
+
+    // Send slave response
+    loop { send slv_resp.aw_ready (*o_s_aw_ready) >> cycle 1 }
+    loop { send slv_resp.w_ready (*o_s_w_ready) >> cycle 1 }
+    loop { send slv_resp.b_valid (*o_s_b_valid) >> cycle 1 }
+    loop { send slv_resp.b_id (*o_s_b_id) >> cycle 1 }
+    loop { send slv_resp.b_resp (*o_s_b_resp) >> cycle 1 }
+    loop { send slv_resp.ar_ready (*o_s_ar_ready) >> cycle 1 }
+    loop { send slv_resp.r_valid (*o_s_r_valid) >> cycle 1 }
+    loop { send slv_resp.r_data (*o_s_r_data) >> cycle 1 }
+    loop { send slv_resp.r_id (*o_s_r_id) >> cycle 1 }
+    loop { send slv_resp.r_resp (*o_s_r_resp) >> cycle 1 }
+    loop { send slv_resp.r_last (*o_s_r_last) >> cycle 1 }
+
+    // Send master request
+    loop { send mst_req.aw_valid (*o_m_aw_valid) >> cycle 1 }
+    loop { send mst_req.aw_addr (*o_m_aw_addr) >> cycle 1 }
+    loop { send mst_req.aw_id (*o_m_aw_id) >> cycle 1 }
+    loop { send mst_req.w_valid (*o_m_w_valid) >> cycle 1 }
+    loop { send mst_req.w_data (*o_m_w_data) >> cycle 1 }
+    loop { send mst_req.w_strb (*o_m_w_strb) >> cycle 1 }
+    loop { send mst_req.w_last (*o_m_w_last) >> cycle 1 }
+    loop { send mst_req.b_ready (*o_m_b_ready) >> cycle 1 }
+    loop { send mst_req.ar_valid (*o_m_ar_valid) >> cycle 1 }
+    loop { send mst_req.ar_addr (*o_m_ar_addr) >> cycle 1 }
+    loop { send mst_req.ar_id (*o_m_ar_id) >> cycle 1 }
+    loop { send mst_req.r_ready (*o_m_r_ready) >> cycle 1 }
+
+    // ==============================
+    // AR channel: feed through
+    // ==============================
+    loop {
+        set o_m_ar_valid := *r_ar_valid >>
+        set o_m_ar_addr := *r_ar_addr >>
+        set o_m_ar_id := *r_ar_id >>
+        set o_s_ar_ready := *r_m_ar_ready
+    }
+
+    // ==============================
+    // Write path FSM
+    // ==============================
+    loop {
+        match (*w_state) {
+            atop_w_state::W_FEEDTHROUGH => {
+                // Check if AW has non-zero ATOP (upper 2 bits != 0)
+                if (*r_aw_valid == 1'b1) {
+                    if (*r_aw_atop & 6'd48 != 6'd0) {
+                        // Atomic operation detected: absorb AW, store ID
+                        set o_m_aw_valid := 1'b0 >>
+                        set o_s_aw_ready := 1'b1 >>
+                        set id_q := *r_aw_id >>
+                        // Absorb W beats
+                        set o_m_w_valid := 1'b0 >>
+                        set o_s_w_ready := 1'b1 >>
+                        if (*r_w_valid == 1'b1) {
+                            if (*r_w_last == 1'b1) {
+                                set w_state := atop_w_state::INJECT_B
+                            } else {
+                                set w_state := atop_w_state::ABSORB_W
+                            }
+                        } else {
+                            set w_state := atop_w_state::ABSORB_W
+                        }
+                    } else {
+                        // Normal AW: pass through
+                        set o_m_aw_valid := *r_aw_valid >>
+                        set o_s_aw_ready := *r_m_aw_ready >>
+                        set o_m_w_valid := *r_w_valid >>
+                        set o_s_w_ready := *r_m_w_ready >>
+                        // Feed B through
+                        set o_m_b_ready := *r_b_ready >>
+                        set o_s_b_valid := *r_m_b_valid >>
+                        set o_s_b_id := *r_m_b_id >>
+                        set o_s_b_resp := *r_m_b_resp >>
+                        cycle 1
+                    }
+                } else {
+                    // No AW: still pass W and B through
+                    set o_m_aw_valid := 1'b0 >>
+                    set o_s_aw_ready := 1'b0 >>
+                    set o_m_w_valid := *r_w_valid >>
+                    set o_s_w_ready := *r_m_w_ready >>
+                    set o_m_b_ready := *r_b_ready >>
+                    set o_s_b_valid := *r_m_b_valid >>
+                    set o_s_b_id := *r_m_b_id >>
+                    set o_s_b_resp := *r_m_b_resp >>
+                    cycle 1
+                }
+            },
+            atop_w_state::ABSORB_W => {
+                // Absorb all W beats
+                set o_s_w_ready := 1'b1 >>
+                set o_m_w_valid := 1'b0 >>
+                if (*r_w_valid == 1'b1) {
+                    if (*r_w_last == 1'b1) {
+                        set w_state := atop_w_state::INJECT_B
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            atop_w_state::HOLD_B => {
+                if (*r_m_b_valid == 1'b1) {
+                    if (*r_b_ready == 1'b1) {
+                        set w_state := atop_w_state::INJECT_B
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            atop_w_state::INJECT_B => {
+                // Inject SLVERR B response
+                set o_m_b_ready := 1'b0 >>
+                set o_s_b_valid := 1'b1 >>
+                set o_s_b_id := *id_q >>
+                set o_s_b_resp := 2'b10 >>
+                if (*r_b_ready == 1'b1) {
+                    set w_state := atop_w_state::W_FEEDTHROUGH
+                } else {
+                    cycle 1
+                }
+            },
+            atop_w_state::WAIT_R => {
+                if (*r_cmd_valid == 1'b0) {
+                    set w_state := atop_w_state::W_FEEDTHROUGH
+                } else {
+                    cycle 1
+                }
+            },
+            _ => {
+                // BLOCK_AW: let outstanding W bursts complete
+                set o_m_w_valid := *r_w_valid >>
+                set o_s_w_ready := *r_m_w_ready >>
+                if (*w_cnt == 4'd0) {
+                    set o_s_w_ready := 1'b1 >>
+                    if (*r_w_valid == 1'b1) {
+                        if (*r_w_last == 1'b1) {
+                            set w_state := atop_w_state::INJECT_B
+                        } else {
+                            set w_state := atop_w_state::ABSORB_W
+                        }
+                    } else {
+                        set w_state := atop_w_state::ABSORB_W
+                    }
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // ==============================
+    // Read path FSM
+    // ==============================
+    loop {
+        match (*r_state) {
+            atop_r_state::R_FEEDTHROUGH => {
+                // Feed R through
+                set o_s_r_valid := *r_m_r_valid >>
+                set o_s_r_data := *r_m_r_data >>
+                set o_s_r_id := *r_m_r_id >>
+                set o_s_r_resp := *r_m_r_resp >>
+                set o_s_r_last := *r_m_r_last >>
+                set o_m_r_ready := *r_r_ready >>
+                if (*r_cmd_valid == 1'b1) {
+                    set r_beats := *r_cmd_len >>
+                    set r_state := atop_r_state::INJECT_R
+                } else {
+                    cycle 1
+                }
+            },
+            atop_r_state::INJECT_R => {
+                // Inject SLVERR R beats
+                set o_m_r_ready := 1'b0 >>
+                set o_s_r_valid := 1'b1 >>
+                set o_s_r_data := 64'd0 >>
+                set o_s_r_id := *id_q >>
+                set o_s_r_resp := 2'b10 >>
+                set o_s_r_last := if (*r_beats == 8'd0) { 1'b1 } else { 1'b0 } >>
+                if (*r_r_ready == 1'b1) {
+                    if (*r_beats == 8'd0) {
+                        set r_cmd_valid := 1'b0 >>
+                        set r_state := atop_r_state::R_FEEDTHROUGH
+                    } else {
+                        set r_beats := *r_beats - 8'd1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            _ => {
+                // R_HOLD
+                if (*r_m_r_valid == 1'b1) {
+                    if (*r_r_ready == 1'b1) {
+                        set r_state := atop_r_state::R_FEEDTHROUGH
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+}

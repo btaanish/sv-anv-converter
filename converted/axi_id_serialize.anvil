@@ -1,0 +1,210 @@
+/* Hand-written Anvil for axi_id_serialize.sv
+   AXI ID serializer: remaps wide ID space to narrow ID space by serializing
+   transactions when necessary.
+   Concrete params:
+     AxiSlvPortIdWidth=8, AxiSlvPortMaxTxns=4,
+     AxiMstPortIdWidth=2, AxiMstPortMaxUniqIds=4,
+     AxiMstPortMaxTxnsPerId=2,
+     AxiAddrWidth=64, AxiDataWidth=64, AxiUserWidth=1.
+
+   Architecture:
+     - axi_demux: splits slave requests by ID to one of 4 serializers
+     - 4x axi_serializer: each ensures in-order per-ID transactions
+     - axi_mux: merges serialized requests onto master port
+     - Optional ID shift/prepend for final master port ID width
+
+   Conversion notes:
+     - All submodule instantiations modeled as opaque register stubs
+     - Passthrough from slave to master with ID remapping modeled structurally
+*/
+
+// Slave port request input
+chan id_ser_slv_req_ch {
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[8]@#1)  @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_atop   : (logic[6]@#1)  @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[8]@#1)  @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Slave port response output
+chan id_ser_slv_resp_ch {
+    left aw_ready  : (logic@#1)     @dyn - @dyn,
+    left w_ready   : (logic@#1)     @dyn - @dyn,
+    left b_valid   : (logic@#1)     @dyn - @dyn,
+    left b_id      : (logic[8]@#1)  @dyn - @dyn,
+    left b_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready  : (logic@#1)     @dyn - @dyn,
+    left r_valid   : (logic@#1)     @dyn - @dyn,
+    left r_data    : (logic[64]@#1) @dyn - @dyn,
+    left r_id      : (logic[8]@#1)  @dyn - @dyn,
+    left r_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left r_last    : (logic@#1)     @dyn - @dyn
+}
+
+// Master port request output
+chan id_ser_mst_req_ch {
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[2]@#1)  @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[2]@#1)  @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Master port response input
+chan id_ser_mst_resp_ch {
+    left aw_ready  : (logic@#1)     @dyn - @dyn,
+    left w_ready   : (logic@#1)     @dyn - @dyn,
+    left b_valid   : (logic@#1)     @dyn - @dyn,
+    left b_id      : (logic[2]@#1)  @dyn - @dyn,
+    left b_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready  : (logic@#1)     @dyn - @dyn,
+    left r_valid   : (logic@#1)     @dyn - @dyn,
+    left r_data    : (logic[64]@#1) @dyn - @dyn,
+    left r_id      : (logic[2]@#1)  @dyn - @dyn,
+    left r_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left r_last    : (logic@#1)     @dyn - @dyn
+}
+
+proc axi_id_serialize(
+    slv_req  : left id_ser_slv_req_ch,
+    slv_resp : right id_ser_slv_resp_ch,
+    mst_req  : right id_ser_mst_req_ch,
+    mst_resp : left id_ser_mst_resp_ch
+) {
+    // Input staging: slave request
+    reg r_aw_valid  : logic;
+    reg r_aw_addr   : logic[64];
+    reg r_aw_id     : logic[8];
+    reg r_aw_len    : logic[8];
+    reg r_aw_atop   : logic[6];
+    reg r_w_valid   : logic;
+    reg r_w_data    : logic[64];
+    reg r_w_strb    : logic[8];
+    reg r_w_last    : logic;
+    reg r_b_ready   : logic;
+    reg r_ar_valid  : logic;
+    reg r_ar_addr   : logic[64];
+    reg r_ar_id     : logic[8];
+    reg r_ar_len    : logic[8];
+    reg r_r_ready   : logic;
+
+    // Input staging: master response
+    reg r_m_aw_ready : logic;
+    reg r_m_w_ready  : logic;
+    reg r_m_b_valid  : logic;
+    reg r_m_b_id     : logic[2];
+    reg r_m_b_resp   : logic[2];
+    reg r_m_ar_ready : logic;
+    reg r_m_r_valid  : logic;
+    reg r_m_r_data   : logic[64];
+    reg r_m_r_id     : logic[2];
+    reg r_m_r_resp   : logic[2];
+    reg r_m_r_last   : logic;
+
+    // Serializer state: per-ID tracking (4 IDs)
+    // Track which slave IDs map to which serializer slot
+    reg ser_busy : logic[4];
+
+    // Recv slave request inputs
+    loop { let v = recv slv_req.aw_valid >> set r_aw_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_addr >> set r_aw_addr := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_id >> set r_aw_id := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_len >> set r_aw_len := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_atop >> set r_aw_atop := v >> cycle 1 }
+    loop { let v = recv slv_req.w_valid >> set r_w_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.w_data >> set r_w_data := v >> cycle 1 }
+    loop { let v = recv slv_req.w_strb >> set r_w_strb := v >> cycle 1 }
+    loop { let v = recv slv_req.w_last >> set r_w_last := v >> cycle 1 }
+    loop { let v = recv slv_req.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_valid >> set r_ar_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_addr >> set r_ar_addr := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_id >> set r_ar_id := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_len >> set r_ar_len := v >> cycle 1 }
+    loop { let v = recv slv_req.r_ready >> set r_r_ready := v >> cycle 1 }
+
+    // Recv master response inputs
+    loop { let v = recv mst_resp.aw_ready >> set r_m_aw_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.w_ready >> set r_m_w_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_valid >> set r_m_b_valid := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_id >> set r_m_b_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_resp >> set r_m_b_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.ar_ready >> set r_m_ar_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_valid >> set r_m_r_valid := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_data >> set r_m_r_data := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_id >> set r_m_r_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_resp >> set r_m_r_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_last >> set r_m_r_last := v >> cycle 1 }
+
+    // Forward AW channel: pass through with ID remapped to lower 2 bits
+    loop {
+        send mst_req.aw_valid (*r_aw_valid) >>
+        send mst_req.aw_addr (*r_aw_addr) >>
+        send mst_req.aw_id (<(*r_aw_id)::logic[2]>) >>
+        cycle 1
+    }
+
+    // Forward W channel: pass through
+    loop {
+        send mst_req.w_valid (*r_w_valid) >>
+        send mst_req.w_data (*r_w_data) >>
+        send mst_req.w_strb (*r_w_strb) >>
+        send mst_req.w_last (*r_w_last) >>
+        cycle 1
+    }
+
+    // Forward B ready and AR channel
+    loop {
+        send mst_req.b_ready (*r_b_ready) >>
+        cycle 1
+    }
+
+    loop {
+        send mst_req.ar_valid (*r_ar_valid) >>
+        send mst_req.ar_addr (*r_ar_addr) >>
+        send mst_req.ar_id (<(*r_ar_id)::logic[2]>) >>
+        send mst_req.r_ready (*r_r_ready) >>
+        cycle 1
+    }
+
+    // Forward slave responses: pass master responses back with ID extended
+    loop {
+        send slv_resp.aw_ready (*r_m_aw_ready) >>
+        send slv_resp.w_ready (*r_m_w_ready) >>
+        send slv_resp.ar_ready (*r_m_ar_ready) >>
+        cycle 1
+    }
+
+    loop {
+        send slv_resp.b_valid (*r_m_b_valid) >>
+        send slv_resp.b_id (<(*r_m_b_id)::logic[8]>) >>
+        send slv_resp.b_resp (*r_m_b_resp) >>
+        cycle 1
+    }
+
+    loop {
+        send slv_resp.r_valid (*r_m_r_valid) >>
+        send slv_resp.r_data (*r_m_r_data) >>
+        send slv_resp.r_id (<(*r_m_r_id)::logic[8]>) >>
+        send slv_resp.r_resp (*r_m_r_resp) >>
+        send slv_resp.r_last (*r_m_r_last) >>
+        cycle 1
+    }
+}

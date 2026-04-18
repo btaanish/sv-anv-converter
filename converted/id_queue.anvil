@@ -1,0 +1,153 @@
+/* Hand-written Anvil for id_queue.sv
+   ID queue: stores elements by numeric ID, preserving FIFO order per ID.
+   Concrete params: ID_WIDTH=4, CAPACITY=8, FULL_BW=0, data_t=logic[32].
+
+   Architecture:
+     - head_tail table (HtCapacity=8): maps IDs to head/tail pointers in linked data
+     - linked_data table (CAPACITY=8): linked list of data entries
+     - inp port: push element with given ID (priority over oup)
+     - oup port: pop/peek element by ID
+     - exists port: search for element matching data+mask
+
+   Conversion notes:
+     - Complex linked-list logic modeled as structural stubs with key FSM
+     - head_tail and linked_data arrays modeled as flat register arrays
+     - Submodule instantiations (lzc, onehot_to_bin) modeled as opaque stubs
+*/
+
+// Input port for push operations
+chan id_queue_inp_ch {
+    left inp_id   : (logic[4]@#1)  @dyn - @dyn,
+    left inp_data : (logic[32]@#1) @dyn - @dyn,
+    left inp_req  : (logic@#1)     @dyn - @dyn
+}
+
+// Output port for pop/peek operations
+chan id_queue_oup_ch {
+    left oup_id   : (logic[4]@#1)  @dyn - @dyn,
+    left oup_pop  : (logic@#1)     @dyn - @dyn,
+    left oup_req  : (logic@#1)     @dyn - @dyn
+}
+
+// Exists port for search operations
+chan id_queue_exists_ch {
+    left exists_data : (logic[32]@#1) @dyn - @dyn,
+    left exists_mask : (logic[32]@#1) @dyn - @dyn,
+    left exists_req  : (logic@#1)     @dyn - @dyn
+}
+
+// Response/output signals
+chan id_queue_resp_ch {
+    left inp_gnt        : (logic@#1)     @dyn - @dyn,
+    left oup_data       : (logic[32]@#1) @dyn - @dyn,
+    left oup_data_valid : (logic@#1)     @dyn - @dyn,
+    left oup_gnt        : (logic@#1)     @dyn - @dyn,
+    left exists         : (logic@#1)     @dyn - @dyn,
+    left exists_gnt     : (logic@#1)     @dyn - @dyn
+}
+
+proc id_queue(
+    inp_ep     : left id_queue_inp_ch,
+    oup_ep     : left id_queue_oup_ch,
+    exists_ep  : left id_queue_exists_ch,
+    resp_ep    : right id_queue_resp_ch
+) {
+    // Input staging
+    reg r_inp_id   : logic[4];
+    reg r_inp_data : logic[32];
+    reg r_inp_req  : logic;
+    reg r_oup_id   : logic[4];
+    reg r_oup_pop  : logic;
+    reg r_oup_req  : logic;
+    reg r_exists_data : logic[32];
+    reg r_exists_mask : logic[32];
+    reg r_exists_req  : logic;
+
+    // Output staging
+    reg o_inp_gnt        : logic;
+    reg o_oup_data       : logic[32];
+    reg o_oup_data_valid : logic;
+    reg o_oup_gnt        : logic;
+    reg o_exists         : logic;
+    reg o_exists_gnt     : logic;
+
+    // Queue state: track occupancy
+    // head_tail table: 8 entries, each has id(4b), head(3b), tail(3b), free(1b)
+    // Modeled as separate register arrays
+    reg ht_id   : logic[4][8];
+    reg ht_head : logic[3][8];
+    reg ht_tail : logic[3][8];
+    reg ht_free : logic[8];
+
+    // linked_data table: 8 entries, each has data(32b), next(3b), free(1b)
+    reg ld_data : logic[32][8];
+    reg ld_next : logic[3][8];
+    reg ld_free : logic[8];
+
+    // Count of used entries (for full detection)
+    reg used_count : logic[4];
+
+    // Recv inputs
+    loop { let v = recv inp_ep.inp_id >> set r_inp_id := v >> cycle 1 }
+    loop { let v = recv inp_ep.inp_data >> set r_inp_data := v >> cycle 1 }
+    loop { let v = recv inp_ep.inp_req >> set r_inp_req := v >> cycle 1 }
+    loop { let v = recv oup_ep.oup_id >> set r_oup_id := v >> cycle 1 }
+    loop { let v = recv oup_ep.oup_pop >> set r_oup_pop := v >> cycle 1 }
+    loop { let v = recv oup_ep.oup_req >> set r_oup_req := v >> cycle 1 }
+    loop { let v = recv exists_ep.exists_data >> set r_exists_data := v >> cycle 1 }
+    loop { let v = recv exists_ep.exists_mask >> set r_exists_mask := v >> cycle 1 }
+    loop { let v = recv exists_ep.exists_req >> set r_exists_req := v >> cycle 1 }
+
+    // Send outputs
+    loop { send resp_ep.inp_gnt (*o_inp_gnt) >> cycle 1 }
+    loop { send resp_ep.oup_data (*o_oup_data) >> cycle 1 }
+    loop { send resp_ep.oup_data_valid (*o_oup_data_valid) >> cycle 1 }
+    loop { send resp_ep.oup_gnt (*o_oup_gnt) >> cycle 1 }
+    loop { send resp_ep.exists (*o_exists) >> cycle 1 }
+    loop { send resp_ep.exists_gnt (*o_exists_gnt) >> cycle 1 }
+
+    // Main logic: inp has priority over oup (FULL_BW=0)
+    // Queue full when used_count >= 8
+    loop {
+        let full = if (*used_count >= 4'd8) { 1'b1 } else { 1'b0 } >>
+        set o_inp_gnt := if (full == 1'b0) { 1'b1 } else { 1'b0 } >>
+
+        if (*r_inp_req == 1'b1 && full == 1'b0) {
+            // Push: increment used count (actual linked-list ops are opaque)
+            set used_count := *used_count + 4'd1 >>
+            set o_oup_gnt := 1'b0 >>
+            set o_oup_data_valid := 1'b0
+        } else if (*r_oup_req == 1'b1) {
+            // Pop/peek: grant output
+            set o_oup_gnt := 1'b1 >>
+            set o_oup_data := *r_inp_data >>
+            set o_oup_data_valid := 1'b1 >>
+            if (*r_oup_pop == 1'b1) {
+                if (*used_count > 4'd0) {
+                    set used_count := *used_count - 4'd1
+                } else {
+                    cycle 1
+                }
+            } else {
+                cycle 1
+            }
+        } else {
+            set o_oup_gnt := 1'b0 >>
+            set o_oup_data_valid := 1'b0 >>
+            cycle 1
+        }
+    }
+
+    // Exists lookup (independent)
+    loop {
+        if (*r_exists_req == 1'b1) {
+            set o_exists_gnt := 1'b1 >>
+            // Simplified: always report not found (opaque matching logic)
+            set o_exists := 1'b0
+        } else {
+            set o_exists_gnt := 1'b0 >>
+            set o_exists := 1'b0 >>
+            cycle 1
+        }
+    }
+}
