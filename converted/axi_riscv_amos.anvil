@@ -1,0 +1,654 @@
+/* Hand-written Anvil for axi_riscv_amos.sv
+   AXI RISC-V Atomic Operations (AMOs) Adapter.
+   Implements atomic memory operations per RVWMO consistency model.
+
+   Concrete params:
+     AXI_ADDR_WIDTH=64, AXI_DATA_WIDTH=64, AXI_ID_WIDTH=4,
+     AXI_USER_WIDTH=1, AXI_MAX_WRITE_TXNS=8, RISCV_WORD_WIDTH=64.
+     AXI_STRB_WIDTH=8, AXI_ALU_RATIO=1, OUTSTND_BURSTS_WIDTH=4.
+
+   5 FSMs: AW, W, B, AR, R for atomic operation handling.
+   States encoded with reg values (0=feedthrough/reset default).
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~350
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] ALU submodule (axi_riscv_amos_alu) modeled inline
+       - [MANUAL-CLEANUP-NEEDED] Big-endian byte swap not modeled
+       - [MANUAL-CLEANUP-NEEDED] Sign extension for SMAX/SMIN simplified
+       - [MANUAL-CLEANUP-NEEDED] Full AXI signal passthrough simplified to handshake control
+*/
+
+// Slave AW request
+chan amos_slv_aw_ch {
+    left valid  : (logic@#1) @dyn - @dyn,
+    left addr   : (logic[64]@#1) @dyn - @dyn,
+    left id     : (logic[4]@#1) @dyn - @dyn,
+    left atop   : (logic[6]@#1) @dyn - @dyn,
+    left len    : (logic[8]@#1) @dyn - @dyn,
+    left size   : (logic[3]@#1) @dyn - @dyn,
+    left lock   : (logic@#1) @dyn - @dyn,
+    left cache  : (logic[4]@#1) @dyn - @dyn,
+    left prot   : (logic[3]@#1) @dyn - @dyn,
+    left qos    : (logic[4]@#1) @dyn - @dyn,
+    left region : (logic[4]@#1) @dyn - @dyn
+}
+
+// Slave AR request
+chan amos_slv_ar_ch {
+    left valid : (logic@#1) @dyn - @dyn,
+    left addr  : (logic[64]@#1) @dyn - @dyn,
+    left id    : (logic[4]@#1) @dyn - @dyn
+}
+
+// Slave W data
+chan amos_slv_w_ch {
+    left valid : (logic@#1) @dyn - @dyn,
+    left data  : (logic[64]@#1) @dyn - @dyn,
+    left strb  : (logic[8]@#1) @dyn - @dyn,
+    left last  : (logic@#1) @dyn - @dyn
+}
+
+// Master responses
+chan amos_mst_resp_ch {
+    left aw_ready : (logic@#1) @dyn - @dyn,
+    left ar_ready : (logic@#1) @dyn - @dyn,
+    left w_ready  : (logic@#1) @dyn - @dyn,
+    left b_valid  : (logic@#1) @dyn - @dyn,
+    left b_id     : (logic[4]@#1) @dyn - @dyn,
+    left b_resp   : (logic[2]@#1) @dyn - @dyn,
+    left r_valid  : (logic@#1) @dyn - @dyn,
+    left r_data   : (logic[64]@#1) @dyn - @dyn,
+    left r_id     : (logic[4]@#1) @dyn - @dyn,
+    left r_resp   : (logic[2]@#1) @dyn - @dyn,
+    left r_last   : (logic@#1) @dyn - @dyn
+}
+
+// Slave B/R ready
+chan amos_slv_ready_ch {
+    left b_ready : (logic@#1) @dyn - @dyn,
+    left r_ready : (logic@#1) @dyn - @dyn
+}
+
+// Output control signals
+chan amos_out_ch {
+    left mst_aw_valid : (logic@#1) @dyn - @dyn,
+    left mst_ar_valid : (logic@#1) @dyn - @dyn,
+    left mst_w_valid  : (logic@#1) @dyn - @dyn,
+    left mst_w_data   : (logic[64]@#1) @dyn - @dyn,
+    left mst_w_strb   : (logic[8]@#1) @dyn - @dyn,
+    left mst_w_last   : (logic@#1) @dyn - @dyn,
+    left slv_aw_ready : (logic@#1) @dyn - @dyn,
+    left slv_ar_ready : (logic@#1) @dyn - @dyn,
+    left slv_w_ready  : (logic@#1) @dyn - @dyn,
+    left slv_b_valid  : (logic@#1) @dyn - @dyn,
+    left slv_b_resp   : (logic[2]@#1) @dyn - @dyn,
+    left slv_b_id     : (logic[4]@#1) @dyn - @dyn,
+    left slv_r_valid  : (logic@#1) @dyn - @dyn,
+    left slv_r_data   : (logic[64]@#1) @dyn - @dyn,
+    left slv_r_resp   : (logic[2]@#1) @dyn - @dyn,
+    left slv_r_id     : (logic[4]@#1) @dyn - @dyn,
+    left slv_r_last   : (logic@#1) @dyn - @dyn,
+    left mst_b_ready  : (logic@#1) @dyn - @dyn,
+    left mst_r_ready  : (logic@#1) @dyn - @dyn
+}
+
+// AMO ALU function (inline)
+func amo_alu(op, a, b) {
+    match (op) {
+        // ATOP_ADD = 3'b000
+        6'd0  => a + b,
+        6'd32 => a + b,
+        // ATOP_SWAP = 6'b110000
+        6'd48 => b,
+        // ATOP_AND
+        6'd1  => a & b,
+        6'd33 => a & b,
+        // ATOP_OR
+        6'd2  => a | b,
+        6'd34 => a | b,
+        // ATOP_XOR
+        6'd3  => a ^ b,
+        6'd35 => a ^ b,
+        // ATOP_UMAX
+        6'd6  => if a > b { a } else { b },
+        6'd38 => if a > b { a } else { b },
+        // ATOP_UMIN
+        6'd7  => if a < b { a } else { b },
+        6'd39 => if a < b { a } else { b },
+        // Default: pass through b (swap-like)
+        _     => b
+    }
+}
+
+proc axi_riscv_amos(
+    slv_aw   : left amos_slv_aw_ch,
+    slv_ar   : left amos_slv_ar_ch,
+    slv_w    : left amos_slv_w_ch,
+    mst_resp : left amos_mst_resp_ch,
+    slv_rdy  : left amos_slv_ready_ch,
+    out      : right amos_out_ch
+) {
+    // AW FSM: 0=FEEDTHROUGH(reset), 1=WAIT_RESULT, 2=SEND
+    reg aw_state : logic[2];
+    // W FSM: 0=FEEDTHROUGH, 1=WAIT_DATA, 2=WAIT_RESULT, 3=SEND
+    reg w_state : logic[2];
+    // B FSM: 0=FEEDTHROUGH, 1=WAIT_COMPLETE, 2=WAIT_CHANNEL, 3=SEND
+    reg b_state : logic[2];
+    // AR FSM: 0=FEEDTHROUGH, 1=WAIT_CHANNEL, 2=SEND
+    reg ar_state : logic[2];
+    // R FSM: 0=FEEDTHROUGH, 1=WAIT_DATA, 2=WAIT_CHANNEL, 3=SEND
+    reg r_state : logic[2];
+
+    // atop_valid: 0=NONE, 1=INVALID, 2=LOAD, 3=STORE
+    reg atop_valid : logic[2];
+
+    // Saved transaction fields
+    reg s_addr   : logic[64];
+    reg s_id     : logic[4];
+    reg s_size   : logic[3];
+    reg s_atop   : logic[6];
+    reg s_cache  : logic[4];
+    reg s_prot   : logic[3];
+    reg s_qos    : logic[4];
+    reg s_region : logic[4];
+    reg s_strb   : logic[8];
+
+    // Data registers
+    reg w_data_q  : logic[64];
+    reg r_data_q  : logic[64];
+    reg result_q  : logic[64];
+    reg w_d_valid : logic;
+    reg r_d_valid : logic;
+
+    // Outstanding write counter
+    reg w_cnt : logic[4];
+
+    // Input staging
+    reg i_aw_valid  : logic;
+    reg i_aw_addr   : logic[64];
+    reg i_aw_id     : logic[4];
+    reg i_aw_atop   : logic[6];
+    reg i_aw_len    : logic[8];
+    reg i_aw_size   : logic[3];
+    reg i_aw_lock   : logic;
+    reg i_aw_cache  : logic[4];
+    reg i_aw_prot   : logic[3];
+    reg i_aw_qos    : logic[4];
+    reg i_aw_region : logic[4];
+    reg i_ar_valid  : logic;
+    reg i_ar_addr   : logic[64];
+    reg i_ar_id     : logic[4];
+    reg i_w_valid   : logic;
+    reg i_w_data    : logic[64];
+    reg i_w_strb    : logic[8];
+    reg i_w_last    : logic;
+    reg i_mst_aw_rdy : logic;
+    reg i_mst_ar_rdy : logic;
+    reg i_mst_w_rdy  : logic;
+    reg i_mst_b_val  : logic;
+    reg i_mst_b_id   : logic[4];
+    reg i_mst_b_resp : logic[2];
+    reg i_mst_r_val  : logic;
+    reg i_mst_r_data : logic[64];
+    reg i_mst_r_id   : logic[4];
+    reg i_mst_r_resp : logic[2];
+    reg i_mst_r_last : logic;
+    reg i_slv_b_rdy  : logic;
+    reg i_slv_r_rdy  : logic;
+
+    // Output registers
+    reg o_mst_aw_val : logic;
+    reg o_mst_ar_val : logic;
+    reg o_mst_w_val  : logic;
+    reg o_mst_w_data : logic[64];
+    reg o_mst_w_strb : logic[8];
+    reg o_mst_w_last : logic;
+    reg o_slv_aw_rdy : logic;
+    reg o_slv_ar_rdy : logic;
+    reg o_slv_w_rdy  : logic;
+    reg o_slv_b_val  : logic;
+    reg o_slv_b_resp : logic[2];
+    reg o_slv_b_id   : logic[4];
+    reg o_slv_r_val  : logic;
+    reg o_slv_r_data : logic[64];
+    reg o_slv_r_resp : logic[2];
+    reg o_slv_r_id   : logic[4];
+    reg o_slv_r_last : logic;
+    reg o_mst_b_rdy  : logic;
+    reg o_mst_r_rdy  : logic;
+
+    // Receive all inputs
+    loop { let v = recv slv_aw.valid >> set i_aw_valid := v >> cycle 1 }
+    loop { let v = recv slv_aw.addr >> set i_aw_addr := v >> cycle 1 }
+    loop { let v = recv slv_aw.id >> set i_aw_id := v >> cycle 1 }
+    loop { let v = recv slv_aw.atop >> set i_aw_atop := v >> cycle 1 }
+    loop { let v = recv slv_aw.len >> set i_aw_len := v >> cycle 1 }
+    loop { let v = recv slv_aw.size >> set i_aw_size := v >> cycle 1 }
+    loop { let v = recv slv_aw.lock >> set i_aw_lock := v >> cycle 1 }
+    loop { let v = recv slv_aw.cache >> set i_aw_cache := v >> cycle 1 }
+    loop { let v = recv slv_aw.prot >> set i_aw_prot := v >> cycle 1 }
+    loop { let v = recv slv_aw.qos >> set i_aw_qos := v >> cycle 1 }
+    loop { let v = recv slv_aw.region >> set i_aw_region := v >> cycle 1 }
+    loop { let v = recv slv_ar.valid >> set i_ar_valid := v >> cycle 1 }
+    loop { let v = recv slv_ar.addr >> set i_ar_addr := v >> cycle 1 }
+    loop { let v = recv slv_ar.id >> set i_ar_id := v >> cycle 1 }
+    loop { let v = recv slv_w.valid >> set i_w_valid := v >> cycle 1 }
+    loop { let v = recv slv_w.data >> set i_w_data := v >> cycle 1 }
+    loop { let v = recv slv_w.strb >> set i_w_strb := v >> cycle 1 }
+    loop { let v = recv slv_w.last >> set i_w_last := v >> cycle 1 }
+    loop { let v = recv mst_resp.aw_ready >> set i_mst_aw_rdy := v >> cycle 1 }
+    loop { let v = recv mst_resp.ar_ready >> set i_mst_ar_rdy := v >> cycle 1 }
+    loop { let v = recv mst_resp.w_ready >> set i_mst_w_rdy := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_valid >> set i_mst_b_val := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_id >> set i_mst_b_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_resp >> set i_mst_b_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_valid >> set i_mst_r_val := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_data >> set i_mst_r_data := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_id >> set i_mst_r_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_resp >> set i_mst_r_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_last >> set i_mst_r_last := v >> cycle 1 }
+    loop { let v = recv slv_rdy.b_ready >> set i_slv_b_rdy := v >> cycle 1 }
+    loop { let v = recv slv_rdy.r_ready >> set i_slv_r_rdy := v >> cycle 1 }
+
+    // Check if adapter is ready (all FSMs in feedthrough = 0)
+    // atop_valid classification
+    loop {
+        let adapter_ready = if (*aw_state == 2'd0 && *w_state == 2'd0 && *b_state == 2'd0 && *ar_state == 2'd0 && *r_state == 2'd0) { 1'b1 } else { 1'b0 };
+        if (adapter_ready == 1'b1 && *i_aw_valid == 1'b1 && *i_aw_atop != 6'd0) {
+            // Determine atop type
+            if (*i_aw_len != 8'd0) {
+                set atop_valid := 2'd1
+            } else if (*i_aw_lock == 1'b1) {
+                set atop_valid := 2'd1
+            } else if (*i_aw_atop == 6'd48) {
+                // ATOMICSWAP -> LOAD
+                set atop_valid := 2'd2
+            } else if (*i_aw_atop >= 6'd32) {
+                // ATOMICLOAD -> LOAD
+                set atop_valid := 2'd2
+            } else if (*i_aw_atop >= 6'd16) {
+                // ATOMICSTORE -> STORE
+                set atop_valid := 2'd3
+            } else {
+                set atop_valid := 2'd1
+            }
+        } else {
+            set atop_valid := 2'd0 >>
+            cycle 1
+        }
+    }
+
+    // AW FSM: handle atomic AW, save transaction, inject write after result
+    loop {
+        match (*aw_state) {
+            // FEEDTHROUGH=0: pass through or capture atomic
+            2'd0 => {
+                if (*i_aw_valid == 1'b1 && *i_aw_atop != 6'd0) {
+                    // Block atomic AW
+                    set o_mst_aw_val := 1'b0 >>
+                    set o_slv_aw_rdy := 1'b1 >>
+                    // Save transaction
+                    set s_atop := *i_aw_atop >>
+                    set s_addr := *i_aw_addr >>
+                    set s_id := *i_aw_id >>
+                    set s_size := *i_aw_size >>
+                    set s_cache := *i_aw_cache >>
+                    set s_prot := *i_aw_prot >>
+                    set s_qos := *i_aw_qos >>
+                    set s_region := *i_aw_region >>
+                    if (*atop_valid != 2'd1) {
+                        set aw_state := 2'd1
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    // Forward non-atomic
+                    set o_mst_aw_val := *i_aw_valid >>
+                    set o_slv_aw_rdy := *i_mst_aw_rdy >>
+                    cycle 1
+                }
+            },
+            // WAIT_RESULT=1
+            2'd1 => {
+                if (*r_d_valid == 1'b1 && *w_d_valid == 1'b1) {
+                    set o_slv_aw_rdy := 1'b0 >>
+                    set o_mst_aw_val := 1'b1 >>
+                    if (*i_mst_aw_rdy == 1'b1) {
+                        set aw_state := 2'd0
+                    } else {
+                        set aw_state := 2'd2
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // SEND=2
+            _ => {
+                set o_slv_aw_rdy := 1'b0 >>
+                set o_mst_aw_val := 1'b1 >>
+                if (*i_mst_aw_rdy == 1'b1) {
+                    set aw_state := 2'd0
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // W FSM: capture AMO operand data, inject result write
+    loop {
+        match (*w_state) {
+            // FEEDTHROUGH=0
+            2'd0 => {
+                set w_d_valid := 1'b0 >>
+                if (*atop_valid != 2'd0) {
+                    set o_slv_w_rdy := 1'b1 >>
+                    set o_mst_w_val := 1'b0 >>
+                    if (*i_w_valid == 1'b1) {
+                        if (*atop_valid != 2'd1) {
+                            set w_data_q := *i_w_data >>
+                            set s_strb := *i_w_strb >>
+                            set w_d_valid := 1'b1 >>
+                            set w_state := 2'd2
+                        } else {
+                            cycle 1
+                        }
+                    } else {
+                        set w_state := 2'd1
+                    }
+                } else {
+                    if (*w_cnt == 4'd0) {
+                        set o_slv_w_rdy := 1'b0 >>
+                        set o_mst_w_val := 1'b0 >>
+                        cycle 1
+                    } else {
+                        set o_mst_w_val := *i_w_valid >>
+                        set o_slv_w_rdy := *i_mst_w_rdy >>
+                        set o_mst_w_data := *i_w_data >>
+                        set o_mst_w_strb := *i_w_strb >>
+                        set o_mst_w_last := *i_w_last >>
+                        cycle 1
+                    }
+                }
+            },
+            // WAIT_DATA=1
+            2'd1 => {
+                set o_mst_w_val := 1'b0 >>
+                set o_slv_w_rdy := 1'b1 >>
+                if (*i_w_valid == 1'b1) {
+                    if (*atop_valid == 2'd1) {
+                        set w_state := 2'd0
+                    } else {
+                        set w_data_q := *i_w_data >>
+                        set s_strb := *i_w_strb >>
+                        set w_d_valid := 1'b1 >>
+                        set w_state := 2'd2
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // WAIT_RESULT=2
+            2'd2 => {
+                if (*r_d_valid == 1'b1) {
+                    if (*w_d_valid == 1'b1) {
+                        // Compute AMO result
+                        let alu_res = call amo_alu(*s_atop, *r_data_q, *w_data_q) >>
+                        set result_q := alu_res >>
+                        set o_slv_w_rdy := 1'b0 >>
+                        set o_mst_w_val := 1'b1 >>
+                        set o_mst_w_data := *result_q >>
+                        set o_mst_w_last := 1'b1 >>
+                        set o_mst_w_strb := *s_strb >>
+                        if (*i_mst_w_rdy == 1'b1) {
+                            set w_state := 2'd0
+                        } else {
+                            set w_state := 2'd3
+                        }
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // SEND=3
+            _ => {
+                set o_slv_w_rdy := 1'b0 >>
+                set o_mst_w_val := 1'b1 >>
+                set o_mst_w_data := *result_q >>
+                set o_mst_w_last := 1'b1 >>
+                set o_mst_w_strb := *s_strb >>
+                if (*i_mst_w_rdy == 1'b1) {
+                    set w_state := 2'd0
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // B FSM: handle B response for atomics
+    loop {
+        match (*b_state) {
+            // FEEDTHROUGH=0
+            2'd0 => {
+                set o_mst_b_rdy := *i_slv_b_rdy >>
+                set o_slv_b_val := *i_mst_b_val >>
+                set o_slv_b_id := *i_mst_b_id >>
+                set o_slv_b_resp := *i_mst_b_resp >>
+                if (*atop_valid == 2'd2 || *atop_valid == 2'd3) {
+                    set b_state := 2'd1
+                } else if (*atop_valid == 2'd1) {
+                    // Inject error response
+                    set o_mst_b_rdy := 1'b0 >>
+                    set o_slv_b_val := 1'b1 >>
+                    set o_slv_b_id := *i_aw_id >>
+                    set o_slv_b_resp := 2'b10 >>
+                    if (*i_slv_b_rdy == 1'b1) {
+                        cycle 1
+                    } else {
+                        set b_state := 2'd3
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // WAIT_COMPLETE=1
+            2'd1 => {
+                set o_mst_b_rdy := *i_slv_b_rdy >>
+                set o_slv_b_val := *i_mst_b_val >>
+                set o_slv_b_id := *i_mst_b_id >>
+                set o_slv_b_resp := *i_mst_b_resp >>
+                if (*i_mst_b_val == 1'b1 && *i_mst_b_id == *s_id) {
+                    set b_state := 2'd0
+                } else {
+                    cycle 1
+                }
+            },
+            // WAIT_CHANNEL=2
+            2'd2 => {
+                set o_mst_b_rdy := 1'b0 >>
+                set o_slv_b_val := 1'b1 >>
+                set o_slv_b_id := *s_id >>
+                set o_slv_b_resp := 2'b10 >>
+                if (*i_slv_b_rdy == 1'b1) {
+                    set b_state := 2'd0
+                } else {
+                    set b_state := 2'd3
+                }
+            },
+            // SEND=3
+            _ => {
+                set o_mst_b_rdy := 1'b0 >>
+                set o_slv_b_val := 1'b1 >>
+                set o_slv_b_id := *s_id >>
+                set o_slv_b_resp := 2'b10 >>
+                if (*i_slv_b_rdy == 1'b1) {
+                    set b_state := 2'd0
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // AR FSM: issue read for atomics
+    loop {
+        match (*ar_state) {
+            // FEEDTHROUGH=0
+            2'd0 => {
+                set o_mst_ar_val := *i_ar_valid >>
+                set o_slv_ar_rdy := *i_mst_ar_rdy >>
+                if (*atop_valid == 2'd2 || *atop_valid == 2'd3) {
+                    // Issue read for AMO
+                    set o_slv_ar_rdy := 1'b0 >>
+                    set o_mst_ar_val := 1'b1 >>
+                    if (*i_mst_ar_rdy == 1'b1) {
+                        cycle 1
+                    } else {
+                        set ar_state := 2'd2
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // WAIT_CHANNEL=1
+            2'd1 => {
+                set o_mst_ar_val := *i_ar_valid >>
+                set o_slv_ar_rdy := *i_mst_ar_rdy >>
+                cycle 1
+            },
+            // SEND=2
+            _ => {
+                set o_mst_ar_val := 1'b1 >>
+                set o_slv_ar_rdy := 1'b0 >>
+                if (*i_mst_ar_rdy == 1'b1) {
+                    set ar_state := 2'd0
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // R FSM: capture read data for AMO, send R response for load atomics
+    loop {
+        match (*r_state) {
+            // FEEDTHROUGH=0
+            2'd0 => {
+                set o_mst_r_rdy := *i_slv_r_rdy >>
+                set o_slv_r_val := *i_mst_r_val >>
+                set o_slv_r_data := *i_mst_r_data >>
+                set o_slv_r_id := *i_mst_r_id >>
+                set o_slv_r_resp := *i_mst_r_resp >>
+                set o_slv_r_last := *i_mst_r_last >>
+                set r_d_valid := 1'b0 >>
+                if (*atop_valid == 2'd2 || *atop_valid == 2'd3) {
+                    set r_state := 2'd1
+                } else if (*atop_valid == 2'd1) {
+                    // Inject error R
+                    set o_mst_r_rdy := 1'b0 >>
+                    set o_slv_r_val := 1'b1 >>
+                    set o_slv_r_data := 64'd0 >>
+                    set o_slv_r_id := *i_aw_id >>
+                    set o_slv_r_last := 1'b1 >>
+                    set o_slv_r_resp := 2'b10 >>
+                    if (*i_slv_r_rdy == 1'b1) {
+                        cycle 1
+                    } else {
+                        set r_state := 2'd3
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // WAIT_DATA=1
+            2'd1 => {
+                if (*i_mst_r_val == 1'b1 && *i_mst_r_id == *s_id) {
+                    set o_mst_r_rdy := 1'b1 >>
+                    set o_slv_r_val := 1'b0 >>
+                    set r_data_q := *i_mst_r_data >>
+                    set r_d_valid := 1'b1 >>
+                    if (*atop_valid == 2'd3) {
+                        set r_state := 2'd0
+                    } else {
+                        set r_state := 2'd2
+                    }
+                } else {
+                    set o_mst_r_rdy := *i_slv_r_rdy >>
+                    set o_slv_r_val := *i_mst_r_val >>
+                    set o_slv_r_data := *i_mst_r_data >>
+                    set o_slv_r_id := *i_mst_r_id >>
+                    set o_slv_r_resp := *i_mst_r_resp >>
+                    set o_slv_r_last := *i_mst_r_last >>
+                    cycle 1
+                }
+            },
+            // WAIT_CHANNEL=2
+            2'd2 => {
+                set o_mst_r_rdy := 1'b0 >>
+                set o_slv_r_val := 1'b1 >>
+                set o_slv_r_data := *r_data_q >>
+                set o_slv_r_id := *s_id >>
+                set o_slv_r_last := 1'b1 >>
+                set o_slv_r_resp := *i_mst_r_resp >>
+                if (*i_slv_r_rdy == 1'b1) {
+                    set r_state := 2'd0
+                } else {
+                    set r_state := 2'd3
+                }
+            },
+            // SEND=3
+            _ => {
+                set o_mst_r_rdy := 1'b0 >>
+                set o_slv_r_val := 1'b1 >>
+                set o_slv_r_data := *r_data_q >>
+                set o_slv_r_id := *s_id >>
+                set o_slv_r_last := 1'b1 >>
+                set o_slv_r_resp := *i_mst_r_resp >>
+                if (*i_slv_r_rdy == 1'b1) {
+                    set r_state := 2'd0
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // Write counter
+    loop {
+        let cnt_inc = if (*o_mst_aw_val == 1'b1 && *i_mst_aw_rdy == 1'b1) { 1'b1 } else { 1'b0 };
+        let cnt_dec = if (*o_mst_w_val == 1'b1 && *i_mst_w_rdy == 1'b1 && *o_mst_w_last == 1'b1) { 1'b1 } else { 1'b0 };
+        if (cnt_inc == 1'b1 && cnt_dec == 1'b0) {
+            set w_cnt := *w_cnt + 4'd1
+        } else if (cnt_inc == 1'b0 && cnt_dec == 1'b1) {
+            set w_cnt := *w_cnt - 4'd1
+        } else {
+            cycle 1
+        }
+    }
+
+    // Send all outputs
+    loop { send out.mst_aw_valid (*o_mst_aw_val) >> cycle 1 }
+    loop { send out.mst_ar_valid (*o_mst_ar_val) >> cycle 1 }
+    loop { send out.mst_w_valid (*o_mst_w_val) >> cycle 1 }
+    loop { send out.mst_w_data (*o_mst_w_data) >> cycle 1 }
+    loop { send out.mst_w_strb (*o_mst_w_strb) >> cycle 1 }
+    loop { send out.mst_w_last (*o_mst_w_last) >> cycle 1 }
+    loop { send out.slv_aw_ready (*o_slv_aw_rdy) >> cycle 1 }
+    loop { send out.slv_ar_ready (*o_slv_ar_rdy) >> cycle 1 }
+    loop { send out.slv_w_ready (*o_slv_w_rdy) >> cycle 1 }
+    loop { send out.slv_b_valid (*o_slv_b_val) >> cycle 1 }
+    loop { send out.slv_b_resp (*o_slv_b_resp) >> cycle 1 }
+    loop { send out.slv_b_id (*o_slv_b_id) >> cycle 1 }
+    loop { send out.slv_r_valid (*o_slv_r_val) >> cycle 1 }
+    loop { send out.slv_r_data (*o_slv_r_data) >> cycle 1 }
+    loop { send out.slv_r_resp (*o_slv_r_resp) >> cycle 1 }
+    loop { send out.slv_r_id (*o_slv_r_id) >> cycle 1 }
+    loop { send out.slv_r_last (*o_slv_r_last) >> cycle 1 }
+    loop { send out.mst_b_ready (*o_mst_b_rdy) >> cycle 1 }
+    loop { send out.mst_r_ready (*o_mst_r_rdy) >> cycle 1 }
+}
