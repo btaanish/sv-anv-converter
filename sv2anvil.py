@@ -2315,11 +2315,14 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         if rm:
             reg_type_map[rm.group(1)] = rm.group(2)
 
-    # Collect all identifiers used in the output (for unused let detection)
-    all_output_text = output
+    # Track emitted let names to detect duplicates (per loop scope)
+    emitted_let_names = set()
 
     for line in lines:
         stripped = line.strip()
+        # Reset let tracking at loop boundaries
+        if stripped == 'loop {':
+            emitted_let_names = set()
         if stripped.startswith('let ') and ' = ' in stripped:
             # Extract indent and name
             m = re.match(r'^(\s*)let\s+(\w+)\s*=\s*(.*)$', line)
@@ -2327,6 +2330,12 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                 indent = m.group(1)
                 name = m.group(2)
                 expr_rest = m.group(3)
+
+                # Skip duplicate let bindings (keep only the first)
+                if name in emitted_let_names and 'recv ' not in expr_rest:
+                    continue
+                emitted_let_names.add(name)
+
                 # Keep recv expressions and properly typed casts as-is
                 if 'recv ' in expr_rest:
                     new_lines.append(line)
@@ -2421,15 +2430,16 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         # Fix struct field access on registers: *reg.field → *reg
         code_part = re.sub(r'(\*\w+)\.\w+', r'\1', code_part)
 
-        # Fix comparisons: var == 1'b0 → var == <(1'b0)::type>
-        # When comparing a register/variable against 1'b1/1'b0, cast the literal
-        # to match the register type
+        # Fix comparisons: *reg == 1'b0 → *reg == <(1'b0)::type>
+        # Only for register dereferences with known types
         def _fix_comparison_cast(m):
-            var_name = m.group(1)  # e.g., *reg_name or varname
+            var_name = m.group(1)  # e.g., *reg_name
             op = m.group(2)        # == or !=
             lit = m.group(3)       # 1'b0 or 1'b1
-            # Look up register type
-            clean_name = var_name.lstrip('*').strip()
+            # Only fix for register dereferences (*name)
+            if not var_name.startswith('*'):
+                return m.group(0)
+            clean_name = var_name[1:].strip()
             reg_t = reg_type_map.get(clean_name)
             if reg_t and reg_t != "logic":
                 return f"{var_name} {op} <({lit})::{reg_t}>"
@@ -2451,6 +2461,14 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                 return f"{var_name} {op} <({num})::{reg_t}>"
             return m.group(0)
         code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\d+)(?!\')', _fix_arith_int, code_part)
+
+        # Fix bare integer after cast value: <(N)::type> - 1 → <(N)::type> - <(1)::type>
+        def _fix_cast_arith(m):
+            cast_type = m.group(1)  # e.g., logic[4]
+            op = m.group(2)         # + or -
+            num = m.group(3)        # bare number
+            return f"::{cast_type}> {op} <({num})::{cast_type}>"
+        code_part = re.sub(r'::(logic\[\d+\])>\s*(\+|-)\s*(\d+)(?!\')', _fix_cast_arith, code_part)
 
         # Evaluate constant comparisons: number == 1'b0 → 1'b0/1'b1
         # These arise from parameter substitution (e.g., DEPTH=8 → 8 == 0)
