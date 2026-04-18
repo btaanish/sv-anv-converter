@@ -1,0 +1,26 @@
+/* Anvil conversion of ecc_pkg.sv — ECC package.
+   Parity width calculation modeled as precomputed constants for common data widths.
+   get_parity_width(8)=4, get_parity_width(16)=5, get_parity_width(32)=6, get_parity_width(64)=7.
+   get_cw_width(N) = N + get_parity_width(N). */
+
+func get_parity_width_8() {
+    4'd4
+}
+
+func get_parity_width_16() {
+    4'd5
+}
+
+func get_parity_width_32() {
+    4'd6
+}
+
+func get_parity_width_64() {
+    4'd7
+}
+
+proc Top() {
+    loop {
+        cycle 1
+    }
+}

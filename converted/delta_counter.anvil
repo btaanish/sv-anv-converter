@@ -1,0 +1,75 @@
+/* Anvil conversion of delta_counter.sv — Up/down counter with variable delta.
+   Concrete: WIDTH=4, STICKY_OVERFLOW=0 (transient overflow).
+   counter_q is 5-bit (WIDTH+1) to capture overflow in MSB. */
+
+chan delta_ctrl_ch {
+    left clear : (logic@#1) @dyn - @dyn,
+    left en : (logic@#1) @dyn - @dyn,
+    left load : (logic@#1) @dyn - @dyn,
+    left down : (logic@#1) @dyn - @dyn,
+    left delta : (logic[4]@#1) @dyn - @dyn,
+    left d : (logic[4]@#1) @dyn - @dyn
+}
+
+chan delta_out_ch {
+    left q : (logic[4]@#1) @dyn - @dyn,
+    left overflow : (logic@#1) @dyn - @dyn
+}
+
+proc DeltaCounter(
+    ctrl_ep : left delta_ctrl_ch,
+    out_ep : right delta_out_ch
+) {
+    reg counter_q : logic[5];
+
+    /* Snapshot */
+    reg snap_cnt : logic[5];
+
+    /* Input staging */
+    reg r_clear : logic;
+    reg r_en : logic;
+    reg r_load : logic;
+    reg r_down : logic;
+    reg r_delta : logic[4];
+    reg r_d : logic[4];
+
+    loop {
+        /* Snapshot counter */
+        set snap_cnt := *counter_q >>
+
+        /* Receive and stage inputs */
+        let c = recv ctrl_ep.clear >>
+        set r_clear := c >>
+        let e = recv ctrl_ep.en >>
+        set r_en := e >>
+        let l = recv ctrl_ep.load >>
+        set r_load := l >>
+        let dn = recv ctrl_ep.down >>
+        set r_down := dn >>
+        let dlt = recv ctrl_ep.delta >>
+        set r_delta := dlt >>
+        let dv = recv ctrl_ep.d >>
+        set r_d := dv >>
+
+        /* Compute and send outputs */
+        let q_out = <(*snap_cnt)::logic[4]>;
+        let overflow_out = <(*snap_cnt >> 5'd4)::logic>;
+        send out_ep.q (q_out);
+        send out_ep.overflow (overflow_out) >>
+
+        /* Update counter */
+        if *r_clear == 1'b1 {
+            set counter_q := 5'd0
+        } else if *r_load == 1'b1 {
+            set counter_q := <(*r_d)::logic[5]>
+        } else if *r_en == 1'b1 {
+            if *r_down == 1'b1 {
+                set counter_q := *snap_cnt - <(*r_delta)::logic[5]>
+            } else {
+                set counter_q := *snap_cnt + <(*r_delta)::logic[5]>
+            }
+        } else {
+            cycle 1
+        }
+    }
+}
