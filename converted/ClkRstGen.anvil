@@ -1,0 +1,78 @@
+/* Hand-written Anvil for ClkRstGen.sv
+   Clock and Reset Generator for simulation testbenches.
+   Generates a single-phase clock and an active-low reset signal.
+
+   Concrete params:
+     CLK_LOW_TIME=5ns, CLK_HIGH_TIME=5ns, RST_TIME=100ns
+     Modeled as cycle counts: CLK_HALF=1 cycle each half, RST_CYCLES=10 cycles.
+
+   SV behavior:
+     - Clock toggles high/low each half period (stopped when EndOfSim_SI)
+     - Reset active low for RST_TIME, then deasserted
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~50
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] Time-based delays mapped to cycle counts
+       - [MANUAL-CLEANUP-NEEDED] $stop not modeled in Anvil
+*/
+
+chan clkrstgen_in_ch {
+    left end_of_sim : (logic@#1) @dyn - @dyn
+}
+
+chan clkrstgen_out_ch {
+    left clk_o  : (logic@#1) @dyn - @dyn,
+    left rst_o  : (logic@#1) @dyn - @dyn
+}
+
+proc ClkRstGen(
+    inp : left clkrstgen_in_ch,
+    out : right clkrstgen_out_ch
+) {
+    reg r_clk : logic;
+    reg r_rst : logic;
+    reg r_end_of_sim : logic;
+    reg rst_count : logic[8];
+
+    // Receive EndOfSim
+    loop {
+        let eos = recv inp.end_of_sim >>
+        set r_end_of_sim := eos >>
+        cycle 1
+    }
+
+    // Reset generation: hold reset low for 10 cycles, then release
+    loop {
+        if (*rst_count < 8'd10) {
+            set r_rst := 1'b0 >>
+            set rst_count := *rst_count + 8'd1
+        } else {
+            set r_rst := 1'b1 >>
+            cycle 1
+        }
+    }
+
+    // Clock generation: toggle each cycle when reset is inactive and sim not ended
+    loop {
+        if (*r_rst == 1'b1 && *r_end_of_sim == 1'b0) {
+            set r_clk := ~*r_clk
+        } else {
+            set r_clk := 1'b0 >>
+            cycle 1
+        }
+    }
+
+    // Send clock output
+    loop {
+        send out.clk_o (*r_clk) >>
+        cycle 1
+    }
+
+    // Send reset output
+    loop {
+        send out.rst_o (*r_rst) >>
+        cycle 1
+    }
+}
