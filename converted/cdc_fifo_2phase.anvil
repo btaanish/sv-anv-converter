@@ -1,0 +1,185 @@
+/* Hand-written Anvil for cdc_fifo_2phase.sv
+   Clock domain crossing FIFO using 2-phase handshakes.
+   Push and pop ports are in two separate clock domains.
+
+   Concrete params: T=logic (1-bit), LOG_DEPTH=3.
+   FIFO depth = 2^3 = 8 entries.
+   PtrWidth = LOG_DEPTH+1 = 4 bits.
+   PtrFull = 4'd8.
+   PtrEmpty = 4'd0.
+
+   The cdc_2phase submodules for pointer transport are inlined as
+   2-stage synchronizers.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~95
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] cdc_2phase submodules inlined as 2-stage synchronizers
+       - [MANUAL-CLEANUP-NEEDED] Two clock domains modeled in single proc
+       - [MANUAL-CLEANUP-NEEDED] T=logic (1-bit) hardcoded
+*/
+
+chan cdc_fifo_src_ch {
+    left src_data_i  : (logic@#1) @dyn - @dyn,
+    left src_valid_i : (logic@#1) @dyn - @dyn,
+    right src_ready_o : (logic@#1) @dyn - @dyn
+}
+
+chan cdc_fifo_dst_ch {
+    right dst_data_o  : (logic@#1) @dyn - @dyn,
+    right dst_valid_o : (logic@#1) @dyn - @dyn,
+    left dst_ready_i  : (logic@#1) @dyn - @dyn
+}
+
+proc cdc_fifo_2phase(
+    src : left cdc_fifo_src_ch,
+    dst : left cdc_fifo_dst_ch
+) {
+    // FIFO memory: 8 entries of 1-bit
+    reg mem0 : logic;
+    reg mem1 : logic;
+    reg mem2 : logic;
+    reg mem3 : logic;
+    reg mem4 : logic;
+    reg mem5 : logic;
+    reg mem6 : logic;
+    reg mem7 : logic;
+
+    // Source domain write pointer (4 bits)
+    reg src_wptr : logic[4];
+    // Destination domain read pointer (4 bits)
+    reg dst_rptr : logic[4];
+
+    // CDC synchronized pointers (inlined 2-stage synchronizers)
+    reg wptr_sync0 : logic[4];
+    reg wptr_sync1 : logic[4];
+    reg rptr_sync0 : logic[4];
+    reg rptr_sync1 : logic[4];
+
+    // Staging regs for inputs
+    reg r_src_data : logic;
+    reg r_src_valid : logic;
+    reg r_dst_ready : logic;
+
+    // Computed ready/valid
+    reg r_src_ready : logic;
+    reg r_dst_valid : logic;
+
+    // Receive src inputs
+    loop {
+        let d = recv src.src_data_i >>
+        set r_src_data := d >>
+        cycle 1
+    }
+
+    loop {
+        let v = recv src.src_valid_i >>
+        set r_src_valid := v >>
+        cycle 1
+    }
+
+    loop {
+        let r = recv dst.dst_ready_i >>
+        set r_dst_ready := r >>
+        cycle 1
+    }
+
+    // CDC: sync wptr to dst domain (2-stage)
+    loop {
+        set wptr_sync0 := *src_wptr >>
+        cycle 1
+    }
+
+    loop {
+        set wptr_sync1 := *wptr_sync0 >>
+        cycle 1
+    }
+
+    // CDC: sync rptr to src domain (2-stage)
+    loop {
+        set rptr_sync0 := *dst_rptr >>
+        cycle 1
+    }
+
+    loop {
+        set rptr_sync1 := *rptr_sync0 >>
+        cycle 1
+    }
+
+    // Compute ready: (wptr ^ rptr_synced) != PtrFull
+    loop {
+        if ((*src_wptr ^ *rptr_sync1) != 4'd8) {
+            set r_src_ready := 1'b1
+        } else {
+            set r_src_ready := 1'b0
+        }
+    }
+
+    // Compute valid: (rptr ^ wptr_synced) != PtrEmpty
+    loop {
+        if ((*dst_rptr ^ *wptr_sync1) != 4'd0) {
+            set r_dst_valid := 1'b1
+        } else {
+            set r_dst_valid := 1'b0
+        }
+    }
+
+    // Send ready
+    loop {
+        send src.src_ready_o (*r_src_ready) >>
+        cycle 1
+    }
+
+    // Send valid
+    loop {
+        send dst.dst_valid_o (*r_dst_valid) >>
+        cycle 1
+    }
+
+    // Source side: write to FIFO and advance wptr
+    loop {
+        if (*r_src_valid == 1'b1 & *r_src_ready == 1'b1) {
+            let widx = <(*src_wptr)::logic[3]>;
+            if (widx == 3'd0) {
+                set mem0 := *r_src_data
+            } else { if (widx == 3'd1) {
+                set mem1 := *r_src_data
+            } else { if (widx == 3'd2) {
+                set mem2 := *r_src_data
+            } else { if (widx == 3'd3) {
+                set mem3 := *r_src_data
+            } else { if (widx == 3'd4) {
+                set mem4 := *r_src_data
+            } else { if (widx == 3'd5) {
+                set mem5 := *r_src_data
+            } else { if (widx == 3'd6) {
+                set mem6 := *r_src_data
+            } else {
+                set mem7 := *r_src_data
+            }}}}}}} >>
+            set src_wptr := *src_wptr + 4'd1
+        } else {
+            cycle 1
+        }
+    }
+
+    // Destination side: read from FIFO and send data, advance rptr
+    loop {
+        let ridx = <(*dst_rptr)::logic[3]>;
+        let rdata = if ridx == 3'd0 { *mem0 }
+                    else { if ridx == 3'd1 { *mem1 }
+                    else { if ridx == 3'd2 { *mem2 }
+                    else { if ridx == 3'd3 { *mem3 }
+                    else { if ridx == 3'd4 { *mem4 }
+                    else { if ridx == 3'd5 { *mem5 }
+                    else { if ridx == 3'd6 { *mem6 }
+                    else { *mem7 }}}}}}};
+        send dst.dst_data_o (rdata) >>
+        if (*r_dst_valid == 1'b1 & *r_dst_ready == 1'b1) {
+            set dst_rptr := *dst_rptr + 4'd1
+        } else {
+            cycle 1
+        }
+    }
+}
