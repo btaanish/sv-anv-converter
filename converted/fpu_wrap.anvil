@@ -1,0 +1,250 @@
+/* Hand-written Anvil for fpu_wrap.sv
+   FPU wrapper: input translation, protocol inversion FSM, and FPU stub.
+   Concrete params: FLen=64, XLEN=64, TRANS_ID_BITS=3,
+   OPBITS=4, FMTBITS=3, IFMTBITS=2.
+   fpnew_top instantiation stubbed — result passes through operand_a.
+   Clock/reset implicit in Anvil. */
+
+enum fpu_state {
+    READY,
+    STALL
+}
+
+chan fpu_wrap_in_ch {
+    left flush_i : (logic@#1) @dyn - @dyn,
+    left fpu_valid_i : (logic@#1) @dyn - @dyn,
+    left operand_a_i : (logic[64]@#1) @dyn - @dyn,
+    left operand_b_i : (logic[64]@#1) @dyn - @dyn,
+    left operand_c_i : (logic[64]@#1) @dyn - @dyn,
+    left operation_i : (logic[8]@#1) @dyn - @dyn,
+    left fu_i : (logic[4]@#1) @dyn - @dyn,
+    left trans_id_i : (logic[3]@#1) @dyn - @dyn,
+    left fpu_fmt_i : (logic[2]@#1) @dyn - @dyn,
+    left fpu_rm_i : (logic[3]@#1) @dyn - @dyn,
+    left fpu_frm_i : (logic[3]@#1) @dyn - @dyn,
+    left fpu_prec_i : (logic[7]@#1) @dyn - @dyn
+}
+
+chan fpu_wrap_out_ch {
+    left fpu_ready_o : (logic@#1) @dyn - @dyn,
+    left fpu_trans_id_o : (logic[3]@#1) @dyn - @dyn,
+    left result_o : (logic[64]@#1) @dyn - @dyn,
+    left fpu_valid_o : (logic@#1) @dyn - @dyn,
+    left fpu_exception_cause : (logic[64]@#1) @dyn - @dyn,
+    left fpu_exception_valid : (logic@#1) @dyn - @dyn,
+    left fpu_early_valid_o : (logic@#1) @dyn - @dyn
+}
+
+proc fpu_wrap(
+    in_ep : left fpu_wrap_in_ch,
+    out_ep : right fpu_wrap_out_ch
+) {
+    /* FSM state register */
+    reg state_q : fpu_state;
+
+    /* Input staging registers */
+    reg r_flush : logic;
+    reg r_valid : logic;
+    reg r_op_a : logic[64];
+    reg r_op_b : logic[64];
+    reg r_op_c : logic[64];
+    reg r_operation : logic[8];
+    reg r_fu : logic[4];
+    reg r_trans_id : logic[3];
+    reg r_fmt : logic[2];
+    reg r_rm : logic[3];
+    reg r_frm : logic[3];
+
+    /* Hold registers for protocol inversion buffer */
+    reg hold_op_a : logic[64];
+    reg hold_op_b : logic[64];
+    reg hold_op_c : logic[64];
+    reg hold_fpu_op : logic[4];
+    reg hold_op_mod : logic;
+    reg hold_srcfmt : logic[3];
+    reg hold_dstfmt : logic[3];
+    reg hold_ifmt : logic[2];
+    reg hold_rm : logic[3];
+    reg hold_vec_op : logic;
+    reg hold_tag : logic[3];
+
+    /* Snapshot registers for translated inputs */
+    reg snap_op_a : logic[64];
+    reg snap_op_b : logic[64];
+    reg snap_op_c : logic[64];
+    reg snap_fpu_op : logic[4];
+    reg snap_op_mod : logic;
+    reg snap_srcfmt : logic[3];
+    reg snap_dstfmt : logic[3];
+    reg snap_ifmt : logic[2];
+    reg snap_rm : logic[3];
+    reg snap_vec_op : logic;
+    reg snap_tag : logic[3];
+
+    /* FSM output snapshot regs */
+    reg snap_ready : logic;
+    reg snap_in_valid : logic;
+    reg snap_hold : logic;
+    reg snap_use_hold : logic;
+
+    /* FPU stub output regs */
+    reg fpu_result : logic[64];
+    reg fpu_out_valid : logic;
+    reg fpu_out_tag : logic[3];
+    reg fpu_status : logic[5];
+    reg fpu_early_valid : logic;
+
+    /* Recv loop: receive and stage all inputs */
+    loop {
+        let fl = recv in_ep.flush_i >>
+        set r_flush := fl >>
+        let vl = recv in_ep.fpu_valid_i >>
+        set r_valid := vl >>
+        let oa = recv in_ep.operand_a_i >>
+        set r_op_a := oa >>
+        let ob = recv in_ep.operand_b_i >>
+        set r_op_b := ob >>
+        let oc = recv in_ep.operand_c_i >>
+        set r_op_c := oc >>
+        let op = recv in_ep.operation_i >>
+        set r_operation := op >>
+        let fu = recv in_ep.fu_i >>
+        set r_fu := fu >>
+        let tid = recv in_ep.trans_id_i >>
+        set r_trans_id := tid >>
+        let fmt = recv in_ep.fpu_fmt_i >>
+        set r_fmt := fmt >>
+        let rm = recv in_ep.fpu_rm_i >>
+        set r_rm := rm >>
+        let frm = recv in_ep.fpu_frm_i >>
+        set r_frm := frm >>
+        let _prec = recv in_ep.fpu_prec_i >>
+        cycle 1
+    }
+
+    /* Input translation + FSM logic loop */
+    loop {
+        /* Input translation: default values */
+        let operand_a_d = *r_op_a >>
+        let operand_b_d = *r_op_b >>
+        let operand_c_d = *r_op_c >>
+        /* Default fpu_op = SGNJ = 4'd0 */
+        let fpu_op_d = 4'd0 >>
+        let fpu_op_mod_d = 1'b0 >>
+        /* Default dstfmt = FP32 = 3'd0 */
+        let fpu_dstfmt_d = 3'd0 >>
+        let fpu_srcfmt_d = 3'd0 >>
+        /* Default ifmt = INT32 = 2'd2 */
+        let fpu_ifmt_d = 2'd2 >>
+        let fpu_rm_d = *r_rm >>
+        /* fpu_vec_op_d: fu == FPU_VEC (4'd9 assumed) */
+        let fpu_vec_op_d = if (*r_fu == 4'd9) { 1'b1 } else { 1'b0 } >>
+        let fpu_tag_d = *r_trans_id >>
+
+        /* FSM: protocol inversion */
+        let fpu_in_ready = 1'b1 >>
+        let fpu_ready_o = match (*state_q) {
+            fpu_state::READY => 1'b1,
+            _ => if (fpu_in_ready == 1'b1) { 1'b1 } else { 1'b0 }
+        } >>
+        let fpu_in_valid = match (*state_q) {
+            fpu_state::READY => *r_valid,
+            _ => 1'b1
+        } >>
+        let hold_inputs = match (*state_q) {
+            fpu_state::READY => *r_valid & ~fpu_in_ready,
+            _ => 1'b0
+        } >>
+        let use_hold = match (*state_q) {
+            fpu_state::STALL => 1'b1,
+            _ => 1'b0
+        } >>
+
+        /* State next */
+        let state_n_base = match (*state_q) {
+            fpu_state::READY => if (*r_valid == 1'b1 & ~fpu_in_ready == 1'b1) {
+                fpu_state::STALL
+            } else {
+                fpu_state::READY
+            },
+            _ => if (fpu_in_ready == 1'b1) {
+                fpu_state::READY
+            } else {
+                fpu_state::STALL
+            }
+        } >>
+        let state_next = if (*r_flush == 1'b1) { fpu_state::READY } else { state_n_base } >>
+
+        /* Select between hold register and direct input */
+        let sel_op_a = if (use_hold == 1'b1) { *hold_op_a } else { operand_a_d } >>
+        let sel_op_b = if (use_hold == 1'b1) { *hold_op_b } else { operand_b_d } >>
+        let sel_op_c = if (use_hold == 1'b1) { *hold_op_c } else { operand_c_d } >>
+        let sel_fpu_op = if (use_hold == 1'b1) { *hold_fpu_op } else { fpu_op_d } >>
+        let sel_op_mod = if (use_hold == 1'b1) { *hold_op_mod } else { fpu_op_mod_d } >>
+        let sel_srcfmt = if (use_hold == 1'b1) { *hold_srcfmt } else { fpu_srcfmt_d } >>
+        let sel_dstfmt = if (use_hold == 1'b1) { *hold_dstfmt } else { fpu_dstfmt_d } >>
+        let sel_ifmt = if (use_hold == 1'b1) { *hold_ifmt } else { fpu_ifmt_d } >>
+        let sel_rm = if (use_hold == 1'b1) { *hold_rm } else { fpu_rm_d } >>
+        let sel_vec_op = if (use_hold == 1'b1) { *hold_vec_op } else { fpu_vec_op_d } >>
+        let sel_tag = if (use_hold == 1'b1) { *hold_tag } else { fpu_tag_d } >>
+
+        /* Store translated+selected values into snapshots */
+        set snap_op_a := sel_op_a;
+        set snap_op_b := sel_op_b;
+        set snap_op_c := sel_op_c;
+        set snap_fpu_op := sel_fpu_op;
+        set snap_op_mod := sel_op_mod;
+        set snap_srcfmt := sel_srcfmt;
+        set snap_dstfmt := sel_dstfmt;
+        set snap_ifmt := sel_ifmt;
+        set snap_rm := sel_rm;
+        set snap_vec_op := sel_vec_op;
+        set snap_tag := sel_tag;
+        set snap_ready := fpu_ready_o;
+        set snap_in_valid := fpu_in_valid;
+        set snap_hold := hold_inputs;
+        set snap_use_hold := use_hold;
+        set state_q := state_next
+    }
+
+    /* Hold register update loop */
+    loop {
+        if (*snap_hold == 1'b1) {
+            set hold_op_a := *snap_op_a;
+            set hold_op_b := *snap_op_b;
+            set hold_op_c := *snap_op_c;
+            set hold_fpu_op := *snap_fpu_op;
+            set hold_op_mod := *snap_op_mod;
+            set hold_srcfmt := *snap_srcfmt;
+            set hold_dstfmt := *snap_dstfmt;
+            set hold_ifmt := *snap_ifmt;
+            set hold_rm := *snap_rm;
+            set hold_vec_op := *snap_vec_op;
+            set hold_tag := *snap_tag
+        } else {
+            cycle 1
+        }
+    }
+
+    /* FPU stub: pass operand_a as result */
+    loop {
+        set fpu_result := *snap_op_a;
+        set fpu_out_valid := *snap_in_valid;
+        set fpu_out_tag := *snap_tag;
+        set fpu_status := 5'd0;
+        set fpu_early_valid := *snap_in_valid
+    }
+
+    /* Output loop */
+    loop {
+        send out_ep.fpu_ready_o (*snap_ready) >>
+        send out_ep.fpu_trans_id_o (*fpu_out_tag) >>
+        send out_ep.result_o (*fpu_result) >>
+        send out_ep.fpu_valid_o (*fpu_out_valid) >>
+        /* Exception cause = {59'h0, fpu_status} */
+        send out_ep.fpu_exception_cause (<(*fpu_status)::logic[64]>) >>
+        send out_ep.fpu_exception_valid (1'b0) >>
+        send out_ep.fpu_early_valid_o (*fpu_early_valid) >>
+        cycle 1
+    }
+}
