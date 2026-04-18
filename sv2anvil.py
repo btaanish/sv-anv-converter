@@ -2421,8 +2421,59 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         # Fix struct field access on registers: *reg.field → *reg
         code_part = re.sub(r'(\*\w+)\.\w+', r'\1', code_part)
 
+        # Fix comparisons: var == 1'b0 → var == <(1'b0)::type>
+        # When comparing a register/variable against 1'b1/1'b0, cast the literal
+        # to match the register type
+        def _fix_comparison_cast(m):
+            var_name = m.group(1)  # e.g., *reg_name or varname
+            op = m.group(2)        # == or !=
+            lit = m.group(3)       # 1'b0 or 1'b1
+            # Look up register type
+            clean_name = var_name.lstrip('*').strip()
+            reg_t = reg_type_map.get(clean_name)
+            if reg_t and reg_t != "logic":
+                return f"{var_name} {op} <({lit})::{reg_t}>"
+            return m.group(0)
+        code_part = re.sub(r'(\*?\w+)\s*(==|!=)\s*(1\'b[01])', _fix_comparison_cast, code_part)
+
         # Fix $clog2 that wasn't evaluated: $clog2 ( N ) → 1
         code_part = re.sub(r'\$clog2\s*\(\s*[^)]+\s*\)', "1", code_part)
+
+        # Fix bare integer in arithmetic with registers: *reg + 1, *reg - 1
+        # Cast the integer to match the register's type
+        def _fix_arith_int(m):
+            var_name = m.group(1)  # e.g., *reg_name
+            op = m.group(2)        # + or -
+            num = m.group(3)       # bare number
+            clean_name = var_name.lstrip('*').strip()
+            reg_t = reg_type_map.get(clean_name)
+            if reg_t and reg_t != "logic":
+                return f"{var_name} {op} <({num})::{reg_t}>"
+            return m.group(0)
+        code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\d+)(?!\')', _fix_arith_int, code_part)
+
+        # Evaluate constant comparisons: number == 1'b0 → 1'b0/1'b1
+        # These arise from parameter substitution (e.g., DEPTH=8 → 8 == 0)
+        def _eval_const_cmp(m):
+            lhs = m.group(1).strip()
+            op = m.group(2).strip()
+            rhs = m.group(3).strip()
+            try:
+                # Try to evaluate both sides
+                lhs_val = eval(re.sub(r"'[bdho]", "", lhs.replace("1'b0","0").replace("1'b1","1")), {"__builtins__": {}})
+                rhs_val = eval(re.sub(r"'[bdho]", "", rhs.replace("1'b0","0").replace("1'b1","1")), {"__builtins__": {}})
+                result = False
+                if op == "==": result = (lhs_val == rhs_val)
+                elif op == "!=": result = (lhs_val != rhs_val)
+                elif op == ">": result = (lhs_val > rhs_val)
+                elif op == "<": result = (lhs_val < rhs_val)
+                elif op == ">=": result = (lhs_val >= rhs_val)
+                elif op == "<=": result = (lhs_val <= rhs_val)
+                return "1'b1" if result else "1'b0"
+            except Exception:
+                return m.group(0)
+        # Match: number/literal == number/literal
+        code_part = re.sub(r'\b(\d+(?:\'[bdh][0-9a-fA-F]+)?)\s*(==|!=|>=|<=|>|<)\s*(\d+(?:\'[bdh][0-9a-fA-F]+)?)\b', _eval_const_cmp, code_part)
 
         # Fix bare 0 in comparisons only: == 0, != 0, > 0, < 0 → use 1'b0
         # These appear when parameter substitution creates expressions like `N > 0`
@@ -2438,17 +2489,16 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         full_text = '\n'.join(cleaned_lines)
         new_cleaned = []
         removed = False
-        for line in cleaned_lines:
+        for idx, line in enumerate(cleaned_lines):
             m = re.match(r'\s*let\s+(\w+)\s*=\s*', line)
             if m:
                 let_name = m.group(1)
                 # Check if this name is used elsewhere in the output
-                # (not just in the let definition itself)
-                # Use word boundary check
+                # Count occurrences in all OTHER lines
                 pattern = r'\b' + re.escape(let_name) + r'\b'
-                # Count occurrences: should be >1 (the definition + at least one use)
-                occurrences = len(re.findall(pattern, full_text))
-                if occurrences <= 1:
+                other_text = '\n'.join(cleaned_lines[:idx] + cleaned_lines[idx+1:])
+                occurrences = len(re.findall(pattern, other_text))
+                if occurrences == 0:
                     removed = True
                     continue  # skip this unused let
             new_cleaned.append(line)
