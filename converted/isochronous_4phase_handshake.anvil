@@ -1,0 +1,102 @@
+/* Hand-written Anvil for isochronous_4phase_handshake.sv
+   4-phase handshake between isochronous clock domains.
+   Toggle-based req/ack protocol: src toggles req on valid+ready,
+   dst toggles ack on valid+ready. Ready when req==ack, valid when req!=ack.
+
+   Since Anvil has implicit clocking, both clock domains are modeled
+   within a single proc. The "synchronization" registers are modeled
+   as regular registers (safe for isochronous domains per STA).
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~55
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] Dual-clock domain collapsed into single proc
+       - [MANUAL-CLEANUP-NEEDED] FFLARN/FFARN macros expanded inline
+*/
+
+chan iso4ph_src_ch {
+    left src_valid_i : (logic@#1) @dyn - @dyn,
+    right src_ready_o : (logic@#1) @dyn - @dyn
+}
+
+chan iso4ph_dst_ch {
+    right dst_valid_o : (logic@#1) @dyn - @dyn,
+    left dst_ready_i : (logic@#1) @dyn - @dyn
+}
+
+proc isochronous_4phase_handshake(
+    src : left iso4ph_src_ch,
+    dst : left iso4ph_dst_ch
+) {
+    // Source domain registers
+    reg src_req_q : logic;
+    reg src_ack_q : logic;
+    // Destination domain registers
+    reg dst_req_q : logic;
+    reg dst_ack_q : logic;
+
+    // Input staging
+    reg r_src_valid : logic;
+    reg r_dst_ready : logic;
+
+    // Receive src_valid_i
+    loop {
+        let sv = recv src.src_valid_i >>
+        set r_src_valid := sv >>
+        cycle 1
+    }
+
+    // Receive dst_ready_i
+    loop {
+        let dr = recv dst.dst_ready_i >>
+        set r_dst_ready := dr >>
+        cycle 1
+    }
+
+    // src_req_q: toggle when src_valid && src_ready (req == ack)
+    loop {
+        let src_rdy = if *src_req_q == *src_ack_q { 1'b1 } else { 1'b0 } >>
+        if (*r_src_valid & src_rdy) {
+            set src_req_q := ~(*src_req_q)
+        } else {
+            cycle 1
+        }
+    }
+
+    // src_ack_q: "synchronize" dst_ack_q into src domain
+    loop {
+        set src_ack_q := *dst_ack_q >>
+        cycle 1
+    }
+
+    // dst_req_q: "synchronize" src_req_q into dst domain
+    loop {
+        set dst_req_q := *src_req_q >>
+        cycle 1
+    }
+
+    // dst_ack_q: toggle when dst_valid && dst_ready (req != ack)
+    loop {
+        let dst_vld = if *dst_req_q != *dst_ack_q { 1'b1 } else { 1'b0 } >>
+        if (dst_vld & *r_dst_ready) {
+            set dst_ack_q := ~(*dst_ack_q)
+        } else {
+            cycle 1
+        }
+    }
+
+    // Output src_ready_o
+    loop {
+        let src_rdy_out = if *src_req_q == *src_ack_q { 1'b1 } else { 1'b0 } >>
+        send src.src_ready_o (src_rdy_out) >>
+        cycle 1
+    }
+
+    // Output dst_valid_o
+    loop {
+        let dst_vld_out = if *dst_req_q != *dst_ack_q { 1'b1 } else { 1'b0 } >>
+        send dst.dst_valid_o (dst_vld_out) >>
+        cycle 1
+    }
+}

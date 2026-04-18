@@ -1,0 +1,103 @@
+/* Hand-written Anvil for deprecated/sram.sv
+   SRAM behavioral model with bit-level write enable masking.
+   Concrete params: DATA_WIDTH=64, NUM_WORDS=1024, ADDR_WIDTH=10.
+
+   Named sram_behavioral.anvil to avoid collision with existing sram.anvil
+   (which converts common/local/util/sram.sv, a different module).
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~65
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] DATA_WIDTH=64, NUM_WORDS=1024 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] Bit-level write enable modeled as full-word masked write
+       - [MANUAL-CLEANUP-NEEDED] $clog2(1024)=10 precomputed
+*/
+
+chan sram_behav_in_ch {
+    left req_i   : (logic@#1) @dyn - @dyn,
+    left we_i    : (logic@#1) @dyn - @dyn,
+    left addr_i  : (logic[10]@#1) @dyn - @dyn,
+    left wdata_i : (logic[64]@#1) @dyn - @dyn,
+    left be_i    : (logic[64]@#1) @dyn - @dyn
+}
+
+chan sram_behav_out_ch {
+    left rdata_o : (logic[64]@#1) @dyn - @dyn
+}
+
+type sram_behav_word = (logic[64]);
+
+proc sram_behavioral(
+    inp : left sram_behav_in_ch,
+    out : right sram_behav_out_ch
+) {
+    reg ram : sram_behav_word[1024];
+    reg raddr_q : logic[10];
+
+    // Input staging registers
+    reg r_req   : logic;
+    reg r_we    : logic;
+    reg r_addr  : logic[10];
+    reg r_wdata : logic[64];
+    reg r_be    : logic[64];
+
+    // Receive req_i
+    loop {
+        let r = recv inp.req_i >>
+        set r_req := r >>
+        cycle 1
+    }
+
+    // Receive we_i
+    loop {
+        let w = recv inp.we_i >>
+        set r_we := w >>
+        cycle 1
+    }
+
+    // Receive addr_i
+    loop {
+        let a = recv inp.addr_i >>
+        set r_addr := a >>
+        cycle 1
+    }
+
+    // Receive wdata_i
+    loop {
+        let d = recv inp.wdata_i >>
+        set r_wdata := d >>
+        cycle 1
+    }
+
+    // Receive be_i
+    loop {
+        let b = recv inp.be_i >>
+        set r_be := b >>
+        cycle 1
+    }
+
+    // Main SRAM logic: on req, either read or write
+    loop {
+        if (*r_req) {
+            if (~(*r_we)) {
+                // Read: latch address
+                set raddr_q := *r_addr
+            } else {
+                // Write with byte enable: ram[addr] = (wdata & be) | (ram[addr] & ~be)
+                let cur = <(*ram[*r_addr])::logic[64]> >>
+                let masked = (*r_wdata & *r_be) | (cur & ~(*r_be)) >>
+                set ram[*r_addr] := <(masked)::sram_behav_word>
+            }
+        } else {
+            cycle 1
+        }
+    }
+
+    // Output: rdata_o = ram[raddr_q]
+    loop {
+        let rd = <(*ram[*raddr_q])::logic[64]> >>
+        send out.rdata_o (rd) >>
+        cycle 1
+    }
+}

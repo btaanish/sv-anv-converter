@@ -1,0 +1,82 @@
+/* Hand-written Anvil for sync_wedge.sv
+   Edge detector with synchronizer (non-deprecated version).
+   Detects rising and falling edges of a synchronized serial input.
+   Has enable gating on the serial_q register.
+   Concrete params: STAGES=2.
+
+   Submodules sync and pulp_clock_gating are modeled as inlined logic.
+   The 2-stage synchronizer is represented by two shift registers.
+   Clock gating via en_i is modeled as conditional register update.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~50
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] sync module inlined as 2-stage shift register
+       - [MANUAL-CLEANUP-NEEDED] pulp_clock_gating modeled as enable on serial_q
+*/
+
+chan sync_wedge_in_ch {
+    left serial_i : (logic@#1) @dyn - @dyn,
+    left en_i     : (logic@#1) @dyn - @dyn
+}
+
+chan sync_wedge_out_ch {
+    left r_edge_o  : (logic@#1) @dyn - @dyn,
+    left f_edge_o  : (logic@#1) @dyn - @dyn,
+    left serial_o  : (logic@#1) @dyn - @dyn
+}
+
+proc sync_wedge(
+    inp : left sync_wedge_in_ch,
+    out : right sync_wedge_out_ch
+) {
+    // 2-stage synchronizer (inlined from sync module)
+    reg sync_reg0 : logic;
+    reg sync_reg1 : logic;
+    // Previous value for edge detection (gated by en_i)
+    reg serial_q : logic;
+    // Enable staging
+    reg r_en : logic;
+
+    // Stage 1: sample serial_i into sync_reg0
+    loop {
+        let si = recv inp.serial_i >>
+        set sync_reg0 := si >>
+        cycle 1
+    }
+
+    // Stage 2: shift sync_reg0 -> sync_reg1
+    loop {
+        set sync_reg1 := *sync_reg0 >>
+        cycle 1
+    }
+
+    // Receive en_i
+    loop {
+        let en = recv inp.en_i >>
+        set r_en := en >>
+        cycle 1
+    }
+
+    // Register serial_q with enable gate
+    loop {
+        if (*r_en) {
+            set serial_q := *sync_reg1
+        } else {
+            cycle 1
+        }
+    }
+
+    // Compute and send edge outputs
+    loop {
+        let serial_val = *sync_reg1 >>
+        let sq = *serial_q >>
+        let r_edge = serial_val & (~sq) >>
+        let f_edge = (~serial_val) & sq >>
+        send out.serial_o (sq) >>
+        send out.r_edge_o (r_edge) >>
+        send out.f_edge_o (f_edge) >>
+        cycle 1
+    }
+}

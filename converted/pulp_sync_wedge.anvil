@@ -1,0 +1,69 @@
+/* Hand-written Anvil for pulp_sync_wedge.sv
+   Edge detector with synchronizer. Detects rising and falling edges
+   of a synchronized serial input.
+   Concrete params: STAGES=2 (hardcoded in pulp_sync).
+
+   Submodules pulp_sync and pulp_clock_gating are modeled as inlined logic.
+   The 2-stage synchronizer is represented by two shift registers.
+   Clock gating is omitted (FPGA path).
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~45
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] pulp_sync inlined as 2-stage shift register
+       - [MANUAL-CLEANUP-NEEDED] pulp_clock_gating omitted (en_i not modeled as clock gate)
+*/
+
+chan pulp_sync_wedge_in_ch {
+    left serial_i : (logic@#1) @dyn - @dyn,
+    left en_i     : (logic@#1) @dyn - @dyn
+}
+
+chan pulp_sync_wedge_out_ch {
+    left r_edge_o  : (logic@#1) @dyn - @dyn,
+    left f_edge_o  : (logic@#1) @dyn - @dyn,
+    left serial_o  : (logic@#1) @dyn - @dyn
+}
+
+proc pulp_sync_wedge(
+    inp : left pulp_sync_wedge_in_ch,
+    out : right pulp_sync_wedge_out_ch
+) {
+    // 2-stage synchronizer (inlined from pulp_sync)
+    reg sync_reg0 : logic;
+    reg sync_reg1 : logic;
+    // Previous value for edge detection
+    reg serial_q : logic;
+
+    // Stage 1: sample serial_i into sync_reg0
+    loop {
+        let si = recv inp.serial_i >>
+        set sync_reg0 := si >>
+        cycle 1
+    }
+
+    // Stage 2: shift sync_reg0 -> sync_reg1 (this is the "serial" signal)
+    loop {
+        set sync_reg1 := *sync_reg0 >>
+        cycle 1
+    }
+
+    // Register serial_q (previous synchronized value)
+    loop {
+        set serial_q := *sync_reg1 >>
+        cycle 1
+    }
+
+    // Compute and send edge outputs
+    loop {
+        let serial_val = *sync_reg1 >>
+        let sq = *serial_q >>
+        let r_edge = serial_val & (~sq) >>
+        let f_edge = (~serial_val) & sq >>
+        send out.serial_o (sq) >>
+        send out.r_edge_o (r_edge) >>
+        send out.f_edge_o (f_edge) >>
+        cycle 1
+    }
+}
