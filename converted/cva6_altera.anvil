@@ -1,0 +1,172 @@
+/* Hand-written Anvil for cva6_altera.sv
+   Intel FPGA top-level wrapper for CVA6 on Agilex 7.
+   Concrete params: AxiAddrWidth=64, AxiDataWidth=64, AxiIdWidthMaster=4,
+   AxiIdWidthSlaves=5, AxiUserWidth=1, NBSlave=2, NumWords=4096.
+   Submodule instantiations (rstgen, axi_xbar_intf, vJTAG, dmi_vjtag,
+   dm_top, axi2mem, axi_adapter, ariane, clint, bootrom,
+   cva6_peripherals, axi_riscv_atomics_wrap, ed_synth_emif_fm_0,
+   emif_cal, system, io_pll, interconnect, test_mm_ccb_0,
+   axi_dw_adapter) modeled as opaque register stubs.
+   RTC toggle (always_ff) is fully modeled.
+   Clock/reset implicit. */
+
+chan altera_in_ch {
+    left cpu_resetn : (logic@#1) @dyn - @dyn,
+    left ddr4_alert_n : (logic@#1) @dyn - @dyn,
+    left oct_rzqin : (logic@#1) @dyn - @dyn,
+    left pll_ref_clk_p : (logic@#1) @dyn - @dyn,
+    left clk_ddr4_ch0_p : (logic@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_alert_n : (logic@#1) @dyn - @dyn,
+    left emif_hps_oct_oct_rzqin : (logic@#1) @dyn - @dyn,
+    left emif_hps_pll_ref_clk_p : (logic@#1) @dyn - @dyn,
+    left hps_jtag_tck : (logic@#1) @dyn - @dyn,
+    left hps_jtag_tms : (logic@#1) @dyn - @dyn,
+    left hps_jtag_tdi : (logic@#1) @dyn - @dyn,
+    left hps_emac0_RX_CLK : (logic@#1) @dyn - @dyn,
+    left hps_emac0_RX_CTL : (logic@#1) @dyn - @dyn,
+    left hps_emac0_RXD0 : (logic@#1) @dyn - @dyn,
+    left hps_emac0_RXD1 : (logic@#1) @dyn - @dyn,
+    left hps_emac0_RXD2 : (logic@#1) @dyn - @dyn,
+    left hps_emac0_RXD3 : (logic@#1) @dyn - @dyn,
+    left hps_uart0_RX : (logic@#1) @dyn - @dyn,
+    left hps_ref_clk : (logic@#1) @dyn - @dyn
+}
+
+chan altera_out_ch {
+    left led : (logic[4]@#1) @dyn - @dyn,
+    left ddr4_ba : (logic[2]@#1) @dyn - @dyn,
+    left ddr4_bg : (logic[2]@#1) @dyn - @dyn,
+    left ddr4_reset_n : (logic@#1) @dyn - @dyn,
+    left ddr4_ck_p : (logic@#1) @dyn - @dyn,
+    left ddr4_ck_n : (logic@#1) @dyn - @dyn,
+    left ddr4_a : (logic[17]@#1) @dyn - @dyn,
+    left ddr4_act_n : (logic@#1) @dyn - @dyn,
+    left ddr4_cke : (logic@#1) @dyn - @dyn,
+    left ddr4_cs_n : (logic@#1) @dyn - @dyn,
+    left ddr4_odt : (logic@#1) @dyn - @dyn,
+    left ddr4_par : (logic@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_ck : (logic@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_ck_n : (logic@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_a : (logic[17]@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_act_n : (logic@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_ba : (logic[2]@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_bg : (logic[2]@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_cke : (logic@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_cs_n : (logic@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_odt : (logic@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_reset_n : (logic@#1) @dyn - @dyn,
+    left emif_hps_mem_mem_par : (logic@#1) @dyn - @dyn,
+    left hps_jtag_tdo : (logic@#1) @dyn - @dyn,
+    left hps_sdmmc_CCLK : (logic@#1) @dyn - @dyn,
+    left hps_emac0_TX_CLK : (logic@#1) @dyn - @dyn,
+    left hps_emac0_TX_CTL : (logic@#1) @dyn - @dyn,
+    left hps_emac0_TXD0 : (logic@#1) @dyn - @dyn,
+    left hps_emac0_TXD1 : (logic@#1) @dyn - @dyn,
+    left hps_emac0_TXD2 : (logic@#1) @dyn - @dyn,
+    left hps_emac0_TXD3 : (logic@#1) @dyn - @dyn,
+    left hps_emac0_MDC : (logic@#1) @dyn - @dyn,
+    left hps_uart0_TX : (logic@#1) @dyn - @dyn
+}
+
+proc cva6_altera(
+    inp : left altera_in_ch,
+    out : right altera_out_ch
+) {
+    /* RTC toggle register */
+    reg rtc : logic;
+
+    /* Input staging registers */
+    reg r_cpu_resetn : logic;
+    reg r_ddr4_alert_n : logic;
+    reg r_oct_rzqin : logic;
+    reg r_pll_ref_clk_p : logic;
+    reg r_clk_ddr4_ch0_p : logic;
+    reg r_emif_hps_mem_mem_alert_n : logic;
+    reg r_emif_hps_oct_oct_rzqin : logic;
+    reg r_emif_hps_pll_ref_clk_p : logic;
+    reg r_hps_jtag_tck : logic;
+    reg r_hps_jtag_tms : logic;
+    reg r_hps_jtag_tdi : logic;
+    reg r_hps_emac0_RX_CLK : logic;
+    reg r_hps_emac0_RX_CTL : logic;
+    reg r_hps_emac0_RXD0 : logic;
+    reg r_hps_emac0_RXD1 : logic;
+    reg r_hps_emac0_RXD2 : logic;
+    reg r_hps_emac0_RXD3 : logic;
+    reg r_hps_uart0_RX : logic;
+    reg r_hps_ref_clk : logic;
+
+    /* Internal stub registers for submodule outputs */
+    reg r_ndmreset_n : logic;
+    reg r_pll_locked : logic;
+    reg r_cal_success : logic;
+    reg r_ddr_sync_reset : logic;
+
+    /* Receive all inputs */
+    loop { let x = recv inp.cpu_resetn >> set r_cpu_resetn := x }
+    loop { let x = recv inp.ddr4_alert_n >> set r_ddr4_alert_n := x }
+    loop { let x = recv inp.oct_rzqin >> set r_oct_rzqin := x }
+    loop { let x = recv inp.pll_ref_clk_p >> set r_pll_ref_clk_p := x }
+    loop { let x = recv inp.clk_ddr4_ch0_p >> set r_clk_ddr4_ch0_p := x }
+    loop { let x = recv inp.emif_hps_mem_mem_alert_n >> set r_emif_hps_mem_mem_alert_n := x }
+    loop { let x = recv inp.emif_hps_oct_oct_rzqin >> set r_emif_hps_oct_oct_rzqin := x }
+    loop { let x = recv inp.emif_hps_pll_ref_clk_p >> set r_emif_hps_pll_ref_clk_p := x }
+    loop { let x = recv inp.hps_jtag_tck >> set r_hps_jtag_tck := x }
+    loop { let x = recv inp.hps_jtag_tms >> set r_hps_jtag_tms := x }
+    loop { let x = recv inp.hps_jtag_tdi >> set r_hps_jtag_tdi := x }
+    loop { let x = recv inp.hps_emac0_RX_CLK >> set r_hps_emac0_RX_CLK := x }
+    loop { let x = recv inp.hps_emac0_RX_CTL >> set r_hps_emac0_RX_CTL := x }
+    loop { let x = recv inp.hps_emac0_RXD0 >> set r_hps_emac0_RXD0 := x }
+    loop { let x = recv inp.hps_emac0_RXD1 >> set r_hps_emac0_RXD1 := x }
+    loop { let x = recv inp.hps_emac0_RXD2 >> set r_hps_emac0_RXD2 := x }
+    loop { let x = recv inp.hps_emac0_RXD3 >> set r_hps_emac0_RXD3 := x }
+    loop { let x = recv inp.hps_uart0_RX >> set r_hps_uart0_RX := x }
+    loop { let x = recv inp.hps_ref_clk >> set r_hps_ref_clk := x }
+
+    /* RTC toggle: divide clock by two (always_ff)
+       rtc <= rtc ^ 1'b1 */
+    loop {
+        set rtc := *rtc ^ 1'b1
+    }
+
+    /* Drive all outputs with stub defaults.
+       All submodule instantiations (PLL, DDR, JTAG, debug, core,
+       crossbar, peripherals, HPS, etc.) are modeled as opaque —
+       outputs driven to zero/default. */
+    loop {
+        send out.led (4'b0000) >>
+        send out.ddr4_ba (2'b00) >>
+        send out.ddr4_bg (2'b00) >>
+        send out.ddr4_reset_n (1'b0) >>
+        send out.ddr4_ck_p (1'b0) >>
+        send out.ddr4_ck_n (1'b0) >>
+        send out.ddr4_a (17'd0) >>
+        send out.ddr4_act_n (1'b0) >>
+        send out.ddr4_cke (1'b0) >>
+        send out.ddr4_cs_n (1'b0) >>
+        send out.ddr4_odt (1'b0) >>
+        send out.ddr4_par (1'b0) >>
+        send out.emif_hps_mem_mem_ck (1'b0) >>
+        send out.emif_hps_mem_mem_ck_n (1'b0) >>
+        send out.emif_hps_mem_mem_a (17'd0) >>
+        send out.emif_hps_mem_mem_act_n (1'b0) >>
+        send out.emif_hps_mem_mem_ba (2'b00) >>
+        send out.emif_hps_mem_mem_bg (2'b00) >>
+        send out.emif_hps_mem_mem_cke (1'b0) >>
+        send out.emif_hps_mem_mem_cs_n (1'b0) >>
+        send out.emif_hps_mem_mem_odt (1'b0) >>
+        send out.emif_hps_mem_mem_reset_n (1'b0) >>
+        send out.emif_hps_mem_mem_par (1'b0) >>
+        send out.hps_jtag_tdo (1'b0) >>
+        send out.hps_sdmmc_CCLK (1'b0) >>
+        send out.hps_emac0_TX_CLK (1'b0) >>
+        send out.hps_emac0_TX_CTL (1'b0) >>
+        send out.hps_emac0_TXD0 (1'b0) >>
+        send out.hps_emac0_TXD1 (1'b0) >>
+        send out.hps_emac0_TXD2 (1'b0) >>
+        send out.hps_emac0_TXD3 (1'b0) >>
+        send out.hps_emac0_MDC (1'b0) >>
+        send out.hps_uart0_TX (1'b0) >>
+        cycle 1
+    }
+}
