@@ -1,0 +1,87 @@
+/* Hand-written Anvil for fall_through_register.sv
+   Fall-through register: depth-1 FIFO with combinational pass-through.
+   When output is ready and FIFO empty, data passes through in same cycle.
+   Concrete: T=logic[32], DEPTH=1. */
+
+chan ftr_in_ch {
+    left clr : (logic@#1) @dyn - @dyn,
+    left valid : (logic@#1) @dyn - @dyn,
+    left data : (logic[32]@#1) @dyn - @dyn,
+    left ready_i : (logic@#1) @dyn - @dyn
+}
+
+chan ftr_out_ch {
+    left rdy : (logic@#1) @dyn - @dyn,
+    left valid_out : (logic@#1) @dyn - @dyn,
+    left data_out : (logic[32]@#1) @dyn - @dyn
+}
+
+proc fall_through_register(
+    inp : left ftr_in_ch,
+    out : right ftr_out_ch
+) {
+    /* Single-entry storage */
+    reg mem : logic[32];
+    reg full : logic;
+
+    /* Snapshots */
+    reg snap_mem : logic[32];
+    reg snap_full : logic;
+
+    /* Input staging */
+    reg r_clr : logic;
+    reg r_valid : logic;
+    reg r_data : logic[32];
+    reg r_ready_i : logic;
+
+    loop {
+        /* Snapshot FIFO state */
+        set snap_mem := *mem >>
+        set snap_full := *full >>
+
+        /* Receive inputs */
+        let c = recv inp.clr >>
+        set r_clr := c >>
+        let v = recv inp.valid >>
+        set r_valid := v >>
+        let d = recv inp.data >>
+        set r_data := d >>
+        let ri = recv inp.ready_i >>
+        set r_ready_i := ri >>
+
+        /* Compute outputs */
+        let ready_o = ~(*snap_full);
+        let ft_valid = if (*snap_full == 1'b0) & (*r_valid == 1'b1) {
+            1'b1
+        } else {
+            *snap_full
+        };
+        let data_out = if (*snap_full == 1'b0) & (*r_valid == 1'b1) {
+            *r_data
+        } else {
+            *snap_mem
+        };
+
+        send out.rdy (ready_o);
+        send out.valid_out (ft_valid);
+        send out.data_out (data_out) >>
+
+        /* Update state */
+        let push_ok = *r_valid & ~(*snap_full);
+        let pop_ok = *r_ready_i & *snap_full;
+
+        if *r_clr == 1'b1 {
+            set full := 1'b0;
+            set mem := 32'd0
+        } else if (push_ok == 1'b1) & (pop_ok == 1'b1) {
+            set mem := *r_data
+        } else if push_ok == 1'b1 {
+            set mem := *r_data;
+            set full := 1'b1
+        } else if pop_ok == 1'b1 {
+            set full := 1'b0
+        } else {
+            cycle 1
+        }
+    }
+}
