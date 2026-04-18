@@ -1,0 +1,67 @@
+/* Hand-written Anvil for generic_rom.sv
+   ROM lookup table. Stores data in a memory array, latches address
+   on clock edge when chip-enable is low, outputs stored data.
+   Concrete params: ADDR_WIDTH=5, DATA_WIDTH=32, NUM_WORDS=32.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~55
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] ADDR_WIDTH=5, DATA_WIDTH=32 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] $readmemb initialization omitted (no Anvil equivalent)
+       - [MANUAL-CLEANUP-NEEDED] ROM contents default to zero
+*/
+
+chan rom_in_ch {
+    left cen : (logic@#1) @dyn - @dyn,
+    left addr : (logic[5]@#1) @dyn - @dyn
+}
+
+chan rom_out_ch {
+    left q : (logic[32]@#1) @dyn - @dyn
+}
+
+type rom_word = (logic[32]);
+
+proc generic_rom(
+    inp : left rom_in_ch,
+    out : right rom_out_ch
+) {
+    // Memory array: 32 words of 32 bits
+    reg mem : rom_word[32];
+    // Latched address
+    reg a_q : logic[5];
+
+    // Input staging registers
+    reg r_cen : logic;
+    reg r_addr : logic[5];
+
+    // Receive chip enable
+    loop {
+        let c = recv inp.cen >>
+        set r_cen := c >>
+        cycle 1
+    }
+
+    // Receive address
+    loop {
+        let a = recv inp.addr >>
+        set r_addr := a >>
+        cycle 1
+    }
+
+    // Latch address when CEN is low (active low chip enable)
+    loop {
+        if (*r_cen == 1'b0) {
+            set a_q := *r_addr
+        } else {
+            cycle 1
+        }
+    }
+
+    // Output: Q = MEM[A_Q]
+    loop {
+        send out.q (<(*mem[*a_q])::logic[32]>) >>
+        cycle 1
+    }
+}

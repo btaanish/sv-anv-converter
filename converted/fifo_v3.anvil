@@ -1,0 +1,160 @@
+/* Hand-written Anvil for fifo_v3.sv
+   Circular FIFO with read/write pointers and status counter.
+   Supports push/pop with full/empty flags.
+   Concrete params: DATA_WIDTH=32, DEPTH=8, ADDR_DEPTH=3.
+   FALL_THROUGH=0 (no passthrough mode).
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~110
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] DATA_WIDTH=32, DEPTH=8 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] FALL_THROUGH mode omitted (hardcoded to 0)
+       - [MANUAL-CLEANUP-NEEDED] flush_i and testmode_i received but flush resets pointers
+*/
+
+chan fifo_v3_in_ch {
+    left flush_i    : (logic@#1) @dyn - @dyn,
+    left testmode_i : (logic@#1) @dyn - @dyn,
+    left data_i     : (logic[32]@#1) @dyn - @dyn,
+    left push_i     : (logic@#1) @dyn - @dyn,
+    left pop_i      : (logic@#1) @dyn - @dyn
+}
+
+chan fifo_v3_out_ch {
+    left full_o  : (logic@#1) @dyn - @dyn,
+    left empty_o : (logic@#1) @dyn - @dyn,
+    left usage_o : (logic[3]@#1) @dyn - @dyn,
+    left data_o  : (logic[32]@#1) @dyn - @dyn
+}
+
+type fifo_v3_word = (logic[32]);
+
+proc fifo_v3(
+    inp : left fifo_v3_in_ch,
+    out : right fifo_v3_out_ch
+) {
+    // Pointers and status
+    reg read_ptr  : logic[3];
+    reg write_ptr : logic[3];
+    reg status_cnt : logic[4];
+    // Memory: 8 entries of 32-bit
+    reg mem : fifo_v3_word[8];
+
+    // Input staging regs
+    reg r_flush : logic;
+    reg r_data  : logic[32];
+    reg r_push  : logic;
+    reg r_pop   : logic;
+
+    // Output regs
+    reg r_full  : logic;
+    reg r_empty : logic;
+    reg r_data_o : logic[32];
+
+    // Receive flush
+    loop {
+        let f = recv inp.flush_i >>
+        set r_flush := f >>
+        cycle 1
+    }
+
+    // Receive testmode (consumed but not used in core logic)
+    loop {
+        let _tm = recv inp.testmode_i >>
+        cycle 1
+    }
+
+    // Receive data_i
+    loop {
+        let d = recv inp.data_i >>
+        set r_data := d >>
+        cycle 1
+    }
+
+    // Receive push_i
+    loop {
+        let p = recv inp.push_i >>
+        set r_push := p >>
+        cycle 1
+    }
+
+    // Receive pop_i
+    loop {
+        let p = recv inp.pop_i >>
+        set r_pop := p >>
+        cycle 1
+    }
+
+    // Main FIFO logic
+    loop {
+        let cur_rp = *read_ptr >>
+        let cur_wp = *write_ptr >>
+        let cur_cnt = *status_cnt >>
+        let push = *r_push >>
+        let pop = *r_pop >>
+
+        // Status flags
+        let full_val = if cur_cnt == 4'd8 { 1'b1 } else { 1'b0 } >>
+        let empty_val = if cur_cnt == 4'd0 { 1'b1 } else { 1'b0 } >>
+
+        // Data output: mem[read_ptr]
+        set r_data_o := <(*mem[cur_rp])::logic[32]> >>
+        set r_full := full_val >>
+        set r_empty := empty_val >>
+
+        if (*r_flush == 1'b1) {
+            // Flush: reset pointers and counter
+            set read_ptr := 3'd0 >>
+            set write_ptr := 3'd0 >>
+            set status_cnt := 4'd0
+        } else {
+            // Push and pop logic
+            let do_push = push & (~full_val) >>
+            let do_pop = pop & (~empty_val) >>
+
+            // Compute new write pointer
+            let new_wp = if do_push == 1'b1 {
+                if cur_wp == 3'd7 { 3'd0 } else { cur_wp + 3'd1 }
+            } else { cur_wp } >>
+
+            // Compute new read pointer
+            let new_rp = if do_pop == 1'b1 {
+                if cur_rp == 3'd7 { 3'd0 } else { cur_rp + 3'd1 }
+            } else { cur_rp } >>
+
+            // Compute new status count
+            let new_cnt = if (do_push == 1'b1) & (do_pop == 1'b1) {
+                cur_cnt
+            } else {
+                if do_push == 1'b1 {
+                    cur_cnt + 4'd1
+                } else {
+                    if do_pop == 1'b1 {
+                        cur_cnt - 4'd1
+                    } else {
+                        cur_cnt
+                    }
+                }
+            } >>
+
+            // Write memory on push
+            if do_push == 1'b1 {
+                set mem[cur_wp] := <(*r_data)::fifo_v3_word>
+            } else { () } >>
+
+            set write_ptr := new_wp >>
+            set read_ptr := new_rp >>
+            set status_cnt := new_cnt
+        }
+    }
+
+    // Send outputs
+    loop {
+        send out.full_o (*r_full) >>
+        send out.empty_o (*r_empty) >>
+        send out.usage_o (<(*status_cnt)::logic[3]>) >>
+        send out.data_o (*r_data_o) >>
+        cycle 1
+    }
+}

@@ -1,0 +1,70 @@
+/* Hand-written Anvil for pulp_clock_gating_async.sv
+   Clock gating cell with asynchronous enable input.
+   Synchronizes en_async_i through a 2-stage shift register,
+   then gates the clock. en_ack_o reflects the synchronized enable.
+   Concrete params: STAGES=2.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~55
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] STAGES=2 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] pulp_clock_gating submodule modeled as AND gate
+       - [MANUAL-CLEANUP-NEEDED] test_en_i input received but clock gating simplified
+*/
+
+chan pcga_in_ch {
+    left en_async_i : (logic@#1) @dyn - @dyn,
+    left test_en_i  : (logic@#1) @dyn - @dyn
+}
+
+chan pcga_out_ch {
+    left en_ack_o : (logic@#1) @dyn - @dyn,
+    left clk_o    : (logic@#1) @dyn - @dyn
+}
+
+proc pulp_clock_gating_async(
+    inp : left pcga_in_ch,
+    out : right pcga_out_ch
+) {
+    // 2-stage synchronizer register
+    reg r_reg0 : logic;
+    reg r_reg1 : logic;
+
+    // Input staging
+    reg r_en_async : logic;
+    reg r_test_en : logic;
+
+    // Receive en_async_i
+    loop {
+        let en = recv inp.en_async_i >>
+        set r_en_async := en >>
+        cycle 1
+    }
+
+    // Receive test_en_i
+    loop {
+        let te = recv inp.test_en_i >>
+        set r_test_en := te >>
+        cycle 1
+    }
+
+    // 2-stage synchronizer: r_reg <= {r_reg[0], en_async_i}
+    loop {
+        set r_reg1 := *r_reg0;
+        set r_reg0 := *r_en_async
+    }
+
+    // en_ack_o = r_reg[STAGES-1] = r_reg1
+    loop {
+        send out.en_ack_o (*r_reg1) >>
+        cycle 1
+    }
+
+    // clk_o = gated clock: en_i | test_en_i (simplified model)
+    loop {
+        let gated = *r_reg1 | *r_test_en >>
+        send out.clk_o (gated) >>
+        cycle 1
+    }
+}
