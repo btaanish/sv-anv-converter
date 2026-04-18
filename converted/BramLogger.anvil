@@ -1,0 +1,149 @@
+/* Hand-written Anvil for BramLogger.sv
+   BRAM Logger: logs timestamped events to a BRAM array with FSM control.
+   Concrete params: LOG_DATA_BITW=32, NUM_LOG_ENTRIES=16384.
+   Derived: LOG_ENTRY_BITW=64, LOGGING_CNT_BITW=14, LOGGING_CNT_MAX=16383.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~110
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] LOG_DATA_BITW=32, NUM_LOG_ENTRIES=16384 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] BramPort interface omitted (no SV interfaces in Anvil)
+       - [MANUAL-CLEANUP-NEEDED] TdpBramArray/BramDwc submodules omitted — BRAM modeled inline
+       - [MANUAL-CLEANUP-NEEDED] TimestampClk_CI collapsed to main clock (single clock in Anvil)
+       - [MANUAL-CLEANUP-NEEDED] CfMath functions replaced with precomputed constants
+       - [MANUAL-CLEANUP-NEEDED] External BRAM read port not modeled
+*/
+
+enum bram_logger_state {
+    BL_READY,
+    BL_CLEARING,
+    BL_FULL
+}
+
+chan bram_logger_in_ch {
+    left log_data_i    : (logic[32]@#1) @dyn - @dyn,
+    left log_trigger_i : (logic@#1) @dyn - @dyn,
+    left clear_i       : (logic@#1) @dyn - @dyn,
+    left log_en_i      : (logic@#1) @dyn - @dyn
+}
+
+chan bram_logger_out_ch {
+    left full_o  : (logic@#1) @dyn - @dyn,
+    left rdy_o   : (logic@#1) @dyn - @dyn
+}
+
+type bram_entry = (logic[64]);
+
+proc BramLogger(
+    inp : left bram_logger_in_ch,
+    out : right bram_logger_out_ch
+) {
+    // FSM state
+    reg state : bram_logger_state;
+
+    // Write counter (14-bit for 16384 entries)
+    reg wr_cnt : logic[14];
+
+    // Timestamp counter (32-bit, wraps around)
+    reg timestamp : logic[32];
+
+    // BRAM array (16384 x 64-bit entries: 32-bit timestamp + 32-bit log data)
+    reg bram : bram_entry[16384];
+
+    // Input staging registers
+    reg r_log_data    : logic[32];
+    reg r_log_trigger : logic;
+    reg r_clear       : logic;
+    reg r_log_en      : logic;
+
+    // Output staging registers
+    reg r_full : logic;
+    reg r_rdy  : logic;
+
+    // Receive inputs
+    loop {
+        let v = recv inp.log_data_i >>
+        set r_log_data := v
+    }
+    loop {
+        let v = recv inp.log_trigger_i >>
+        set r_log_trigger := v
+    }
+    loop {
+        let v = recv inp.clear_i >>
+        set r_clear := v
+    }
+    loop {
+        let v = recv inp.log_en_i >>
+        set r_log_en := v
+    }
+
+    // Timestamp counter: increment every cycle, wrap at max
+    loop {
+        set timestamp := *timestamp + 32'd1
+    }
+
+    // Control FSM + BRAM write logic
+    loop {
+        match (*state) {
+            bram_logger_state::BL_READY => {
+                set r_rdy := 1'b1 >>
+                // Check near-full: 16383 - 1024 = 15359
+                if (*wr_cnt >= 14'd15359) {
+                    set r_full := 1'b1
+                } else {
+                    set r_full := 1'b0
+                } >>
+                if (*wr_cnt == 14'd16383) {
+                    // Full
+                    set state := bram_logger_state::BL_FULL
+                } else if ((*r_clear == 1'b1) & (*wr_cnt != 14'd0)) {
+                    // Start clearing
+                    set wr_cnt := 14'd0 >>
+                    set state := bram_logger_state::BL_CLEARING
+                } else if ((*r_log_en == 1'b1) & (*r_log_trigger == 1'b1) & (*r_clear == 1'b0)) {
+                    // Log entry: {log_data, timestamp}
+                    let entry = <(#{*r_log_data, *timestamp})::bram_entry> >>
+                    set bram[*wr_cnt] := entry >>
+                    set wr_cnt := *wr_cnt + 14'd1
+                } else {
+                    cycle 1
+                }
+            },
+            bram_logger_state::BL_CLEARING => {
+                set r_rdy := 1'b0 >>
+                set r_full := 1'b0 >>
+                // Write zeros to clear
+                set bram[*wr_cnt] := <(64'd0)::bram_entry> >>
+                if (*wr_cnt == 14'd16383) {
+                    set wr_cnt := 14'd0 >>
+                    set state := bram_logger_state::BL_READY
+                } else {
+                    set wr_cnt := *wr_cnt + 14'd1
+                }
+            },
+            _ => {
+                // BL_FULL state
+                set r_full := 1'b1 >>
+                set r_rdy := 1'b0 >>
+                if (*r_clear == 1'b1) {
+                    set wr_cnt := 14'd0 >>
+                    set state := bram_logger_state::BL_CLEARING
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // Output full and ready
+    loop {
+        send out.full_o (*r_full) >>
+        cycle 1
+    }
+    loop {
+        send out.rdy_o (*r_rdy) >>
+        cycle 1
+    }
+}

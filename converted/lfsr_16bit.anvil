@@ -1,0 +1,64 @@
+/* Hand-written Anvil for lfsr_16bit.sv
+   16-bit Linear Feedback Shift Register.
+   Concrete params: SEED=16'b0, WIDTH=16.
+   XNOR taps at bits 15, 12, 5, 1.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~60
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] WIDTH=16 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] SEED=16'b0 hardcoded (regs init to 0)
+       - [MANUAL-CLEANUP-NEEDED] $clog2(16)=4 precomputed
+       - [MANUAL-CLEANUP-NEEDED] refill_way_oh one-hot decode modeled as shift
+*/
+
+chan lfsr_16bit_in_ch {
+    left en_i : (logic@#1) @dyn - @dyn
+}
+
+chan lfsr_16bit_out_ch {
+    left refill_way_oh  : (logic[16]@#1) @dyn - @dyn,
+    left refill_way_bin : (logic[4]@#1) @dyn - @dyn
+}
+
+proc lfsr_16bit(
+    inp : left lfsr_16bit_in_ch,
+    out : right lfsr_16bit_out_ch
+) {
+    // 16-bit shift register state
+    reg shift_q : logic[16];
+
+    // Input staging
+    reg r_en : logic;
+
+    // Receive enable input
+    loop {
+        let v = recv inp.en_i >>
+        set r_en := v
+    }
+
+    // LFSR shift logic (always_ff)
+    // shift_in = ~(shift_q[15] ^ shift_q[12] ^ shift_q[5] ^ shift_q[1])
+    // if en: shift_q = {shift_q[14:0], shift_in}
+    loop {
+        if (*r_en == 1'b1) {
+            let tap = ((*shift_q >> 16'd15) & 16'd1) ^ ((*shift_q >> 16'd12) & 16'd1) ^ ((*shift_q >> 16'd5) & 16'd1) ^ ((*shift_q >> 16'd1) & 16'd1) >>
+            let shift_in = ~tap & 16'd1 >>
+            let shifted = <((*shift_q << 16'd1) | shift_in)::logic[16]> >>
+            set shift_q := shifted
+        } else {
+            cycle 1
+        }
+    }
+
+    // Output: refill_way_oh = one-hot of shift_q[3:0], refill_way_bin = shift_q[3:0]
+    loop {
+        let idx = *shift_q & 16'd15 >>
+        let oh = <(16'd1 << idx)::logic[16]> >>
+        let bin = <(idx)::logic[4]> >>
+        send out.refill_way_oh (oh) >>
+        send out.refill_way_bin (bin) >>
+        cycle 1
+    }
+}
