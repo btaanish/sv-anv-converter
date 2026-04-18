@@ -1,0 +1,19 @@
+/* Anvil conversion of iti_pkg.sv — ITI tracing package.
+   Constants and itype enum for E-Trace instruction tracing. */
+
+enum itype {
+    STANDARD,
+    EXC,
+    INT,
+    ERET,
+    NON_TAKEN_BR,
+    TAKEN_BR,
+    UNINF_JMP,
+    RES
+}
+
+proc Top() {
+    loop {
+        cycle 1
+    }
+}
