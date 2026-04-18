@@ -1,0 +1,73 @@
+/* Hand-written Anvil for ariane_verilog_wrap.sv
+   Top-level wrapper that breaks out SV structs to logic vectors.
+   Concrete params: VLEN=39, XLEN=64, L15_REQ_WIDTH=178, L15_RTRN_WIDTH=178.
+   Submodule instantiations (synchronizer, ariane) omitted —
+   modeled as channel stubs.
+   Wake-up counter: 16-bit counter that gates reset until MSB is set.
+   Clock/reset implicit. */
+
+chan wrap_in_ch {
+    left boot_addr : (logic[39]@#1) @dyn - @dyn,
+    left hart_id : (logic[64]@#1) @dyn - @dyn,
+    left irq : (logic[2]@#1) @dyn - @dyn,
+    left ipi : (logic@#1) @dyn - @dyn,
+    left time_irq : (logic@#1) @dyn - @dyn,
+    left debug_req : (logic@#1) @dyn - @dyn,
+    left l15_rtrn : (logic[178]@#1) @dyn - @dyn
+}
+
+chan wrap_out_ch {
+    left spc_grst_l : (logic@#1) @dyn - @dyn,
+    left l15_req : (logic[178]@#1) @dyn - @dyn
+}
+
+proc ariane_verilog_wrap(
+    inp : left wrap_in_ch,
+    out : right wrap_out_ch
+) {
+    /* Wake-up counter */
+    reg wake_up_cnt : logic[16];
+
+    /* Synchronized signals */
+    reg r_irq : logic[2];
+    reg r_ipi : logic;
+    reg r_time_irq : logic;
+    reg r_debug_req : logic;
+    reg r_boot_addr : logic[39];
+    reg r_hart_id : logic[64];
+    reg r_l15_rtrn : logic[178];
+
+    /* Output staging */
+    reg r_l15_req : logic[178];
+
+    /* Receive inputs */
+    loop { let x = recv inp.boot_addr >> set r_boot_addr := x }
+    loop { let x = recv inp.hart_id >> set r_hart_id := x }
+    loop { let x = recv inp.irq >> set r_irq := x }
+    loop { let x = recv inp.ipi >> set r_ipi := x }
+    loop { let x = recv inp.time_irq >> set r_time_irq := x }
+    loop { let x = recv inp.debug_req >> set r_debug_req := x }
+    loop { let x = recv inp.l15_rtrn >> set r_l15_rtrn := x }
+
+    /* Wake-up counter: counts up until MSB is set, then saturates */
+    loop {
+        if (*wake_up_cnt & 16'h8000) == 16'h8000 {
+            cycle 1
+        } else {
+            set wake_up_cnt := *wake_up_cnt + 16'd1
+        }
+    }
+
+    /* spc_grst_l: driven by MSB of wake-up counter (synchronizer omitted) */
+    loop {
+        let grst = if (*wake_up_cnt & 16'h8000) == 16'h8000 { 1'b1 } else { 1'b0 };
+        send out.spc_grst_l (grst) >>
+        cycle 1
+    }
+
+    /* L15 request output (ariane core stub — passes through) */
+    loop {
+        send out.l15_req (*r_l15_req) >>
+        cycle 1
+    }
+}
