@@ -1,0 +1,75 @@
+/* Hand-written Anvil for slicer_DPTI.sv
+   Data slicer for DPTI trace encoder.
+   Takes encapsulated data and slices it into SLICE_LEN-bit chunks.
+   Concrete params: SLICE_LEN=32, NO_TIME=0.
+   DATA_LEN concretized to 256 (H_LEN+T_LEN+PAYLOAD_LEN).
+   NUM_SLICES=8, COUNT_LEN=3.
+   encap_fifo_entry_s fields flattened to a single 256-bit data word.
+   Clock/reset implicit. */
+
+chan slicer_in_ch {
+    left valid : (logic@#1) @dyn - @dyn,
+    left encap_data : (logic[256]@#1) @dyn - @dyn,
+    left fifo_full : (logic@#1) @dyn - @dyn
+}
+
+chan slicer_out_ch {
+    left valid_o : (logic@#1) @dyn - @dyn,
+    left slice_o : (logic[32]@#1) @dyn - @dyn,
+    left done_o : (logic@#1) @dyn - @dyn
+}
+
+proc slicer_DPTI(
+    inp : left slicer_in_ch,
+    out : right slicer_out_ch
+) {
+    reg data_to_slice : logic[256];
+    reg slice_index : logic[3];
+    reg running : logic;
+
+    /* Input staging registers */
+    reg r_valid : logic;
+    reg r_encap_data : logic[256];
+    reg r_fifo_full : logic;
+
+    /* Receive inputs */
+    loop { let x = recv inp.valid >> set r_valid := x }
+    loop { let x = recv inp.encap_data >> set r_encap_data := x }
+    loop { let x = recv inp.fifo_full >> set r_fifo_full := x }
+
+    /* Output: slice_o = top 32 bits of data_to_slice
+       valid_o = running & ~fifo_full
+       done_o = running & (slice_index == 7) & ~fifo_full */
+    loop {
+        let v_out = *running & ~(*r_fifo_full) >>
+        let d_out = *running & (*slice_index == 3'd7) & ~(*r_fifo_full) >>
+        let s_out = <(*data_to_slice >> 256'd224)::logic[32]> >>
+        send out.valid_o (v_out) >>
+        send out.slice_o (s_out) >>
+        send out.done_o (d_out) >>
+        cycle 1
+    }
+
+    /* Main state machine loop */
+    loop {
+        if (*r_valid == 1'b1) & (*running == 1'b0) {
+            /* New data to slice: load data, reset index, start running */
+            set data_to_slice := *r_encap_data >>
+            set slice_index := 3'd0 >>
+            set running := 1'b1
+        } else if (*running == 1'b1) & (*r_fifo_full == 1'b0) {
+            /* Slicing: shift left by 32, increment index */
+            set data_to_slice := *data_to_slice << 256'd32 >>
+            if (*slice_index == 3'd7) {
+                /* Done: stop running */
+                set slice_index := 3'd0 >>
+                set running := 1'b0
+            } else {
+                set slice_index := *slice_index + 3'd1
+            }
+        } else {
+            /* Stalled or idle */
+            cycle 1
+        }
+    }
+}

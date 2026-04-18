@@ -1,0 +1,163 @@
+/* Hand-written Anvil for dmi_vjtag_tap.sv
+   Virtual JTAG TAP for DMI interface.
+   Concrete params: IrLength=10, IdcodeValue=32'h00000001.
+   IR enum values: BYPASS0=0, IDCODE=1, DTMCSR=16, DMIACCESS=17, BYPASS1=31.
+   dtmcs_t struct flattened to logic[32].
+   Submodule instantiations (cluster_clock_inverter, pulp_clock_mux2) omitted.
+   Clock/reset implicit (tck_i/trst_ni domain). */
+
+chan tap_in_ch {
+    left td_i : (logic@#1) @dyn - @dyn,
+    left testmode : (logic@#1) @dyn - @dyn,
+    left ir_in : (logic[10]@#1) @dyn - @dyn,
+    left jtag_state_tlr : (logic@#1) @dyn - @dyn,
+    left virtual_state_cdr : (logic@#1) @dyn - @dyn,
+    left virtual_state_sdr : (logic@#1) @dyn - @dyn,
+    left virtual_state_udr : (logic@#1) @dyn - @dyn,
+    left dmi_error : (logic[2]@#1) @dyn - @dyn,
+    left dmi_tdo : (logic@#1) @dyn - @dyn
+}
+
+chan tap_out_ch {
+    left td_o : (logic@#1) @dyn - @dyn,
+    left tdo_oe : (logic@#1) @dyn - @dyn,
+    left dmi_access : (logic@#1) @dyn - @dyn,
+    left dtmcs_select : (logic@#1) @dyn - @dyn,
+    left dmi_reset : (logic@#1) @dyn - @dyn,
+    left dmi_tdi : (logic@#1) @dyn - @dyn
+}
+
+proc dmi_vjtag_tap(
+    inp : left tap_in_ch,
+    out : right tap_out_ch
+) {
+    /* DR registers */
+    reg idcode : logic[32];
+    reg bypass : logic;
+    reg dtmcs : logic[32];
+
+    /* TDO output registers (negative edge in SV, modeled as 1-cycle delay) */
+    reg td_o_r : logic;
+    reg tdo_oe_r : logic;
+
+    /* Input staging registers */
+    reg r_td_i : logic;
+    reg r_testmode : logic;
+    reg r_ir_in : logic[10];
+    reg r_tlr : logic;
+    reg r_cdr : logic;
+    reg r_sdr : logic;
+    reg r_udr : logic;
+    reg r_dmi_error : logic[2];
+    reg r_dmi_tdo : logic;
+
+    /* Receive inputs */
+    loop { let x = recv inp.td_i >> set r_td_i := x }
+    loop { let x = recv inp.testmode >> set r_testmode := x }
+    loop { let x = recv inp.ir_in >> set r_ir_in := x }
+    loop { let x = recv inp.jtag_state_tlr >> set r_tlr := x }
+    loop { let x = recv inp.virtual_state_cdr >> set r_cdr := x }
+    loop { let x = recv inp.virtual_state_sdr >> set r_sdr := x }
+    loop { let x = recv inp.virtual_state_udr >> set r_udr := x }
+    loop { let x = recv inp.dmi_error >> set r_dmi_error := x }
+    loop { let x = recv inp.dmi_tdo >> set r_dmi_tdo := x }
+
+    /* Data register select logic (combinational outputs) */
+    loop {
+        /* Decode IR to select signals */
+        let is_dmiaccess = (*r_ir_in == 10'd17) >>
+        let is_dtmcsr = (*r_ir_in == 10'd16) >>
+
+        let dmi_acc = if is_dmiaccess { 1'b1 } else { 1'b0 } >>
+        let dtmcs_sel = if is_dtmcsr { 1'b1 } else { 1'b0 } >>
+
+        send out.dmi_access (dmi_acc) >>
+        send out.dtmcs_select (dtmcs_sel) >>
+        send out.dmi_tdi (*r_td_i) >>
+
+        /* dmi_reset_o = dtmcs[16] (dmireset bit) */
+        let dmi_rst = (*dtmcs >> 32'd16) & 32'd1 >>
+        send out.dmi_reset (<(dmi_rst)::logic>) >>
+        cycle 1
+    }
+
+    /* Main DR shift/capture/load logic */
+    loop {
+        let is_idcode = (*r_ir_in == 10'd1) >>
+        let is_dtmcsr = (*r_ir_in == 10'd16) >>
+        let is_dmiaccess = (*r_ir_in == 10'd17) >>
+        let is_bypass = (*r_ir_in == 10'd0) | (*r_ir_in == 10'd31) >>
+
+        /* Capture DR */
+        if (*r_cdr == 1'b1) {
+            if is_idcode {
+                set idcode := 32'h00000001
+            } else {
+                cycle 1
+            } >>
+            if is_bypass {
+                set bypass := 1'b0
+            } else {
+                cycle 1
+            } >>
+            if is_dtmcsr {
+                let dtmcs_val = <(*r_dmi_error)::logic[32]> << 32'd10
+                              | 32'd7 << 32'd4
+                              | 32'd1 >>
+                set dtmcs := dtmcs_val
+            } else {
+                cycle 1
+            }
+        } else {
+            cycle 1
+        } >>
+
+        /* Shift DR */
+        if (*r_sdr == 1'b1) {
+            if is_idcode {
+                set idcode := <(*r_td_i)::logic[32]> << 32'd31 | (*idcode >> 32'd1)
+            } else {
+                cycle 1
+            } >>
+            if is_bypass {
+                set bypass := *r_td_i
+            } else {
+                cycle 1
+            } >>
+            if is_dtmcsr {
+                set dtmcs := <(*r_td_i)::logic[32]> << 32'd31 | (*dtmcs >> 32'd1)
+            } else {
+                cycle 1
+            }
+        } else {
+            cycle 1
+        } >>
+
+        /* Test logic reset */
+        if (*r_tlr == 1'b1) {
+            set idcode := 32'h00000001 >>
+            set bypass := 1'b0
+        } else {
+            cycle 1
+        }
+    }
+
+    /* TDO output mux and output registers */
+    loop {
+        let is_idcode = (*r_ir_in == 10'd1) >>
+        let is_dtmcsr = (*r_ir_in == 10'd16) >>
+        let is_dmiaccess = (*r_ir_in == 10'd17) >>
+
+        let tdo_mux = if is_idcode { *idcode & 32'd1 }
+                      else if is_dtmcsr { *dtmcs & 32'd1 }
+                      else if is_dmiaccess { <(*r_dmi_tdo)::logic[32]> }
+                      else { <(*bypass)::logic[32]> } >>
+
+        set td_o_r := <(tdo_mux)::logic> >>
+        set tdo_oe_r := *r_sdr >>
+
+        send out.td_o (*td_o_r) >>
+        send out.tdo_oe (*tdo_oe_r) >>
+        cycle 1
+    }
+}

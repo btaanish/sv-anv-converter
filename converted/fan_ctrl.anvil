@@ -1,0 +1,47 @@
+/* Hand-written Anvil for fan_ctrl.sv
+   PWM fan controller for Genesys II board.
+   Clock divider counts to 499999, then increments a 4-bit ms_clock.
+   Duty cycle: fan_pwm = (ms_clock < pwm_setting).
+   Clock/reset implicit. */
+
+chan fan_ctrl_in_ch {
+    left pwm_setting : (logic[4]@#1) @dyn - @dyn
+}
+
+chan fan_ctrl_out_ch {
+    left fan_pwm : (logic@#1) @dyn - @dyn
+}
+
+proc fan_ctrl(
+    inp : left fan_ctrl_in_ch,
+    out : right fan_ctrl_out_ch
+) {
+    reg ms_clock : logic[4];
+    reg cycle_counter : logic[20];
+    reg r_pwm : logic[4];
+
+    /* Receive PWM setting */
+    loop { let x = recv inp.pwm_setting >> set r_pwm := x }
+
+    /* Main loop: clock divider + duty cycle output */
+    loop {
+        /* Clock divider: count to 499999, then advance ms_clock */
+        if (*cycle_counter == 20'd499999) {
+            set cycle_counter := 20'd0 >>
+            if (*ms_clock == 4'd15) {
+                set ms_clock := 4'd0
+            } else {
+                set ms_clock := *ms_clock + 4'd1
+            }
+        } else {
+            set cycle_counter := *cycle_counter + 20'd1
+        }
+    }
+
+    /* Duty cycle output */
+    loop {
+        let pwm_out = if (*ms_clock < *r_pwm) { 1'b1 } else { 1'b0 };
+        send out.fan_pwm (pwm_out) >>
+        cycle 1
+    }
+}
