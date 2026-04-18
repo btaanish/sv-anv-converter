@@ -1,0 +1,252 @@
+/* Hand-written Anvil for store_unit.sv
+   Store unit: handles store requests with a 4-state FSM.
+   Manages store buffer interface and AMO operations.
+   Concrete params: XLEN=64, PLEN=56, VLEN=64, TRANS_ID_BITS=3.
+   IS_XLEN64=1, MmuPresent=1, RVA=1, RVH=0, RVZiCbom=0.
+   SV enums/packages flattened to concrete logic widths.
+   Clock/reset implicit. Sub-module instantiation omitted
+   (store_buffer, amo_buffer modeled as external channel interfaces). */
+
+/* AMO operation encoding (4 bits, matches SV amo_t) */
+/* AMO_NONE=0, AMO_LR=1, AMO_SC=2, AMO_SWAP=3, AMO_ADD=4,
+   AMO_AND=5, AMO_OR=6, AMO_XOR=7, AMO_MAX=8, AMO_MAXU=9,
+   AMO_MIN=10, AMO_MINU=11 */
+
+/* FSM states encoded as 2-bit: IDLE=0, VALID_STORE=1,
+   WAIT_TRANSLATION=2, WAIT_STORE_READY=3 */
+
+chan store_in_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left stall_st_pending : (logic@#1) @dyn - @dyn,
+    left valid : (logic@#1) @dyn - @dyn,
+    left lsu_data : (logic[64]@#1) @dyn - @dyn,
+    left lsu_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left lsu_be : (logic[8]@#1) @dyn - @dyn,
+    left lsu_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left lsu_operation : (logic[8]@#1) @dyn - @dyn,
+    left commit : (logic@#1) @dyn - @dyn,
+    left amo_valid_commit : (logic@#1) @dyn - @dyn,
+    left mbe : (logic@#1) @dyn - @dyn,
+    left dtlb_hit : (logic@#1) @dyn - @dyn,
+    left paddr : (logic[56]@#1) @dyn - @dyn,
+    left ex_valid : (logic@#1) @dyn - @dyn,
+    left page_offset : (logic[12]@#1) @dyn - @dyn,
+    left st_buf_ready : (logic@#1) @dyn - @dyn,
+    left amo_buf_ready : (logic@#1) @dyn - @dyn
+}
+
+chan store_out_ch {
+    left no_st_pending : (logic@#1) @dyn - @dyn,
+    left store_buffer_empty : (logic@#1) @dyn - @dyn,
+    left pop_st : (logic@#1) @dyn - @dyn,
+    left commit_rdy : (logic@#1) @dyn - @dyn,
+    left valid_out : (logic@#1) @dyn - @dyn,
+    left trans_id : (logic[3]@#1) @dyn - @dyn,
+    left result : (logic[64]@#1) @dyn - @dyn,
+    left ex_out_valid : (logic@#1) @dyn - @dyn,
+    left translation_req : (logic@#1) @dyn - @dyn,
+    left vaddr_out : (logic[64]@#1) @dyn - @dyn,
+    left rvfi_mem_paddr : (logic[56]@#1) @dyn - @dyn,
+    left page_offset_matches : (logic@#1) @dyn - @dyn,
+    left st_valid : (logic@#1) @dyn - @dyn,
+    left st_data_out : (logic[64]@#1) @dyn - @dyn,
+    left st_be_out : (logic[8]@#1) @dyn - @dyn,
+    left st_data_size_out : (logic[2]@#1) @dyn - @dyn
+}
+
+proc store_unit(
+    inp : left store_in_ch,
+    out : right store_out_ch
+) {
+    /* FSM state register: 0=IDLE, 1=VALID_STORE, 2=WAIT_TRANSLATION, 3=WAIT_STORE_READY */
+    reg state : logic[2];
+
+    /* Registered store data for next cycle */
+    reg st_data : logic[64];
+    reg st_be : logic[8];
+    reg st_data_size : logic[2];
+    reg trans_id_q : logic[3];
+    reg amo_op : logic[4];
+
+    /* Input staging registers */
+    reg r_flush : logic;
+    reg r_stall : logic;
+    reg r_valid : logic;
+    reg r_data : logic[64];
+    reg r_vaddr : logic[64];
+    reg r_be : logic[8];
+    reg r_tid : logic[3];
+    reg r_op : logic[8];
+    reg r_commit : logic;
+    reg r_avc : logic;
+    reg r_mbe : logic;
+    reg r_dtlb : logic;
+    reg r_paddr : logic[56];
+    reg r_exv : logic;
+    reg r_poff : logic[12];
+    reg r_sbr : logic;
+    reg r_abr : logic;
+
+    /* Snapshot registers for output computation */
+    reg snap_state : logic[2];
+    reg snap_tid : logic[3];
+    reg snap_data : logic[64];
+    reg snap_be : logic[8];
+    reg snap_size : logic[2];
+
+    loop {
+        /* Snapshot state for output computation */
+        set snap_state := *state;
+        set snap_tid := *trans_id_q;
+        set snap_data := *st_data;
+        set snap_be := *st_be >>
+        set snap_size := *st_data_size >>
+
+        /* Receive all inputs */
+        let fl = recv inp.flush >>
+        set r_flush := fl >>
+        let stall = recv inp.stall_st_pending >>
+        set r_stall := stall >>
+        let v = recv inp.valid >>
+        set r_valid := v >>
+        let data = recv inp.lsu_data >>
+        set r_data := data >>
+        let vaddr = recv inp.lsu_vaddr >>
+        set r_vaddr := vaddr >>
+        let be = recv inp.lsu_be >>
+        set r_be := be >>
+        let tid = recv inp.lsu_trans_id >>
+        set r_tid := tid >>
+        let op = recv inp.lsu_operation >>
+        set r_op := op >>
+        let cmt = recv inp.commit >>
+        set r_commit := cmt >>
+        let avc = recv inp.amo_valid_commit >>
+        set r_avc := avc >>
+        let mbe_v = recv inp.mbe >>
+        set r_mbe := mbe_v >>
+        let dh = recv inp.dtlb_hit >>
+        set r_dtlb := dh >>
+        let pa = recv inp.paddr >>
+        set r_paddr := pa >>
+        let exv = recv inp.ex_valid >>
+        set r_exv := exv >>
+        let poff = recv inp.page_offset >>
+        set r_poff := poff >>
+        let sbr = recv inp.st_buf_ready >>
+        set r_sbr := sbr >>
+        let abr = recv inp.amo_buf_ready >>
+        set r_abr := abr >>
+
+        /* Combinational: st_ready = store_buffer_ready & amo_buffer_ready */
+        let st_ready = *r_sbr & *r_abr;
+
+        /* result_o = lsu_ctrl_i.data (pass-through) */
+        send out.result (*r_data);
+
+        /* vaddr_o = lsu_ctrl_i.vaddr */
+        send out.vaddr_out (*r_vaddr);
+
+        /* trans_id_o from registered value */
+        send out.trans_id (*snap_tid);
+
+        /* Store buffer data outputs */
+        send out.st_data_out (*snap_data);
+        send out.st_be_out (*snap_be);
+        send out.st_data_size_out (*snap_size);
+        send out.rvfi_mem_paddr (*r_paddr);
+
+        /* Page offset comparison (simplified) */
+        let poff_match = if <(*r_poff)::logic[12]> == <(*r_vaddr)::logic[12]> { 1'b1 } else { 1'b0 };
+        send out.page_offset_matches (poff_match);
+
+        /* Placeholder outputs */
+        send out.no_st_pending (1'b0);
+        send out.store_buffer_empty (1'b0);
+        send out.commit_rdy (1'b0);
+
+        /* --- FSM control logic --- */
+        /* Default: no translation request, not valid, no pop, no store valid */
+        let tr_req = if *snap_state == 2'd0 {
+            /* IDLE */
+            if *r_valid == 1'b1 { 1'b1 } else { 1'b0 }
+        } else if *snap_state == 2'd1 {
+            /* VALID_STORE: issue new if valid and not AMO */
+            if *r_valid == 1'b1 { 1'b1 } else { 1'b0 }
+        } else if *snap_state == 2'd2 {
+            /* WAIT_TRANSLATION: keep translation request */
+            1'b1
+        } else {
+            /* WAIT_STORE_READY: keep translation request */
+            1'b1
+        };
+        send out.translation_req (tr_req);
+
+        let v_out = if *snap_state == 2'd1 { 1'b1 } else { 1'b0 };
+        send out.valid_out (v_out);
+
+        let pop_v = if *snap_state == 2'd0 {
+            if *r_valid == 1'b1 {
+                if *r_dtlb == 1'b1 { if st_ready == 1'b1 { 1'b1 } else { 1'b0 } } else { 1'b0 }
+            } else { 1'b0 }
+        } else if *snap_state == 2'd1 {
+            if *r_valid == 1'b1 {
+                if *r_dtlb == 1'b1 { if st_ready == 1'b1 { 1'b1 } else { 1'b0 } } else { 1'b0 }
+            } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        /* Exception override: pop and go idle */
+        let pop_final = if *r_exv == 1'b1 {
+            if *snap_state != 2'd0 { 1'b1 } else { pop_v }
+        } else { pop_v };
+        send out.pop_st (pop_final);
+
+        let st_v = if *snap_state == 2'd1 {
+            if *r_flush == 1'b0 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 };
+
+        let ex_pass = *r_exv;
+        send out.ex_out_valid (ex_pass);
+        send out.st_valid (st_v) >>
+
+        /* Next state computation */
+        let next_state = if *r_flush == 1'b1 {
+            2'd0
+        } else if *r_exv == 1'b1 {
+            if *snap_state != 2'd0 { 2'd0 } else { *snap_state }
+        } else if *snap_state == 2'd0 {
+            /* IDLE */
+            if *r_valid == 1'b1 {
+                if *r_dtlb == 1'b0 { 2'd2 }
+                else if st_ready == 1'b0 { 2'd3 }
+                else { 2'd1 }
+            } else { 2'd0 }
+        } else if *snap_state == 2'd1 {
+            /* VALID_STORE */
+            if *r_valid == 1'b1 {
+                if *r_dtlb == 1'b0 { 2'd2 }
+                else if st_ready == 1'b0 { 2'd3 }
+                else { 2'd1 }
+            } else { 2'd0 }
+        } else if *snap_state == 2'd2 {
+            /* WAIT_TRANSLATION */
+            if *r_dtlb == 1'b1 { 2'd0 } else { 2'd2 }
+        } else {
+            /* WAIT_STORE_READY */
+            if st_ready == 1'b1 {
+                if *r_dtlb == 1'b1 { 2'd0 } else { 2'd3 }
+            } else { 2'd3 }
+        };
+
+        /* Update state and data registers */
+        set state := next_state >>
+        set st_data := *r_data >>
+        set st_be := *r_be >>
+        set st_data_size := <(*r_op)::logic[2]> >>
+        set trans_id_q := *r_tid >>
+
+        /* AMO op decode (simplified): check if operation is AMO range */
+        let amo_next = if *r_op > 8'd63 { <(*r_op)::logic[4]> } else { 4'd0 };
+        set amo_op := amo_next
+    }
+}
