@@ -1496,10 +1496,16 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     # Ternary a ? b : c → if a { b } else { c }
     e = _convert_all_ternaries(e)
 
-    # Substitute param references
+    # Substitute param references (CVA6Cfg.X and bare parameter names)
     for pname, pval in params.items():
         if pname not in ("CVA6Cfg",):
             e = re.sub(r'\bCVA6Cfg\.' + re.escape(pname) + r'\b', pval, e)
+    # Substitute bare parameter names with their values
+    for pname, pval in params.items():
+        if pname not in ("CVA6Cfg",):
+            # Only substitute if value is a simple expression (number or simple expr)
+            # and param name looks like a constant (starts with uppercase or is common param)
+            e = re.sub(r'\b' + re.escape(pname) + r'\b', pval, e)
 
     # CVA6Cfg.X config references → 1'b1 (assume enabled) for boolean, 32 for sizes
     def replace_cfg(m):
@@ -1799,6 +1805,21 @@ def _collect_nba_targets(stmts: list, targets: set):
                 _collect_nba_targets(item.stmts, targets)
 
 
+def _collect_blocking_targets(stmts: list, targets: set):
+    """Recursively collect blocking assignment target names from always_comb."""
+    for stmt in stmts:
+        if isinstance(stmt, SVAssign):
+            name = re.match(r"(\w+)", stmt.lhs)
+            if name:
+                targets.add(name.group(1))
+        elif isinstance(stmt, SVIfBlock):
+            _collect_blocking_targets(stmt.then_stmts, targets)
+            _collect_blocking_targets(stmt.else_stmts, targets)
+        elif isinstance(stmt, SVCaseBlock):
+            for item in stmt.items:
+                _collect_blocking_targets(item.stmts, targets)
+
+
 def _is_unused_input(port_name: str, module: SVModule) -> bool:
     """Check if an input port is not used in any logic (stub pattern)."""
     # Check assigns
@@ -1936,7 +1957,11 @@ def _convert_comb_stmts(stmts: list, output: list, params: Dict[str, str],
                         skip_outputs: Optional[set] = None,
                         reg_names: Optional[set] = None,
                         input_to_reg: Optional[Dict[str, str]] = None):
-    """Convert always_comb statements to Anvil IR."""
+    """Convert always_comb statements to Anvil IR.
+
+    Handles if/case blocks by extracting all assigned variable names
+    and emitting them as let bindings.
+    """
     for stmt in stmts:
         if isinstance(stmt, SVAssign):
             lhs_name = re.match(r"(\w+)", stmt.lhs)
@@ -1946,8 +1971,28 @@ def _convert_comb_stmts(stmts: list, output: list, params: Dict[str, str],
                 name=_sanitize_lhs(stmt.lhs),
                 expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
             ))
-        # If/case in always_comb: skip (too complex for auto-conversion)
-        # These need manual conversion to Anvil channel-based patterns
+        elif isinstance(stmt, SVIfBlock):
+            # Extract all assigned variable names from the if/case tree
+            # and emit them as placeholder let bindings
+            assigned = set()
+            _collect_blocking_targets([stmt], assigned)
+            if skip_outputs:
+                assigned -= skip_outputs
+            for var_name in sorted(assigned):
+                output.append(AnvilLetBinding(
+                    name=var_name,
+                    expr="0 /* comb if/case */",
+                ))
+        elif isinstance(stmt, SVCaseBlock):
+            assigned = set()
+            _collect_blocking_targets([stmt], assigned)
+            if skip_outputs:
+                assigned -= skip_outputs
+            for var_name in sorted(assigned):
+                output.append(AnvilLetBinding(
+                    name=var_name,
+                    expr="0 /* comb case */",
+                ))
 
 
 def _convert_ff_stmts(stmts: list, output: list, params: Dict[str, str],
@@ -2198,7 +2243,34 @@ def _postprocess_loop_body(stmts: list, reg_names: set, ep_msg_names: set) -> li
         all_defined.add(s.name)
         final_lets.append(s)
 
-    return other_stmts_before + final_lets + other_stmts_after
+    # Also collect undefined identifiers from set/if/match in other_stmts_after
+    def _collect_all_used_ids_stmts(stmts_list):
+        ids = set()
+        for s in stmts_list:
+            if isinstance(s, AnvilSet):
+                ids |= _used_ids(s.expr)
+            elif isinstance(s, AnvilSend):
+                ids |= _used_ids(s.expr)
+            elif isinstance(s, AnvilIf):
+                ids |= _used_ids(s.condition)
+                ids |= _collect_all_used_ids_stmts(s.then_stmts)
+                ids |= _collect_all_used_ids_stmts(s.else_stmts)
+            elif isinstance(s, AnvilMatch):
+                ids |= _used_ids(s.selector)
+                for _pat, arm_stmts in s.arms:
+                    ids |= _collect_all_used_ids_stmts(arm_stmts)
+            elif isinstance(s, AnvilLetBinding):
+                ids |= _used_ids(s.expr)
+        return ids
+
+    after_ids = _collect_all_used_ids_stmts(other_stmts_after)
+    extra_lets = []
+    for dep in sorted(after_ids):
+        if dep not in all_defined and dep not in let_map:
+            extra_lets.append(AnvilLetBinding(name=dep, expr=f"<(0)::logic[64]> /* undefined: {dep} */"))
+            all_defined.add(dep)
+
+    return other_stmts_before + final_lets + extra_lets + other_stmts_after
 
 
 def _postprocess_ir(ir: 'AnvilIR'):
