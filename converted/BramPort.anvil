@@ -1,0 +1,27 @@
+/* Hand-written Anvil for BramPort.sv
+   BRAM port interface with Slave/Master modports.
+   Concrete params: DATA_BITW=32, ADDR_BITW=32.
+   Modeled as a channel capturing all interface signals. */
+
+chan bram_port_ch {
+    left clk   : (logic@#1) @dyn - @dyn,
+    left rst   : (logic@#1) @dyn - @dyn,
+    left en    : (logic@#1) @dyn - @dyn,
+    left addr  : (logic[32]@#1) @dyn - @dyn,
+    left wr_d  : (logic[32]@#1) @dyn - @dyn,
+    left wr_en : (logic[4]@#1) @dyn - @dyn,
+    right rd_d : (logic[32]@#1) @dyn - @dyn
+}
+
+proc bram_port_stub(ep : left bram_port_ch) {
+    loop {
+        let _clk = recv ep.clk >>
+        let _rst = recv ep.rst >>
+        let _en = recv ep.en >>
+        let _addr = recv ep.addr >>
+        let _wr_d = recv ep.wr_d >>
+        let _wr_en = recv ep.wr_en >>
+        send ep.rd_d (32'd0) >>
+        cycle 1
+    }
+}

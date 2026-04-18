@@ -1,0 +1,67 @@
+/* Hand-written Anvil for SyncTpRam.sv
+   Inferable synchronous two-port RAM (dedicated read + dedicated write port).
+   Read-before-write: when reading and writing same address in same cycle,
+   read returns old data.
+   Concrete params: ADDR_WIDTH=10, DATA_DEPTH=1024, DATA_WIDTH=32, OUT_REGS=0. */
+
+type tp_word = (logic[32]);
+
+chan synctpram_ch {
+    left wr_en   : (logic@#1) @dyn - @dyn,
+    left wr_addr : (logic[10]@#1) @dyn - @dyn,
+    left wr_data : (logic[32]@#1) @dyn - @dyn,
+    left rd_en   : (logic@#1) @dyn - @dyn,
+    left rd_addr : (logic[10]@#1) @dyn - @dyn,
+    right rd_data : (logic[32]@#1) @dyn - @dyn
+}
+
+proc SyncTpRam(ep : left synctpram_ch) {
+    reg mem : tp_word[1024];
+    reg r_wren   : logic;
+    reg r_waddr  : logic[10];
+    reg r_wdata  : logic[32];
+    reg r_rden   : logic;
+    reg r_raddr  : logic[10];
+    reg r_rdata  : logic[32];
+
+    /* Recv all inputs */
+    loop {
+        let v_wren = recv ep.wr_en >>
+        set r_wren := v_wren >>
+        let v_waddr = recv ep.wr_addr >>
+        set r_waddr := v_waddr >>
+        let v_wdata = recv ep.wr_data >>
+        set r_wdata := v_wdata >>
+        let v_rden = recv ep.rd_en >>
+        set r_rden := v_rden >>
+        let v_raddr = recv ep.rd_addr >>
+        set r_raddr := v_raddr >>
+        cycle 1
+    }
+
+    /* Read logic (always_ff) */
+    loop {
+        if (*r_rden == 1'b1) {
+            set r_rdata := <(*mem[*r_raddr])::logic[32]>
+        } else {
+            cycle 1
+        } >>
+        cycle 1
+    }
+
+    /* Write logic (always_ff) */
+    loop {
+        if (*r_wren == 1'b1) {
+            set mem[*r_waddr] := <(*r_wdata)::tp_word>
+        } else {
+            cycle 1
+        } >>
+        cycle 1
+    }
+
+    /* Send read data output */
+    loop {
+        send ep.rd_data (*r_rdata) >>
+        cycle 1
+    }
+}
