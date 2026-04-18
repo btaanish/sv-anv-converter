@@ -1,0 +1,72 @@
+/* Hand-written Anvil for lfsr.sv
+   Parametric Galois LFSR with optional cipher layers.
+   Concrete params: LfsrWidth=64, OutWidth=8, CipherLayers=0, CipherReg=1.
+   With CipherLayers=0, output is simply lfsr_q[7:0].
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~55
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] CipherLayers=0 path only — cipher layers omitted
+       - [MANUAL-CLEANUP-NEEDED] LfsrWidth hardcoded to 64, OutWidth to 8
+       - [MANUAL-CLEANUP-NEEDED] LFSR mask hardcoded for width=64: 0x80000000000019E2
+       - [MANUAL-CLEANUP-NEEDED] RstVal hardcoded to all-ones (64'hFFFFFFFFFFFFFFFF)
+       - [MANUAL-CLEANUP-NEEDED] Replication {64{lfsr_q[0]}} modeled as conditional
+*/
+
+// [MANUAL] Channel for LFSR inputs
+chan lfsr_in_ch {
+    left en : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for LFSR output
+chan lfsr_out_ch {
+    left out_val : (logic[8]@#1) @dyn - @dyn
+}
+
+proc lfsr(
+    inp  : left lfsr_in_ch,    // [MANUAL] en_i input
+    out  : right lfsr_out_ch   // [MANUAL] out_o output (8 bits)
+) {
+    // [MANUAL] LFSR state register — 64 bits, reset to all-ones
+    reg lfsr_q : logic[64];
+
+    // [MANUAL] Input staging register
+    reg r_en : logic;
+
+    // [MANUAL] Recv loop — stage enable input
+    loop {
+        let v_en = recv inp.en >>
+        set r_en := v_en
+    }
+
+    // [MANUAL] LFSR shift result register
+    reg lfsr_shifted : logic[64];
+
+    // [MANUAL] LFSR update logic (models always_ff)
+    // Galois LFSR: lfsr_d = (lfsr_q >> 1) ^ (mask if lfsr_q[0])
+    // [MANUAL-CLEANUP-NEEDED] Mask for LfsrWidth=64: 64'h80000000000019E2
+    loop {
+        if (*r_en == 1'b1) {
+            // [MANUAL] Compute shifted value using cast to keep >> as bit-shift
+            let shifted = <(*lfsr_q >> 64'd1)::logic[64]> >>
+            // [MANUAL-CLEANUP-NEEDED] Replication {64{lfsr_q[0]}} replaced with conditional
+            if ((*lfsr_q & 64'd1) == 64'd1) {
+                // feedback: shift right and XOR with mask
+                set lfsr_q := shifted ^ 64'h80000000000019E2
+            } else {
+                // no feedback: just shift right
+                set lfsr_q := shifted
+            }
+        } else {
+            cycle 1
+        }
+    }
+
+    // [MANUAL] Output loop — CipherLayers=0 path: out = lfsr_q[OutWidth-1:0]
+    // [MANUAL-CLEANUP-NEEDED] No cipher layers instantiated
+    loop {
+        send out.out_val (<(*lfsr_q & 64'd255)::logic[8]>) >>
+        cycle 1
+    }
+}

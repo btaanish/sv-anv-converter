@@ -1,0 +1,141 @@
+/* Hand-written Anvil for max_counter.sv
+   Up/down counter that tracks its maximum value.
+   Wraps a delta_counter sub-module (modeled as opaque register).
+   Concrete params: WIDTH=4, STICKY_OVERFLOW=1.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~80
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] delta_counter sub-module modeled as opaque register
+       - [MANUAL-CLEANUP-NEEDED] WIDTH hardcoded to 4
+       - [MANUAL-CLEANUP-NEEDED] Overflow logic simplified (sticky overflow assumed)
+*/
+
+// [MANUAL] Channel for max_counter inputs
+chan max_counter_in_ch {
+    left clear       : (logic@#1) @dyn - @dyn,
+    left clear_max   : (logic@#1) @dyn - @dyn,
+    left en          : (logic@#1) @dyn - @dyn,
+    left load        : (logic@#1) @dyn - @dyn,
+    left down        : (logic@#1) @dyn - @dyn,
+    left delta       : (logic[4]@#1) @dyn - @dyn,
+    left d           : (logic[4]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for max_counter outputs
+chan max_counter_out_ch {
+    left q            : (logic[4]@#1) @dyn - @dyn,
+    left max_val      : (logic[4]@#1) @dyn - @dyn,
+    left overflow     : (logic@#1) @dyn - @dyn,
+    left overflow_max : (logic@#1) @dyn - @dyn
+}
+
+proc max_counter(
+    inp  : left max_counter_in_ch,    // [MANUAL] input ports
+    out  : right max_counter_out_ch   // [MANUAL] output ports
+) {
+    // [MANUAL] Input staging registers
+    reg r_clear     : logic;
+    reg r_clear_max : logic;
+    reg r_en        : logic;
+    reg r_load      : logic;
+    reg r_down      : logic;
+    reg r_delta     : logic[4];
+    reg r_d         : logic[4];
+
+    // [MANUAL-CLEANUP-NEEDED] delta_counter modeled as opaque register
+    reg q_o         : logic[4];   // [MANUAL] counter value
+    reg overflow_o  : logic;      // [MANUAL] counter overflow
+
+    // [MANUAL] Max tracking registers
+    reg max_q          : logic[4];
+    reg overflow_max_q : logic;
+
+    // [MANUAL] Combinational next-state
+    reg max_d          : logic[4];
+    reg overflow_max_d : logic;
+    reg max_out        : logic[4];
+
+    // [MANUAL] Recv loop — stage inputs
+    loop {
+        let v_clear = recv inp.clear >>
+        set r_clear := v_clear >>
+        let v_clear_max = recv inp.clear_max >>
+        set r_clear_max := v_clear_max >>
+        let v_en = recv inp.en >>
+        set r_en := v_en >>
+        let v_load = recv inp.load >>
+        set r_load := v_load >>
+        let v_down = recv inp.down >>
+        set r_down := v_down >>
+        let v_delta = recv inp.delta >>
+        set r_delta := v_delta >>
+        let v_d = recv inp.d >>
+        set r_d := v_d
+    }
+
+    // [MANUAL-CLEANUP-NEEDED] delta_counter logic modeled inline
+    // Models: clear resets to 0, load sets to d_i, en increments/decrements by delta
+    loop {
+        if (*r_clear == 1'b1) {
+            set q_o := 4'd0 >>
+            set overflow_o := 1'b0
+        } else {
+            if (*r_load == 1'b1) {
+                set q_o := *r_d >>
+                set overflow_o := 1'b0
+            } else {
+                if (*r_en == 1'b1) {
+                    if (*r_down == 1'b1) {
+                        set q_o := *q_o - *r_delta
+                    } else {
+                        set q_o := *q_o + *r_delta
+                    }
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // [MANUAL] Max tracking combinational logic
+    loop {
+        // Default: hold
+        set max_d := *max_q >>
+        set max_out := *max_q >>
+        set overflow_max_d := *overflow_max_q >>
+
+        if (*r_clear_max == 1'b1) {
+            set max_d := 4'd0 >>
+            set overflow_max_d := 1'b0
+        } else {
+            if (*q_o > *max_q) {
+                set max_d := *q_o >>
+                set max_out := *q_o >>
+                if (*overflow_o == 1'b1) {
+                    set overflow_max_d := 1'b1
+                } else {
+                    cycle 1
+                }
+            } else {
+                cycle 1
+            }
+        }
+    }
+
+    // [MANUAL] Sequential update for max registers
+    loop {
+        set max_q := *max_d >>
+        set overflow_max_q := *overflow_max_d
+    }
+
+    // [MANUAL] Send outputs
+    loop {
+        send out.q (*q_o) >>
+        send out.max_val (*max_out) >>
+        send out.overflow (*overflow_o) >>
+        send out.overflow_max (*overflow_max_q) >>
+        cycle 1
+    }
+}

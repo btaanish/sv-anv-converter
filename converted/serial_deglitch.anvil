@@ -1,0 +1,87 @@
+/* Hand-written Anvil for serial_deglitch.sv
+   Deglitches a serial line by counting consecutive samples.
+   When count reaches SIZE, output goes high; when count reaches 0, output goes low.
+   Concrete params: SIZE=4.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~45
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] SV uses latch-like output (q_o retains last value) — modeled with register
+       - [MANUAL-CLEANUP-NEEDED] SIZE param hardcoded to 4
+*/
+
+// [MANUAL] Channel for serial_deglitch inputs
+chan serial_deglitch_in_ch {
+    left en   : (logic@#1) @dyn - @dyn,
+    left d    : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for serial_deglitch output
+chan serial_deglitch_out_ch {
+    left q    : (logic@#1) @dyn - @dyn
+}
+
+proc serial_deglitch(
+    inp  : left serial_deglitch_in_ch,   // [MANUAL] input ports (clk/rst implicit)
+    out  : right serial_deglitch_out_ch   // [MANUAL] output port
+) {
+    // [MANUAL] Registers corresponding to SV always_ff state
+    reg count_q : logic[4];   // [MANUAL] SIZE=4 counter
+    reg q       : logic;      // [MANUAL] filtered output register
+
+    // [MANUAL] Input staging registers
+    reg r_en : logic;
+    reg r_d  : logic;
+
+    // [MANUAL] Recv loop — stage inputs
+    loop {
+        let v_en = recv inp.en >>
+        set r_en := v_en >>
+        let v_d = recv inp.d >>
+        set r_d := v_d
+    }
+
+    // [MANUAL] Sequential logic — counter update (models always_ff)
+    loop {
+        if (*r_en == 1'b1) {
+            if (*r_d == 1'b1) {
+                // [MANUAL] count up if not at max (SIZE=4, so max is 4'd4)
+                if (*count_q != 4'd4) {
+                    set count_q := *count_q + 4'd1
+                } else {
+                    cycle 1
+                }
+            } else {
+                // [MANUAL] count down if not at zero
+                if (*count_q != 4'd0) {
+                    set count_q := *count_q - 4'd1
+                } else {
+                    cycle 1
+                }
+            }
+        } else {
+            cycle 1
+        }
+    }
+
+    // [MANUAL] Output logic — update q register based on count
+    // [MANUAL-CLEANUP-NEEDED] SV uses combinational output with implicit latch; modeled as register
+    loop {
+        if (*count_q == 4'd4) {
+            set q := 1'b1
+        } else {
+            if (*count_q == 4'd0) {
+                set q := 1'b0
+            } else {
+                cycle 1
+            }
+        }
+    }
+
+    // [MANUAL] Send output loop
+    loop {
+        send out.q (*q) >>
+        cycle 1
+    }
+}
