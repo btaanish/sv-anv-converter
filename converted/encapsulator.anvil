@@ -1,0 +1,63 @@
+/* Anvil conversion of encapsulator.sv — Encapsulator module.
+   Generates header and payload based on the encapsulation protocol.
+   Struct fields passed as individual outputs:
+   header: extend[1], flow[2], length[5]
+   timestamp[64], trace_payload[248] */
+
+chan encapsulator_in_ch {
+    left valid_in : (logic@#1) @dyn - @dyn,
+    left packet_length : (logic[5]@#1) @dyn - @dyn,
+    left flow : (logic[2]@#1) @dyn - @dyn,
+    left timestamp_present : (logic@#1) @dyn - @dyn,
+    left timestamp : (logic[64]@#1) @dyn - @dyn,
+    left trace_payload : (logic[248]@#1) @dyn - @dyn
+}
+
+chan encapsulator_out_ch {
+    left valid_out : (logic@#1) @dyn - @dyn,
+    left hdr_extend : (logic@#1) @dyn - @dyn,
+    left hdr_flow : (logic[2]@#1) @dyn - @dyn,
+    left hdr_length : (logic[5]@#1) @dyn - @dyn,
+    left out_timestamp : (logic[64]@#1) @dyn - @dyn,
+    left out_trace_payload : (logic[248]@#1) @dyn - @dyn
+}
+
+proc encapsulator(
+    in_ep : left encapsulator_in_ch,
+    out_ep : right encapsulator_out_ch
+) {
+    reg r_valid : logic;
+    reg r_pkt_len : logic[5];
+    reg r_flow : logic[2];
+    reg r_ts_present : logic;
+    reg r_ts : logic[64];
+    reg r_tp : logic[248];
+
+    /* Loop 1: Receive inputs into registers */
+    loop {
+        let i0 = recv in_ep.valid_in >>
+        set r_valid := i0 >>
+        let i1 = recv in_ep.packet_length >>
+        set r_pkt_len := i1 >>
+        let i2 = recv in_ep.flow >>
+        set r_flow := i2 >>
+        let i3 = recv in_ep.timestamp_present >>
+        set r_ts_present := i3 >>
+        let i4 = recv in_ep.timestamp >>
+        set r_ts := i4 >>
+        let i5 = recv in_ep.trace_payload >>
+        set r_tp := i5 >>
+        cycle 1
+    }
+
+    /* Loop 2: Send outputs from registers */
+    loop {
+        send out_ep.valid_out (*r_valid) >>
+        send out_ep.hdr_extend (*r_ts_present) >>
+        send out_ep.hdr_flow (*r_flow) >>
+        send out_ep.hdr_length (*r_pkt_len) >>
+        send out_ep.out_timestamp (*r_ts) >>
+        send out_ep.out_trace_payload (*r_tp) >>
+        cycle 1
+    }
+}

@@ -1,0 +1,24 @@
+/* Anvil conversion of encap_pkg.sv — Encapsulator package.
+   Struct definitions for encapsulator header, payload, and FIFO entry. */
+
+struct header_s {
+    extend : (logic),
+    flow : (logic[2]),
+    length : (logic[5])
+}
+
+struct payload_s {
+    trace_payload : (logic[248])
+}
+
+struct encap_fifo_entry_s {
+    header : (header_s),
+    timestamp : (logic[64]),
+    payload : (payload_s)
+}
+
+proc Top() {
+    loop {
+        cycle 1
+    }
+}
