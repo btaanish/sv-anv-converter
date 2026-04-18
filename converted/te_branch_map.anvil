@@ -1,0 +1,98 @@
+/* Hand-written Anvil for te_branch_map.sv
+   Tracks taken/non-taken branches in a branch map.
+   Concrete params: N=1 (one branch per cycle).
+   BRANCH_MAP_LEN=31, BRANCH_COUNT_LEN=5 from te_pkg. */
+
+chan bmap_in_ch {
+    left valid : (logic@#1) @dyn - @dyn,
+    left branch_taken : (logic@#1) @dyn - @dyn,
+    left flush : (logic@#1) @dyn - @dyn
+}
+
+chan bmap_out_ch {
+    left map : (logic[31]@#1) @dyn - @dyn,
+    left branches : (logic[5]@#1) @dyn - @dyn,
+    left is_full : (logic@#1) @dyn - @dyn,
+    left is_empty : (logic@#1) @dyn - @dyn
+}
+
+proc te_branch_map(
+    inp : left bmap_in_ch,
+    out : right bmap_out_ch
+) {
+    reg map_q : logic[31];
+    reg branch_cnt_q : logic[5];
+
+    /* Snapshot registers for computing next state */
+    reg snap_map : logic[31];
+    reg snap_cnt : logic[5];
+
+    /* Input staging */
+    reg r_valid : logic;
+    reg r_taken : logic;
+    reg r_flush : logic;
+
+    loop {
+        /* Snapshot current state */
+        set snap_map := *map_q;
+        set snap_cnt := *branch_cnt_q >>
+
+        /* Receive inputs */
+        let v = recv inp.valid >>
+        set r_valid := v >>
+        let t = recv inp.branch_taken >>
+        set r_taken := t >>
+        let f = recv inp.flush >>
+        set r_flush := f >>
+
+        /* Compute next state (mirrors always_comb logic) */
+        /* Start from current state */
+        let map_d_base = if *r_flush == 1'b1 { 31'd0 } else { *snap_map };
+        let cnt_d_base = if *r_flush == 1'b1 { 5'd0 } else { *snap_cnt };
+
+        /* Branch update logic */
+        /* If valid && flush: write to bit 0, count = 1 */
+        /* If valid && !flush: write to bit[cnt_q], count = cnt_q + 1 */
+        /* If !valid: no change (already handled by base) */
+        if *r_valid == 1'b1 {
+            if *r_flush == 1'b1 {
+                /* Write ~taken to bit 0 of zeroed map */
+                let new_bit = ~(*r_taken);
+                let map_d_final = <(new_bit)::logic[31]>;
+                let cnt_d_final = 5'd1;
+                send out.map (map_d_final);
+                send out.branches (cnt_d_final);
+                let full_v = if cnt_d_final == 5'd31 { 1'b1 } else { 1'b0 };
+                let empty_v = 1'b0;
+                send out.is_full (full_v);
+                send out.is_empty (empty_v) >>
+                set map_q := map_d_final >>
+                set branch_cnt_q := cnt_d_final
+            } else {
+                /* Write ~taken at position cnt_q via shift-OR */
+                let new_bit = ~(*r_taken);
+                let bit_shifted = <(new_bit)::logic[31]> << <(*snap_cnt)::logic[31]>;
+                let map_d_final = map_d_base | bit_shifted;
+                let cnt_d_final = cnt_d_base + 5'd1;
+                send out.map (map_d_final);
+                send out.branches (cnt_d_final);
+                let full_v = if cnt_d_final == 5'd31 { 1'b1 } else { 1'b0 };
+                let empty_v = if cnt_d_final == 5'd0 { 1'b1 } else { 1'b0 };
+                send out.is_full (full_v);
+                send out.is_empty (empty_v) >>
+                set map_q := map_d_final >>
+                set branch_cnt_q := cnt_d_final
+            }
+        } else {
+            /* No valid branch, output base values */
+            send out.map (map_d_base);
+            send out.branches (cnt_d_base);
+            let full_v = if cnt_d_base == 5'd31 { 1'b1 } else { 1'b0 };
+            let empty_v = if cnt_d_base == 5'd0 { 1'b1 } else { 1'b0 };
+            send out.is_full (full_v);
+            send out.is_empty (empty_v) >>
+            set map_q := map_d_base >>
+            set branch_cnt_q := cnt_d_base
+        }
+    }
+}

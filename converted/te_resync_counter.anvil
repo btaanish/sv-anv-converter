@@ -1,0 +1,64 @@
+/* Hand-written Anvil for te_resync_counter.sv
+   Counts cycles or packets and signals when threshold reached.
+   Concrete params: N=1, MODE=CYCLE_MODE(0), MAX_VALUE=65535 (16'hFFFF).
+   Counter width: $clog2(65535)+1 = 17 bits. */
+
+chan resync_in_ch {
+    left trace_enabled : (logic@#1) @dyn - @dyn,
+    left packet_emitted : (logic@#1) @dyn - @dyn,
+    left resync_rst : (logic@#1) @dyn - @dyn
+}
+
+chan resync_out_ch {
+    left gt_resync_max : (logic@#1) @dyn - @dyn,
+    left et_resync_max : (logic@#1) @dyn - @dyn
+}
+
+proc te_resync_counter(
+    inp : left resync_in_ch,
+    out : right resync_out_ch
+) {
+    reg counter_q : logic[17];
+
+    /* Snapshot and staging registers */
+    reg snap_cnt : logic[17];
+    reg r_trace_en : logic;
+    reg r_pkt : logic;
+    reg r_rst : logic;
+
+    loop {
+        /* Snapshot counter */
+        set snap_cnt := *counter_q >>
+
+        /* Receive inputs */
+        let v0 = recv inp.trace_enabled >>
+        set r_trace_en := v0 >>
+        let v1 = recv inp.packet_emitted >>
+        set r_pkt := v1 >>
+        let v2 = recv inp.resync_rst >>
+        set r_rst := v2 >>
+
+        /* Compute next counter value (CYCLE_MODE: increment each cycle if enabled) */
+        /* counter_d starts as counter_q */
+        let cnt_base = *snap_cnt;
+
+        /* Cycle mode: increment if enabled and counter <= MAX_VALUE */
+        let cnt_after_inc = if (*r_trace_en == 1'b1) & (cnt_base <= 17'd65535) {
+            cnt_base + 17'd1
+        } else {
+            cnt_base
+        };
+
+        /* Synchronous reset overrides */
+        let cnt_d = if *r_rst == 1'b1 { 17'd0 } else { cnt_after_inc };
+
+        /* Outputs */
+        let et_max = if cnt_d == 17'd65535 { 1'b1 } else { 1'b0 };
+        let gt_max = if (cnt_d > 17'd65535) & (*r_rst == 1'b0) { 1'b1 } else { 1'b0 };
+        send out.gt_resync_max (gt_max);
+        send out.et_resync_max (et_max) >>
+
+        /* Update counter register */
+        set counter_q := cnt_d
+    }
+}

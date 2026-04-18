@@ -1,0 +1,203 @@
+/* Hand-written Anvil for te_filter.sv
+   Pure combinational filter module for trace encoder.
+   Declares instructions qualified or not based on filter parameters.
+   Concrete params: XLEN=64, PRIV_LEN=2.
+   RANGE_MODE=0, EQUAL_MODE=1. */
+
+chan te_filter_in_ch {
+    left trace_enable : (logic@#1) @dyn - @dyn,
+    left cause_filter : (logic@#1) @dyn - @dyn,
+    left upper_cause : (logic[64]@#1) @dyn - @dyn,
+    left lower_cause : (logic[64]@#1) @dyn - @dyn,
+    left match_cause : (logic[64]@#1) @dyn - @dyn,
+    left cause_mode : (logic@#1) @dyn - @dyn,
+    left cause : (logic[64]@#1) @dyn - @dyn,
+    left tvec_filter : (logic@#1) @dyn - @dyn,
+    left upper_tvec : (logic[64]@#1) @dyn - @dyn,
+    left lower_tvec : (logic[64]@#1) @dyn - @dyn,
+    left match_tvec : (logic[64]@#1) @dyn - @dyn,
+    left tvec_mode : (logic@#1) @dyn - @dyn,
+    left tvec : (logic[64]@#1) @dyn - @dyn,
+    left tval_filter : (logic@#1) @dyn - @dyn,
+    left upper_tval : (logic[64]@#1) @dyn - @dyn,
+    left lower_tval : (logic[64]@#1) @dyn - @dyn,
+    left match_tval : (logic[64]@#1) @dyn - @dyn,
+    left tval_mode : (logic@#1) @dyn - @dyn,
+    left tval : (logic[64]@#1) @dyn - @dyn,
+    left priv_lvl_filter : (logic@#1) @dyn - @dyn,
+    left upper_priv : (logic[2]@#1) @dyn - @dyn,
+    left lower_priv : (logic[2]@#1) @dyn - @dyn,
+    left match_priv : (logic[2]@#1) @dyn - @dyn,
+    left priv_lvl_mode : (logic@#1) @dyn - @dyn,
+    left priv : (logic[2]@#1) @dyn - @dyn,
+    left iaddr_filter : (logic@#1) @dyn - @dyn,
+    left upper_iaddr : (logic[64]@#1) @dyn - @dyn,
+    left lower_iaddr : (logic[64]@#1) @dyn - @dyn,
+    left match_iaddr : (logic[64]@#1) @dyn - @dyn,
+    left iaddr_mode : (logic@#1) @dyn - @dyn,
+    left iaddr : (logic[64]@#1) @dyn - @dyn
+}
+
+chan te_filter_out_ch {
+    left nc_qualified : (logic@#1) @dyn - @dyn
+}
+
+proc te_filter(
+    inp : left te_filter_in_ch,
+    out : right te_filter_out_ch
+) {
+    /* Staging registers for all inputs */
+    reg r_trace_en : logic;
+    reg r_cause_filt : logic;
+    reg r_upper_cause : logic[64];
+    reg r_lower_cause : logic[64];
+    reg r_match_cause : logic[64];
+    reg r_cause_mode : logic;
+    reg r_cause : logic[64];
+    reg r_tvec_filt : logic;
+    reg r_upper_tvec : logic[64];
+    reg r_lower_tvec : logic[64];
+    reg r_match_tvec : logic[64];
+    reg r_tvec_mode : logic;
+    reg r_tvec : logic[64];
+    reg r_tval_filt : logic;
+    reg r_upper_tval : logic[64];
+    reg r_lower_tval : logic[64];
+    reg r_match_tval : logic[64];
+    reg r_tval_mode : logic;
+    reg r_tval : logic[64];
+    reg r_priv_filt : logic;
+    reg r_upper_priv : logic[2];
+    reg r_lower_priv : logic[2];
+    reg r_match_priv : logic[2];
+    reg r_priv_mode : logic;
+    reg r_priv : logic[2];
+    reg r_iaddr_filt : logic;
+    reg r_upper_iaddr : logic[64];
+    reg r_lower_iaddr : logic[64];
+    reg r_match_iaddr : logic[64];
+    reg r_iaddr_mode : logic;
+    reg r_iaddr : logic[64];
+
+    loop {
+        /* Receive all inputs */
+        let v_trace_en = recv inp.trace_enable >>
+        set r_trace_en := v_trace_en >>
+        let v0 = recv inp.cause_filter >>
+        set r_cause_filt := v0 >>
+        let v1 = recv inp.upper_cause >>
+        set r_upper_cause := v1 >>
+        let v2 = recv inp.lower_cause >>
+        set r_lower_cause := v2 >>
+        let v3 = recv inp.match_cause >>
+        set r_match_cause := v3 >>
+        let v4 = recv inp.cause_mode >>
+        set r_cause_mode := v4 >>
+        let v5 = recv inp.cause >>
+        set r_cause := v5 >>
+
+        let v6 = recv inp.tvec_filter >>
+        set r_tvec_filt := v6 >>
+        let v7 = recv inp.upper_tvec >>
+        set r_upper_tvec := v7 >>
+        let v8 = recv inp.lower_tvec >>
+        set r_lower_tvec := v8 >>
+        let v9 = recv inp.match_tvec >>
+        set r_match_tvec := v9 >>
+        let v10 = recv inp.tvec_mode >>
+        set r_tvec_mode := v10 >>
+        let v11 = recv inp.tvec >>
+        set r_tvec := v11 >>
+
+        let v12 = recv inp.tval_filter >>
+        set r_tval_filt := v12 >>
+        let v13 = recv inp.upper_tval >>
+        set r_upper_tval := v13 >>
+        let v14 = recv inp.lower_tval >>
+        set r_lower_tval := v14 >>
+        let v15 = recv inp.match_tval >>
+        set r_match_tval := v15 >>
+        let v16 = recv inp.tval_mode >>
+        set r_tval_mode := v16 >>
+        let v17 = recv inp.tval >>
+        set r_tval := v17 >>
+
+        let v18 = recv inp.priv_lvl_filter >>
+        set r_priv_filt := v18 >>
+        let v19 = recv inp.upper_priv >>
+        set r_upper_priv := v19 >>
+        let v20 = recv inp.lower_priv >>
+        set r_lower_priv := v20 >>
+        let v21 = recv inp.match_priv >>
+        set r_match_priv := v21 >>
+        let v22 = recv inp.priv_lvl_mode >>
+        set r_priv_mode := v22 >>
+        let v23 = recv inp.priv >>
+        set r_priv := v23 >>
+
+        let v24 = recv inp.iaddr_filter >>
+        set r_iaddr_filt := v24 >>
+        let v25 = recv inp.upper_iaddr >>
+        set r_upper_iaddr := v25 >>
+        let v26 = recv inp.lower_iaddr >>
+        set r_lower_iaddr := v26 >>
+        let v27 = recv inp.match_iaddr >>
+        set r_match_iaddr := v27 >>
+        let v28 = recv inp.iaddr_mode >>
+        set r_iaddr_mode := v28 >>
+        let v29 = recv inp.iaddr >>
+        set r_iaddr := v29 >>
+
+        /* RANGE_MODE=0, EQUAL_MODE=1 */
+        /* Cause filter */
+        let cause_in_range = (*r_cause_mode == 1'b0) &
+                             (*r_cause <= *r_upper_cause) &
+                             (*r_cause >= *r_lower_cause);
+        let cause_equals = (*r_cause_mode == 1'b1) &
+                           (*r_cause == *r_match_cause);
+        let cause_qual = (*r_cause_filt & (cause_in_range | cause_equals)) |
+                         ~(*r_cause_filt);
+
+        /* Tvec filter */
+        let tvec_in_range = (*r_tvec_mode == 1'b0) &
+                            (*r_tvec <= *r_upper_tvec) &
+                            (*r_tvec >= *r_lower_tvec);
+        let tvec_equals = (*r_tvec_mode == 1'b1) &
+                          (*r_tvec == *r_match_tvec);
+        let tvec_qual = (*r_tvec_filt & (tvec_in_range | tvec_equals)) |
+                        ~(*r_tvec_filt);
+
+        /* Tval filter */
+        let tval_in_range = (*r_tval_mode == 1'b0) &
+                            (*r_tval <= *r_upper_tval) &
+                            (*r_tval >= *r_lower_tval);
+        let tval_equals = (*r_tval_mode == 1'b1) &
+                          (*r_tval == *r_match_tval);
+        let tval_qual = (*r_tval_filt & (tval_in_range | tval_equals)) |
+                        ~(*r_tval_filt);
+
+        /* Priv level filter */
+        let priv_in_range = (*r_priv_mode == 1'b0) &
+                            (*r_priv <= *r_upper_priv) &
+                            (*r_priv >= *r_lower_priv);
+        let priv_equals = (*r_priv_mode == 1'b1) &
+                          (*r_priv == *r_match_priv);
+        let priv_qual = (*r_priv_filt & (priv_in_range | priv_equals)) |
+                        ~(*r_priv_filt);
+
+        /* Iaddr filter */
+        let iaddr_in_range = (*r_iaddr_mode == 1'b0) &
+                             (*r_iaddr <= *r_upper_iaddr) &
+                             (*r_iaddr >= *r_lower_iaddr);
+        let iaddr_equals = (*r_iaddr_mode == 1'b1) &
+                           (*r_iaddr == *r_match_iaddr);
+        let iaddr_qual = (*r_iaddr_filt & (iaddr_in_range | iaddr_equals)) |
+                         ~(*r_iaddr_filt);
+
+        /* Final qualification: AND of all filters AND trace_enable */
+        let qualified = cause_qual & tvec_qual & tval_qual & priv_qual &
+                        iaddr_qual & *r_trace_en;
+        send out.nc_qualified (qualified) >>
+        cycle 1
+    }
+}
