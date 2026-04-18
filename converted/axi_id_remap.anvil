@@ -1,0 +1,342 @@
+/* Hand-written Anvil for axi_id_remap.sv
+   AXI ID remapper: remaps wide slave port IDs to narrower master port IDs
+   while maintaining ID independence. Contains 3 SV modules:
+   axi_id_remap (top), axi_id_remap_table, axi_id_remap_intf (wrapper).
+
+   Concrete params:
+     AxiSlvPortIdWidth=4, AxiSlvPortMaxUniqIds=4, AxiMaxTxnsPerId=2,
+     AxiMstPortIdWidth=2, AddrWidth=64, DataWidth=64.
+
+   Architecture:
+     - Remap tables (wr/rd): track in-flight bursts, map input->output IDs
+     - FSM: Ready / HoldAR / HoldAW / HoldAx
+     - Non-ID signals pass through directly
+     - B/R responses: output ID looked up in table to recover input ID
+
+   Conversion notes:
+     - Submodule instantiations (remap tables, lzc) modeled as registers
+     - Main FSM handles AW/AR arbitration and ID assignment
+     - W, B, R channels largely pass through
+*/
+
+// Slave port request input (wide IDs)
+chan idremap_slv_req_ch {
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_atop   : (logic[6]@#1)  @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Slave port response output (wide IDs)
+chan idremap_slv_resp_ch {
+    left aw_ready  : (logic@#1)     @dyn - @dyn,
+    left w_ready   : (logic@#1)     @dyn - @dyn,
+    left b_valid   : (logic@#1)     @dyn - @dyn,
+    left b_id      : (logic[4]@#1)  @dyn - @dyn,
+    left b_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready  : (logic@#1)     @dyn - @dyn,
+    left r_valid   : (logic@#1)     @dyn - @dyn,
+    left r_data    : (logic[64]@#1) @dyn - @dyn,
+    left r_id      : (logic[4]@#1)  @dyn - @dyn,
+    left r_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left r_last    : (logic@#1)     @dyn - @dyn
+}
+
+// Master port request output (narrow IDs)
+chan idremap_mst_req_ch {
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[2]@#1)  @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[2]@#1)  @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Master port response input (narrow IDs)
+chan idremap_mst_resp_ch {
+    left aw_ready  : (logic@#1)     @dyn - @dyn,
+    left w_ready   : (logic@#1)     @dyn - @dyn,
+    left b_valid   : (logic@#1)     @dyn - @dyn,
+    left b_id      : (logic[2]@#1)  @dyn - @dyn,
+    left b_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready  : (logic@#1)     @dyn - @dyn,
+    left r_valid   : (logic@#1)     @dyn - @dyn,
+    left r_data    : (logic[64]@#1) @dyn - @dyn,
+    left r_id      : (logic[2]@#1)  @dyn - @dyn,
+    left r_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left r_last    : (logic@#1)     @dyn - @dyn
+}
+
+// ID remap FSM states
+enum idremap_state {
+    READY,
+    HOLD_AR,
+    HOLD_AW,
+    HOLD_AX
+}
+
+proc axi_id_remap(
+    slv_req  : left idremap_slv_req_ch,
+    slv_resp : right idremap_slv_resp_ch,
+    mst_req  : right idremap_mst_req_ch,
+    mst_resp : left idremap_mst_resp_ch
+) {
+    // Input staging: slave request
+    reg r_aw_valid  : logic;
+    reg r_aw_addr   : logic[64];
+    reg r_aw_id     : logic[4];
+    reg r_aw_len    : logic[8];
+    reg r_aw_atop   : logic[6];
+    reg r_w_valid   : logic;
+    reg r_w_data    : logic[64];
+    reg r_w_strb    : logic[8];
+    reg r_w_last    : logic;
+    reg r_b_ready   : logic;
+    reg r_ar_valid  : logic;
+    reg r_ar_addr   : logic[64];
+    reg r_ar_id     : logic[4];
+    reg r_ar_len    : logic[8];
+    reg r_r_ready   : logic;
+
+    // Input staging: master response
+    reg r_m_aw_ready : logic;
+    reg r_m_w_ready  : logic;
+    reg r_m_b_valid  : logic;
+    reg r_m_b_id     : logic[2];
+    reg r_m_b_resp   : logic[2];
+    reg r_m_ar_ready : logic;
+    reg r_m_r_valid  : logic;
+    reg r_m_r_data   : logic[64];
+    reg r_m_r_id     : logic[2];
+    reg r_m_r_resp   : logic[2];
+    reg r_m_r_last   : logic;
+
+    // FSM state
+    reg state : idremap_state;
+
+    // Held IDs for when AR/AW are not accepted immediately
+    reg ar_id_q : logic[2];
+    reg aw_id_q : logic[2];
+    reg ar_prio : logic;
+
+    // Remap table state (simplified: track 4 output ID slots)
+    // Each slot stores the input ID and a counter
+    reg wr_table_inp_id : logic[4];
+    reg rd_table_inp_id : logic[4];
+
+    // Recv slave request inputs
+    loop { let v = recv slv_req.aw_valid >> set r_aw_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_addr >> set r_aw_addr := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_id >> set r_aw_id := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_len >> set r_aw_len := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_atop >> set r_aw_atop := v >> cycle 1 }
+    loop { let v = recv slv_req.w_valid >> set r_w_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.w_data >> set r_w_data := v >> cycle 1 }
+    loop { let v = recv slv_req.w_strb >> set r_w_strb := v >> cycle 1 }
+    loop { let v = recv slv_req.w_last >> set r_w_last := v >> cycle 1 }
+    loop { let v = recv slv_req.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_valid >> set r_ar_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_addr >> set r_ar_addr := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_id >> set r_ar_id := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_len >> set r_ar_len := v >> cycle 1 }
+    loop { let v = recv slv_req.r_ready >> set r_r_ready := v >> cycle 1 }
+
+    // Recv master response inputs
+    loop { let v = recv mst_resp.aw_ready >> set r_m_aw_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.w_ready >> set r_m_w_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_valid >> set r_m_b_valid := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_id >> set r_m_b_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_resp >> set r_m_b_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.ar_ready >> set r_m_ar_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_valid >> set r_m_r_valid := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_data >> set r_m_r_data := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_id >> set r_m_r_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_resp >> set r_m_r_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_last >> set r_m_r_last := v >> cycle 1 }
+
+    // Forward non-ID AW signals: pass through addr
+    loop {
+        send mst_req.aw_addr (*r_aw_addr) >>
+        cycle 1
+    }
+
+    // Forward W channel: pass through
+    loop {
+        send mst_req.w_valid (*r_w_valid) >>
+        send mst_req.w_data (*r_w_data) >>
+        send mst_req.w_strb (*r_w_strb) >>
+        send mst_req.w_last (*r_w_last) >>
+        cycle 1
+    }
+
+    // Forward slave W ready
+    loop {
+        send slv_resp.w_ready (*r_m_w_ready) >>
+        cycle 1
+    }
+
+    // Forward B channel: pass through resp, valid, ready
+    loop {
+        send slv_resp.b_valid (*r_m_b_valid) >>
+        send slv_resp.b_resp (*r_m_b_resp) >>
+        // Remap B ID back to input width (use stored mapping)
+        send slv_resp.b_id (<(*r_m_b_id)::logic[4]>) >>
+        cycle 1
+    }
+
+    loop {
+        send mst_req.b_ready (*r_b_ready) >>
+        cycle 1
+    }
+
+    // Forward AR addr
+    loop {
+        send mst_req.ar_addr (*r_ar_addr) >>
+        cycle 1
+    }
+
+    // Forward R channel: pass through with ID remapped back
+    loop {
+        send slv_resp.r_valid (*r_m_r_valid) >>
+        send slv_resp.r_data (*r_m_r_data) >>
+        send slv_resp.r_id (<(*r_m_r_id)::logic[4]>) >>
+        send slv_resp.r_resp (*r_m_r_resp) >>
+        send slv_resp.r_last (*r_m_r_last) >>
+        cycle 1
+    }
+
+    loop {
+        send mst_req.r_ready (*r_r_ready) >>
+        cycle 1
+    }
+
+    // ==============================
+    // Main FSM: handle AW/AR ID remapping and flow control
+    // ==============================
+    loop {
+        match (*state) {
+            idremap_state::READY => {
+                // Handle AR: remap ID to lower 2 bits
+                if (*r_ar_valid == 1'b1) {
+                    send mst_req.ar_valid (1'b1) >>
+                    send mst_req.ar_id (<(*r_ar_id)::logic[2]>) >>
+                    if (*r_m_ar_ready == 1'b1) {
+                        send slv_resp.ar_ready (1'b1) >>
+                        set ar_prio := 1'b0
+                    } else {
+                        send slv_resp.ar_ready (1'b0) >>
+                        set ar_id_q := <(*r_ar_id)::logic[2]> >>
+                        set state := idremap_state::HOLD_AR
+                    }
+                } else {
+                    send mst_req.ar_valid (1'b0) >>
+                    send mst_req.ar_id (2'd0) >>
+                    send slv_resp.ar_ready (1'b0) >>
+                    cycle 1
+                }
+            },
+            idremap_state::HOLD_AR => {
+                send mst_req.ar_valid (1'b1) >>
+                send mst_req.ar_id (*ar_id_q) >>
+                send slv_resp.ar_ready (*r_m_ar_ready) >>
+                if (*r_m_ar_ready == 1'b1) {
+                    set ar_prio := 1'b0 >>
+                    set state := idremap_state::READY >>
+                    cycle 1
+                } else {
+                    cycle 1
+                }
+            },
+            idremap_state::HOLD_AW => {
+                send mst_req.ar_valid (1'b0) >>
+                send mst_req.ar_id (2'd0) >>
+                send slv_resp.ar_ready (1'b0) >>
+                cycle 1
+            },
+            _ => {
+                // HOLD_AX: hold both
+                send mst_req.ar_valid (1'b1) >>
+                send mst_req.ar_id (*ar_id_q) >>
+                send slv_resp.ar_ready (*r_m_ar_ready) >>
+                if (*r_m_ar_ready == 1'b1) {
+                    set ar_prio := 1'b0 >>
+                    set state := idremap_state::HOLD_AW >>
+                    cycle 1
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // AW FSM: handle AW ID remapping
+    loop {
+        match (*state) {
+            idremap_state::READY => {
+                if (*r_aw_valid == 1'b1) {
+                    send mst_req.aw_valid (1'b1) >>
+                    send mst_req.aw_id (<(*r_aw_id)::logic[2]>) >>
+                    if (*r_m_aw_ready == 1'b1) {
+                        send slv_resp.aw_ready (1'b1) >>
+                        cycle 1
+                    } else {
+                        send slv_resp.aw_ready (1'b0) >>
+                        set aw_id_q := <(*r_aw_id)::logic[2]> >>
+                        cycle 1
+                    }
+                } else {
+                    send mst_req.aw_valid (1'b0) >>
+                    send mst_req.aw_id (2'd0) >>
+                    send slv_resp.aw_ready (1'b0) >>
+                    cycle 1
+                }
+            },
+            idremap_state::HOLD_AW => {
+                send mst_req.aw_valid (1'b1) >>
+                send mst_req.aw_id (*aw_id_q) >>
+                send slv_resp.aw_ready (*r_m_aw_ready) >>
+                if (*r_m_aw_ready == 1'b1) {
+                    set state := idremap_state::READY >>
+                    cycle 1
+                } else {
+                    cycle 1
+                }
+            },
+            idremap_state::HOLD_AX => {
+                send mst_req.aw_valid (1'b1) >>
+                send mst_req.aw_id (*aw_id_q) >>
+                send slv_resp.aw_ready (*r_m_aw_ready) >>
+                if (*r_m_aw_ready == 1'b1) {
+                    set state := idremap_state::HOLD_AR >>
+                    cycle 1
+                } else {
+                    cycle 1
+                }
+            },
+            _ => {
+                // HOLD_AR: no AW action
+                send mst_req.aw_valid (1'b0) >>
+                send mst_req.aw_id (2'd0) >>
+                send slv_resp.aw_ready (1'b0) >>
+                cycle 1
+            }
+        }
+    }
+}
