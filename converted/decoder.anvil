@@ -1,0 +1,887 @@
+/* Hand-written Anvil for decoder.sv
+   CVA6 Instruction Decoder — decodes RISC-V instructions into scoreboard entries.
+   Concrete params: XLEN=64, VLEN=64, IS_XLEN64=true,
+   RVS=1, RVU=1, RVA=1, FpPresent=1, RVF=1, RVD=1,
+   RVB=0, RVH=0, CvxifEn=0, EnableAccelerator=0,
+   DebugEn=1, RVZCMT=0, RVZiCbom=0, ZKN=0, XFVec=0, RVZiCond=0,
+   XF16=0, XF16ALT=0, XF8=0, SDTRIG=0.
+
+   Instruction fields are received pre-extracted by the caller.
+   [MANUAL-CLEANUP-NEEDED] Vectorial FP, Bitmanip, Hypervisor, CVXIF,
+   Accelerator, CBO, ZKN, ZiCond paths omitted.
+*/
+
+/* FU codes (4 bits): NONE=0, ALU=1, CTRL_FLOW=2, MULT=3, CSR=4,
+   FPU=5, FPU_VEC=6, LOAD=7, STORE=8, AES=9, CVXIF=10 */
+
+/* fu_op codes (8 bits):
+   ADD=0, SUB=1, ADDW=2, SUBW=3, XORL=4, ORL=5, ANDL=6,
+   SRA=7, SRL=8, SLL=9, SRLW=10, SLLW=11, SRAW=12,
+   LTS=13, LTU=14, GES=15, GEU=16, EQ=17, NE=18,
+   JALR=19, SLTS=21, SLTU=22,
+   WFI=24, SRET=25, MRET=26, DRET=27,
+   SFENCE_VMA=28, FENCE_I=29, FENCE=30,
+   CSR_WRITE=32, CSR_READ=33, CSR_SET=34, CSR_CLEAR=35,
+   MUL=36, MULH=37, MULHSU=38, MULHU=39,
+   DIV=40, DIVU=41, REM=42, REMU=43,
+   MULW=44, DIVW=45, DIVUW=46, REMW=47, REMUW=48,
+   LW=49, LH=50, LB=51, LWU=52, LHU=53, LBU=54, LD=55,
+   SW=56, SH=57, SB=58, SD=59,
+   FLW=60, FLD=63, FSW=64, FSD=67,
+   FADD=68, FSUB=69, FMUL=70, FDIV=71, FMIN_MAX=72,
+   FSQRT=73, FMADD=74, FMSUB=75, FNMSUB=76, FNMADD=77,
+   FCVT_F2I=78, FCVT_I2F=79, FCVT_F2F=80,
+   FSGNJ=81, FMV_F2X=82, FMV_X2F=83, FCLASS=84, FCMP=85,
+   AMO_LRW=86, AMO_LRD=87, AMO_SCW=88, AMO_SCD=89,
+   AMO_SWAPW=90, AMO_ADDW=91, AMO_ANDW=92, AMO_ORW=93,
+   AMO_XORW=94, AMO_MAXW=95, AMO_MAXWU=96,
+   AMO_MINW=97, AMO_MINWU=98,
+   AMO_SWAPD=99, AMO_ADDD=100, AMO_ANDD=101, AMO_ORD=102,
+   AMO_XORD=103, AMO_MAXD=104, AMO_MAXDU=105,
+   AMO_MIND=106, AMO_MINDU=107 */
+
+chan decoder_in_ch {
+    left debug_req       : (logic@#1) @dyn - @dyn,
+    left pc              : (logic[64]@#1) @dyn - @dyn,
+    left is_compressed   : (logic@#1) @dyn - @dyn,
+    left compressed_instr : (logic[16]@#1) @dyn - @dyn,
+    left is_illegal      : (logic@#1) @dyn - @dyn,
+    left is_macro        : (logic@#1) @dyn - @dyn,
+    left is_last_macro   : (logic@#1) @dyn - @dyn,
+    left is_double_rd    : (logic@#1) @dyn - @dyn,
+    left opcode          : (logic[7]@#1) @dyn - @dyn,
+    left rd              : (logic[5]@#1) @dyn - @dyn,
+    left funct3          : (logic[3]@#1) @dyn - @dyn,
+    left rs1             : (logic[5]@#1) @dyn - @dyn,
+    left rs2             : (logic[5]@#1) @dyn - @dyn,
+    left funct7          : (logic[7]@#1) @dyn - @dyn,
+    left funct5          : (logic[5]@#1) @dyn - @dyn,
+    left fmt             : (logic[2]@#1) @dyn - @dyn,
+    left imm12           : (logic[12]@#1) @dyn - @dyn,
+    left instr_31_26     : (logic[6]@#1) @dyn - @dyn,
+    left bp_valid        : (logic@#1) @dyn - @dyn,
+    left bp_taken        : (logic@#1) @dyn - @dyn,
+    left bp_addr         : (logic[64]@#1) @dyn - @dyn,
+    left ex_valid        : (logic@#1) @dyn - @dyn,
+    left ex_cause        : (logic[64]@#1) @dyn - @dyn,
+    left ex_tval         : (logic[64]@#1) @dyn - @dyn,
+    left irq_mie         : (logic[64]@#1) @dyn - @dyn,
+    left irq_mip         : (logic[64]@#1) @dyn - @dyn,
+    left irq_mideleg     : (logic[64]@#1) @dyn - @dyn,
+    left irq_sie         : (logic@#1) @dyn - @dyn,
+    left irq_global      : (logic@#1) @dyn - @dyn,
+    left irq_ext_s       : (logic@#1) @dyn - @dyn,
+    left priv_lvl        : (logic[2]@#1) @dyn - @dyn,
+    left debug_mode      : (logic@#1) @dyn - @dyn,
+    left fs              : (logic[2]@#1) @dyn - @dyn,
+    left frm             : (logic[3]@#1) @dyn - @dyn,
+    left tvm             : (logic@#1) @dyn - @dyn,
+    left tw              : (logic@#1) @dyn - @dyn,
+    left tsr             : (logic@#1) @dyn - @dyn,
+    left debug_trigger   : (logic@#1) @dyn - @dyn,
+    left imm_i           : (logic[64]@#1) @dyn - @dyn,
+    left imm_s           : (logic[64]@#1) @dyn - @dyn,
+    left imm_sb          : (logic[64]@#1) @dyn - @dyn,
+    left imm_u           : (logic[64]@#1) @dyn - @dyn,
+    left imm_uj          : (logic[64]@#1) @dyn - @dyn,
+    left tval_instr      : (logic[64]@#1) @dyn - @dyn
+}
+
+chan decoder_out_ch {
+    left o_pc            : (logic[64]@#1) @dyn - @dyn,
+    left o_fu            : (logic[4]@#1) @dyn - @dyn,
+    left o_op            : (logic[8]@#1) @dyn - @dyn,
+    left o_rs1           : (logic[5]@#1) @dyn - @dyn,
+    left o_rs2           : (logic[5]@#1) @dyn - @dyn,
+    left o_rd            : (logic[5]@#1) @dyn - @dyn,
+    left o_result        : (logic[64]@#1) @dyn - @dyn,
+    left o_use_imm       : (logic@#1) @dyn - @dyn,
+    left o_use_pc        : (logic@#1) @dyn - @dyn,
+    left o_use_zimm      : (logic@#1) @dyn - @dyn,
+    left o_is_compressed : (logic@#1) @dyn - @dyn,
+    left o_is_macro      : (logic@#1) @dyn - @dyn,
+    left o_is_last_macro : (logic@#1) @dyn - @dyn,
+    left o_is_double_rd  : (logic@#1) @dyn - @dyn,
+    left o_bp_valid      : (logic@#1) @dyn - @dyn,
+    left o_bp_taken      : (logic@#1) @dyn - @dyn,
+    left o_bp_addr       : (logic[64]@#1) @dyn - @dyn,
+    left o_ex_valid      : (logic@#1) @dyn - @dyn,
+    left o_ex_cause      : (logic[64]@#1) @dyn - @dyn,
+    left o_ex_tval       : (logic[64]@#1) @dyn - @dyn,
+    left o_vfp           : (logic@#1) @dyn - @dyn,
+    left o_orig_instr    : (logic[64]@#1) @dyn - @dyn,
+    left o_is_ctrl_flow  : (logic@#1) @dyn - @dyn
+}
+
+proc decoder(
+    inp : left decoder_in_ch,
+    out : right decoder_out_ch
+) {
+    /* Input staging registers */
+    reg r_debug_req : logic;
+    reg r_pc : logic[64];
+    reg r_is_compressed : logic;
+    reg r_compressed_instr : logic[16];
+    reg r_is_illegal : logic;
+    reg r_is_macro : logic;
+    reg r_is_last_macro : logic;
+    reg r_is_dbl_rd : logic;
+    reg r_opcode : logic[7];
+    reg r_rd : logic[5];
+    reg r_funct3 : logic[3];
+    reg r_rs1 : logic[5];
+    reg r_rs2 : logic[5];
+    reg r_funct7 : logic[7];
+    reg r_funct5 : logic[5];
+    reg r_fmt : logic[2];
+    reg r_imm12 : logic[12];
+    reg r_i31_26 : logic[6];
+    reg r_bp_valid : logic;
+    reg r_bp_taken : logic;
+    reg r_bp_addr : logic[64];
+    reg r_ex_valid : logic;
+    reg r_ex_cause : logic[64];
+    reg r_ex_tval : logic[64];
+    reg r_irq_mie : logic[64];
+    reg r_irq_mip : logic[64];
+    reg r_irq_mideleg : logic[64];
+    reg r_irq_sie : logic;
+    reg r_irq_global : logic;
+    reg r_irq_ext_s : logic;
+    reg r_priv : logic[2];
+    reg r_debug_mode : logic;
+    reg r_fs : logic[2];
+    reg r_frm : logic[3];
+    reg r_tvm : logic;
+    reg r_tw : logic;
+    reg r_tsr : logic;
+    reg r_debug_trigger : logic;
+    reg r_imm_i : logic[64];
+    reg r_imm_s : logic[64];
+    reg r_imm_sb : logic[64];
+    reg r_imm_u : logic[64];
+    reg r_imm_uj : logic[64];
+    reg r_tval_instr : logic[64];
+
+    /* Recv loop */
+    loop {
+        let a0 = recv inp.debug_req >>
+        set r_debug_req := a0 >>
+        let a1 = recv inp.pc >>
+        set r_pc := a1 >>
+        let a2 = recv inp.is_compressed >>
+        set r_is_compressed := a2 >>
+        let a3 = recv inp.compressed_instr >>
+        set r_compressed_instr := a3 >>
+        let a4 = recv inp.is_illegal >>
+        set r_is_illegal := a4 >>
+        let a5 = recv inp.is_macro >>
+        set r_is_macro := a5 >>
+        let a6 = recv inp.is_last_macro >>
+        set r_is_last_macro := a6 >>
+        let a7 = recv inp.is_double_rd >>
+        set r_is_dbl_rd := a7 >>
+        let a8 = recv inp.opcode >>
+        set r_opcode := a8 >>
+        let a9 = recv inp.rd >>
+        set r_rd := a9 >>
+        let a10 = recv inp.funct3 >>
+        set r_funct3 := a10 >>
+        let a11 = recv inp.rs1 >>
+        set r_rs1 := a11 >>
+        let a12 = recv inp.rs2 >>
+        set r_rs2 := a12 >>
+        let a13 = recv inp.funct7 >>
+        set r_funct7 := a13 >>
+        let a14 = recv inp.funct5 >>
+        set r_funct5 := a14 >>
+        let a15 = recv inp.fmt >>
+        set r_fmt := a15 >>
+        let a16 = recv inp.imm12 >>
+        set r_imm12 := a16 >>
+        let a17 = recv inp.instr_31_26 >>
+        set r_i31_26 := a17 >>
+        let a18 = recv inp.bp_valid >>
+        set r_bp_valid := a18 >>
+        let a19 = recv inp.bp_taken >>
+        set r_bp_taken := a19 >>
+        let a20 = recv inp.bp_addr >>
+        set r_bp_addr := a20 >>
+        let a21 = recv inp.ex_valid >>
+        set r_ex_valid := a21 >>
+        let a22 = recv inp.ex_cause >>
+        set r_ex_cause := a22 >>
+        let a23 = recv inp.ex_tval >>
+        set r_ex_tval := a23 >>
+        let a24 = recv inp.irq_mie >>
+        set r_irq_mie := a24 >>
+        let a25 = recv inp.irq_mip >>
+        set r_irq_mip := a25 >>
+        let a26 = recv inp.irq_mideleg >>
+        set r_irq_mideleg := a26 >>
+        let a27 = recv inp.irq_sie >>
+        set r_irq_sie := a27 >>
+        let a28 = recv inp.irq_global >>
+        set r_irq_global := a28 >>
+        let a29 = recv inp.irq_ext_s >>
+        set r_irq_ext_s := a29 >>
+        let a30 = recv inp.priv_lvl >>
+        set r_priv := a30 >>
+        let a31 = recv inp.debug_mode >>
+        set r_debug_mode := a31 >>
+        let a32 = recv inp.fs >>
+        set r_fs := a32 >>
+        let a33 = recv inp.frm >>
+        set r_frm := a33 >>
+        let a34 = recv inp.tvm >>
+        set r_tvm := a34 >>
+        let a35 = recv inp.tw >>
+        set r_tw := a35 >>
+        let a36 = recv inp.tsr >>
+        set r_tsr := a36 >>
+        let a37 = recv inp.debug_trigger >>
+        set r_debug_trigger := a37 >>
+        let a38 = recv inp.imm_i >>
+        set r_imm_i := a38 >>
+        let a39 = recv inp.imm_s >>
+        set r_imm_s := a39 >>
+        let a40 = recv inp.imm_sb >>
+        set r_imm_sb := a40 >>
+        let a41 = recv inp.imm_u >>
+        set r_imm_u := a41 >>
+        let a42 = recv inp.imm_uj >>
+        set r_imm_uj := a42 >>
+        let a43 = recv inp.tval_instr >>
+        set r_tval_instr := a43
+    }
+
+    /* Output loop — combinational decode */
+    loop {
+        let opc = *r_opcode >>
+        let f3 = *r_funct3 >>
+        let f7 = *r_funct7 >>
+        let f5 = *r_funct5 >>
+        let fm = *r_fmt >>
+        let im12 = *r_imm12 >>
+        let i31_26 = *r_i31_26 >>
+        let funct10 = (<(f7)::logic[10]> << 10'd3) | <(f3)::logic[10]> >>
+
+        /* --- Functional Unit --- */
+        let fu = if *r_ex_valid == 1'b1 { 4'd0 }
+            else if opc == 7'd115 { 4'd4 }
+            else if opc == 7'd15 { 4'd4 }
+            else if opc == 7'd51 {
+                if f7 == 7'b0000001 { 4'd3 } else { 4'd1 }
+            }
+            else if opc == 7'd59 {
+                if f7 == 7'b0000001 { 4'd3 } else { 4'd1 }
+            }
+            else if opc == 7'd19 { 4'd1 }
+            else if opc == 7'd27 { 4'd1 }
+            else if opc == 7'd35 { 4'd8 }
+            else if opc == 7'd3 { 4'd7 }
+            else if opc == 7'd39 {
+                if *r_fs == 2'b00 { 4'd0 } else { 4'd8 }
+            }
+            else if opc == 7'd7 {
+                if *r_fs == 2'b00 { 4'd0 } else { 4'd7 }
+            }
+            else if opc == 7'd67 { 4'd5 }
+            else if opc == 7'd71 { 4'd5 }
+            else if opc == 7'd75 { 4'd5 }
+            else if opc == 7'd79 { 4'd5 }
+            else if opc == 7'd83 { 4'd5 }
+            else if opc == 7'd47 { 4'd8 }
+            else if opc == 7'd99 { 4'd2 }
+            else if opc == 7'd103 { 4'd2 }
+            else if opc == 7'd111 { 4'd2 }
+            else if opc == 7'd23 { 4'd1 }
+            else if opc == 7'd55 { 4'd1 }
+            else { 4'd0 } >>
+
+        /* --- Operation --- */
+        let op = if *r_ex_valid == 1'b1 { 8'd0 }
+            /* OpcodeSystem */
+            else if opc == 7'd115 {
+                if f3 == 3'b000 {
+                    if im12 == 12'd0 { 8'd0 }
+                    else if im12 == 12'd1 { 8'd0 }
+                    else if im12 == 12'b000100000010 { 8'd25 }
+                    else if im12 == 12'b001100000010 { 8'd26 }
+                    else if im12 == 12'b011110110010 { 8'd27 }
+                    else if im12 == 12'b000100000101 { 8'd24 }
+                    else if f7 == 7'b0001001 { 8'd28 }
+                    else { 8'd0 }
+                }
+                else if f3 == 3'b001 { 8'd32 }
+                else if f3 == 3'b010 {
+                    if *r_rs1 == 5'd0 { 8'd33 } else { 8'd34 }
+                }
+                else if f3 == 3'b011 {
+                    if *r_rs1 == 5'd0 { 8'd33 } else { 8'd35 }
+                }
+                else if f3 == 3'b101 { 8'd32 }
+                else if f3 == 3'b110 {
+                    if *r_rs1 == 5'd0 { 8'd33 } else { 8'd34 }
+                }
+                else if f3 == 3'b111 {
+                    if *r_rs1 == 5'd0 { 8'd33 } else { 8'd35 }
+                }
+                else { 8'd0 }
+            }
+            /* OpcodeMiscMem */
+            else if opc == 7'd15 {
+                if f3 == 3'b000 { 8'd30 }
+                else if f3 == 3'b001 { 8'd29 }
+                else { 8'd0 }
+            }
+            /* OpcodeOp */
+            else if opc == 7'd51 {
+                if funct10 == 10'b0000000000 { 8'd0 }
+                else if funct10 == 10'b0100000000 { 8'd1 }
+                else if funct10 == 10'b0000000010 { 8'd21 }
+                else if funct10 == 10'b0000000011 { 8'd22 }
+                else if funct10 == 10'b0000000100 { 8'd4 }
+                else if funct10 == 10'b0000000110 { 8'd5 }
+                else if funct10 == 10'b0000000111 { 8'd6 }
+                else if funct10 == 10'b0000000001 { 8'd9 }
+                else if funct10 == 10'b0000000101 { 8'd8 }
+                else if funct10 == 10'b0100000101 { 8'd7 }
+                else if funct10 == 10'b0000001000 { 8'd36 }
+                else if funct10 == 10'b0000001001 { 8'd37 }
+                else if funct10 == 10'b0000001010 { 8'd38 }
+                else if funct10 == 10'b0000001011 { 8'd39 }
+                else if funct10 == 10'b0000001100 { 8'd40 }
+                else if funct10 == 10'b0000001101 { 8'd41 }
+                else if funct10 == 10'b0000001110 { 8'd42 }
+                else if funct10 == 10'b0000001111 { 8'd43 }
+                else { 8'd0 }
+            }
+            /* OpcodeOp32 */
+            else if opc == 7'd59 {
+                if funct10 == 10'b0000000000 { 8'd2 }
+                else if funct10 == 10'b0100000000 { 8'd3 }
+                else if funct10 == 10'b0000000001 { 8'd11 }
+                else if funct10 == 10'b0000000101 { 8'd10 }
+                else if funct10 == 10'b0100000101 { 8'd12 }
+                else if funct10 == 10'b0000001000 { 8'd44 }
+                else if funct10 == 10'b0000001100 { 8'd45 }
+                else if funct10 == 10'b0000001101 { 8'd46 }
+                else if funct10 == 10'b0000001110 { 8'd47 }
+                else if funct10 == 10'b0000001111 { 8'd48 }
+                else { 8'd0 }
+            }
+            /* OpcodeOpImm */
+            else if opc == 7'd19 {
+                if f3 == 3'b000 { 8'd0 }
+                else if f3 == 3'b010 { 8'd21 }
+                else if f3 == 3'b011 { 8'd22 }
+                else if f3 == 3'b100 { 8'd4 }
+                else if f3 == 3'b110 { 8'd5 }
+                else if f3 == 3'b111 { 8'd6 }
+                else if f3 == 3'b001 { 8'd9 }
+                else if f3 == 3'b101 {
+                    if i31_26 == 6'b000000 { 8'd8 }
+                    else if i31_26 == 6'b010000 { 8'd7 }
+                    else { 8'd0 }
+                }
+                else { 8'd0 }
+            }
+            /* OpcodeOpImm32 */
+            else if opc == 7'd27 {
+                if f3 == 3'b000 { 8'd2 }
+                else if f3 == 3'b001 { 8'd11 }
+                else if f3 == 3'b101 {
+                    if f7 == 7'b0000000 { 8'd10 }
+                    else if f7 == 7'b0100000 { 8'd12 }
+                    else { 8'd0 }
+                }
+                else { 8'd0 }
+            }
+            /* OpcodeStore */
+            else if opc == 7'd35 {
+                if f3 == 3'b000 { 8'd58 }
+                else if f3 == 3'b001 { 8'd57 }
+                else if f3 == 3'b010 { 8'd56 }
+                else if f3 == 3'b011 { 8'd59 }
+                else { 8'd0 }
+            }
+            /* OpcodeLoad */
+            else if opc == 7'd3 {
+                if f3 == 3'b000 { 8'd51 }
+                else if f3 == 3'b001 { 8'd50 }
+                else if f3 == 3'b010 { 8'd49 }
+                else if f3 == 3'b100 { 8'd54 }
+                else if f3 == 3'b101 { 8'd53 }
+                else if f3 == 3'b110 { 8'd52 }
+                else if f3 == 3'b011 { 8'd55 }
+                else { 8'd0 }
+            }
+            /* OpcodeStoreFp */
+            else if opc == 7'd39 {
+                if *r_fs == 2'b00 { 8'd0 }
+                else if f3 == 3'b010 { 8'd64 }
+                else if f3 == 3'b011 { 8'd67 }
+                else { 8'd0 }
+            }
+            /* OpcodeLoadFp */
+            else if opc == 7'd7 {
+                if *r_fs == 2'b00 { 8'd0 }
+                else if f3 == 3'b010 { 8'd60 }
+                else if f3 == 3'b011 { 8'd63 }
+                else { 8'd0 }
+            }
+            /* OpcodeMadd */
+            else if opc == 7'd67 { 8'd74 }
+            /* OpcodeMsub */
+            else if opc == 7'd71 { 8'd75 }
+            /* OpcodeNmsub */
+            else if opc == 7'd75 { 8'd76 }
+            /* OpcodeNmadd */
+            else if opc == 7'd79 { 8'd77 }
+            /* OpcodeOpFp */
+            else if opc == 7'd83 {
+                if *r_fs == 2'b00 { 8'd0 }
+                else if f5 == 5'b00000 { 8'd68 }
+                else if f5 == 5'b00001 { 8'd69 }
+                else if f5 == 5'b00010 { 8'd70 }
+                else if f5 == 5'b00011 { 8'd71 }
+                else if f5 == 5'b01011 { 8'd73 }
+                else if f5 == 5'b00100 { 8'd81 }
+                else if f5 == 5'b00101 { 8'd72 }
+                else if f5 == 5'b01000 { 8'd80 }
+                else if f5 == 5'b10100 { 8'd85 }
+                else if f5 == 5'b11000 { 8'd78 }
+                else if f5 == 5'b11010 { 8'd79 }
+                else if f5 == 5'b11100 {
+                    if f3 == 3'b000 { 8'd82 }
+                    else if f3 == 3'b001 { 8'd84 }
+                    else { 8'd0 }
+                }
+                else if f5 == 5'b11110 { 8'd83 }
+                else { 8'd0 }
+            }
+            /* OpcodeAmo */
+            else if opc == 7'd47 {
+                if f3 == 3'b010 {
+                    if f5 == 5'b00000 { 8'd91 }
+                    else if f5 == 5'b00001 { 8'd90 }
+                    else if f5 == 5'b00010 { 8'd86 }
+                    else if f5 == 5'b00011 { 8'd88 }
+                    else if f5 == 5'b00100 { 8'd94 }
+                    else if f5 == 5'b01000 { 8'd93 }
+                    else if f5 == 5'b01100 { 8'd92 }
+                    else if f5 == 5'b10000 { 8'd97 }
+                    else if f5 == 5'b10100 { 8'd95 }
+                    else if f5 == 5'b11000 { 8'd98 }
+                    else if f5 == 5'b11100 { 8'd96 }
+                    else { 8'd0 }
+                }
+                else if f3 == 3'b011 {
+                    if f5 == 5'b00000 { 8'd100 }
+                    else if f5 == 5'b00001 { 8'd99 }
+                    else if f5 == 5'b00010 { 8'd87 }
+                    else if f5 == 5'b00011 { 8'd89 }
+                    else if f5 == 5'b00100 { 8'd103 }
+                    else if f5 == 5'b01000 { 8'd102 }
+                    else if f5 == 5'b01100 { 8'd101 }
+                    else if f5 == 5'b10000 { 8'd106 }
+                    else if f5 == 5'b10100 { 8'd104 }
+                    else if f5 == 5'b11000 { 8'd107 }
+                    else if f5 == 5'b11100 { 8'd105 }
+                    else { 8'd0 }
+                }
+                else { 8'd0 }
+            }
+            /* OpcodeBranch */
+            else if opc == 7'd99 {
+                if f3 == 3'b000 { 8'd17 }
+                else if f3 == 3'b001 { 8'd18 }
+                else if f3 == 3'b100 { 8'd13 }
+                else if f3 == 3'b101 { 8'd15 }
+                else if f3 == 3'b110 { 8'd14 }
+                else if f3 == 3'b111 { 8'd16 }
+                else { 8'd0 }
+            }
+            /* OpcodeJalr */
+            else if opc == 7'd103 { 8'd19 }
+            else { 8'd0 } >>
+
+        /* --- Decoded rs1 --- */
+        let o_rs1 = if *r_ex_valid == 1'b1 { 5'd0 }
+            else if opc == 7'd15 { 5'd0 }
+            else if opc == 7'd83 {
+                if f5 == 5'b00000 { 5'd0 }
+                else if f5 == 5'b00001 { 5'd0 }
+                else { *r_rs1 }
+            }
+            else { *r_rs1 } >>
+
+        /* --- Decoded rs2 --- */
+        let o_rs2 = if *r_ex_valid == 1'b1 { 5'd0 }
+            else if opc == 7'd15 { 5'd0 }
+            else if opc == 7'd83 {
+                if f5 == 5'b00000 { *r_rs1 }
+                else if f5 == 5'b00001 { *r_rs1 }
+                else if f5 == 5'b11100 { *r_rs1 }
+                else if f5 == 5'b11110 { *r_rs1 }
+                else { *r_rs2 }
+            }
+            else if opc == 7'd67 { *r_rs2 }
+            else if opc == 7'd71 { *r_rs2 }
+            else if opc == 7'd75 { *r_rs2 }
+            else if opc == 7'd79 { *r_rs2 }
+            else { *r_rs2 } >>
+
+        /* --- Decoded rd --- */
+        let o_rd = if *r_ex_valid == 1'b1 { 5'd0 }
+            else if opc == 7'd15 { 5'd0 }
+            else if opc == 7'd35 { 5'd0 }
+            else if opc == 7'd39 { 5'd0 }
+            else if opc == 7'd99 { 5'd0 }
+            else { *r_rd } >>
+
+        /* --- use_pc --- */
+        let use_pc = if opc == 7'd23 { 1'b1 } else { 1'b0 } >>
+
+        /* --- use_zimm --- */
+        let use_zimm = if opc == 7'd115 {
+                if f3 == 3'b101 { 1'b1 }
+                else if f3 == 3'b110 { 1'b1 }
+                else if f3 == 3'b111 { 1'b1 }
+                else { 1'b0 }
+            } else { 1'b0 } >>
+
+        /* --- is_control_flow --- */
+        let is_ctrl = if *r_ex_valid == 1'b1 { 1'b0 }
+            else if opc == 7'd99 {
+                if f3 == 3'b010 { 1'b0 }
+                else if f3 == 3'b011 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd103 { 1'b1 }
+            else if opc == 7'd111 { 1'b1 }
+            else { 1'b0 } >>
+
+        /* --- imm_select (NOIMM=0, IIMM=1, SIMM=2, SBIMM=3, UIMM=4, JIMM=5, RS3=6) --- */
+        let imm_sel = if *r_ex_valid == 1'b1 { 4'd0 }
+            else if opc == 7'd115 {
+                if f3 == 3'b000 { 4'd0 } else { 4'd1 }
+            }
+            else if opc == 7'd19 { 4'd1 }
+            else if opc == 7'd27 { 4'd1 }
+            else if opc == 7'd3 { 4'd1 }
+            else if opc == 7'd7 { 4'd1 }
+            else if opc == 7'd35 { 4'd2 }
+            else if opc == 7'd39 { 4'd2 }
+            else if opc == 7'd99 { 4'd3 }
+            else if opc == 7'd23 { 4'd4 }
+            else if opc == 7'd55 { 4'd4 }
+            else if opc == 7'd111 { 4'd5 }
+            else if opc == 7'd103 { 4'd1 }
+            else if opc == 7'd67 { 4'd6 }
+            else if opc == 7'd71 { 4'd6 }
+            else if opc == 7'd75 { 4'd6 }
+            else if opc == 7'd79 { 4'd6 }
+            else if opc == 7'd83 {
+                if f5 == 5'b00000 { 4'd1 }
+                else if f5 == 5'b00001 { 4'd1 }
+                else if f5 == 5'b01000 { 4'd1 }
+                else if f5 == 5'b11000 { 4'd1 }
+                else if f5 == 5'b11010 { 4'd1 }
+                else { 4'd0 }
+            }
+            else { 4'd0 } >>
+
+        /* --- Result (immediate value) --- */
+        let result = if imm_sel == 4'd1 { *r_imm_i }
+            else if imm_sel == 4'd2 { *r_imm_s }
+            else if imm_sel == 4'd3 { *r_imm_sb }
+            else if imm_sel == 4'd4 { *r_imm_u }
+            else if imm_sel == 4'd5 { *r_imm_uj }
+            else if imm_sel == 4'd6 { <(*r_funct5)::logic[64]> }
+            else { 64'd0 } >>
+
+        let use_imm = if imm_sel == 4'd0 { 1'b0 }
+            else if imm_sel == 4'd6 { 1'b0 }
+            else { 1'b1 } >>
+
+        /* --- Illegal instruction --- */
+        let illegal_base = if *r_ex_valid == 1'b1 { 1'b0 }
+            else if opc == 7'd115 {
+                if f3 == 3'b000 {
+                    if im12 == 12'd0 { 1'b0 }
+                    else if im12 == 12'd1 { 1'b0 }
+                    else if im12 == 12'b000100000010 {
+                        if *r_priv == 2'b00 { 1'b1 }
+                        else if *r_priv == 2'b01 { *r_tsr }
+                        else { 1'b0 }
+                    }
+                    else if im12 == 12'b001100000010 {
+                        if *r_priv != 2'b11 { 1'b1 } else { 1'b0 }
+                    }
+                    else if im12 == 12'b011110110010 {
+                        if *r_debug_mode == 1'b0 { 1'b1 } else { 1'b0 }
+                    }
+                    else if im12 == 12'b000100000101 {
+                        if *r_priv == 2'b01 { *r_tw }
+                        else if *r_priv == 2'b00 { 1'b1 }
+                        else { 1'b0 }
+                    }
+                    else if f7 == 7'b0001001 {
+                        if *r_priv == 2'b01 { *r_tvm }
+                        else if *r_priv == 2'b00 { 1'b1 }
+                        else { 1'b0 }
+                    }
+                    else { 1'b1 }
+                }
+                else if f3 == 3'b100 { 1'b1 }
+                else { 1'b0 }
+            }
+            else if opc == 7'd15 {
+                if f3 == 3'b000 { 1'b0 }
+                else if f3 == 3'b001 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd51 {
+                if funct10 == 10'b0000000000 { 1'b0 }
+                else if funct10 == 10'b0100000000 { 1'b0 }
+                else if funct10 == 10'b0000000010 { 1'b0 }
+                else if funct10 == 10'b0000000011 { 1'b0 }
+                else if funct10 == 10'b0000000100 { 1'b0 }
+                else if funct10 == 10'b0000000110 { 1'b0 }
+                else if funct10 == 10'b0000000111 { 1'b0 }
+                else if funct10 == 10'b0000000001 { 1'b0 }
+                else if funct10 == 10'b0000000101 { 1'b0 }
+                else if funct10 == 10'b0100000101 { 1'b0 }
+                else if f7 == 7'b0000001 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd59 {
+                if funct10 == 10'b0000000000 { 1'b0 }
+                else if funct10 == 10'b0100000000 { 1'b0 }
+                else if funct10 == 10'b0000000001 { 1'b0 }
+                else if funct10 == 10'b0000000101 { 1'b0 }
+                else if funct10 == 10'b0100000101 { 1'b0 }
+                else if f7 == 7'b0000001 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd19 {
+                if f3 == 3'b001 {
+                    if i31_26 != 6'b000000 { 1'b1 } else { 1'b0 }
+                }
+                else if f3 == 3'b101 {
+                    if i31_26 == 6'b000000 { 1'b0 }
+                    else if i31_26 == 6'b010000 { 1'b0 }
+                    else { 1'b1 }
+                }
+                else { 1'b0 }
+            }
+            else if opc == 7'd27 {
+                if f3 == 3'b000 { 1'b0 }
+                else if f3 == 3'b001 {
+                    if f7 != 7'b0000000 { 1'b1 } else { 1'b0 }
+                }
+                else if f3 == 3'b101 {
+                    if f7 == 7'b0000000 { 1'b0 }
+                    else if f7 == 7'b0100000 { 1'b0 }
+                    else { 1'b1 }
+                }
+                else { 1'b1 }
+            }
+            else if opc == 7'd35 {
+                if f3 == 3'b000 { 1'b0 }
+                else if f3 == 3'b001 { 1'b0 }
+                else if f3 == 3'b010 { 1'b0 }
+                else if f3 == 3'b011 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd3 {
+                if f3 == 3'b000 { 1'b0 }
+                else if f3 == 3'b001 { 1'b0 }
+                else if f3 == 3'b010 { 1'b0 }
+                else if f3 == 3'b011 { 1'b0 }
+                else if f3 == 3'b100 { 1'b0 }
+                else if f3 == 3'b101 { 1'b0 }
+                else if f3 == 3'b110 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd39 {
+                if *r_fs == 2'b00 { 1'b1 }
+                else if f3 == 3'b010 { 1'b0 }
+                else if f3 == 3'b011 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd7 {
+                if *r_fs == 2'b00 { 1'b1 }
+                else if f3 == 3'b010 { 1'b0 }
+                else if f3 == 3'b011 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd67 {
+                if *r_fs == 2'b00 { 1'b1 }
+                else if fm == 2'b00 { 1'b0 }
+                else if fm == 2'b01 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd71 {
+                if *r_fs == 2'b00 { 1'b1 }
+                else if fm == 2'b00 { 1'b0 }
+                else if fm == 2'b01 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd75 {
+                if *r_fs == 2'b00 { 1'b1 }
+                else if fm == 2'b00 { 1'b0 }
+                else if fm == 2'b01 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd79 {
+                if *r_fs == 2'b00 { 1'b1 }
+                else if fm == 2'b00 { 1'b0 }
+                else if fm == 2'b01 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd83 {
+                if *r_fs == 2'b00 { 1'b1 }
+                else if fm == 2'b00 { 1'b0 }
+                else if fm == 2'b01 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd47 {
+                if f3 == 3'b010 { 1'b0 }
+                else if f3 == 3'b011 { 1'b0 }
+                else { 1'b1 }
+            }
+            else if opc == 7'd99 {
+                if f3 == 3'b010 { 1'b1 }
+                else if f3 == 3'b011 { 1'b1 }
+                else { 1'b0 }
+            }
+            else if opc == 7'd103 {
+                if f3 != 3'b000 { 1'b1 } else { 1'b0 }
+            }
+            else if opc == 7'd111 { 1'b0 }
+            else if opc == 7'd23 { 1'b0 }
+            else if opc == 7'd55 { 1'b0 }
+            else { 1'b1 } >>
+
+        /* System special: rs1/rd must be 0 */
+        let sys_nz = if opc == 7'd115 {
+                if f3 == 3'b000 {
+                    if *r_rs1 != 5'd0 { 1'b1 }
+                    else if *r_rd != 5'd0 { 1'b1 }
+                    else { 1'b0 }
+                } else { 1'b0 }
+            } else { 1'b0 } >>
+
+        let illegal_final = illegal_base | sys_nz | *r_is_illegal >>
+
+        /* ECALL / EBREAK */
+        let ecall = if *r_ex_valid == 1'b0 {
+                if opc == 7'd115 {
+                    if f3 == 3'b000 {
+                        if im12 == 12'd0 { 1'b1 } else { 1'b0 }
+                    } else { 1'b0 }
+                } else { 1'b0 }
+            } else { 1'b0 } >>
+
+        let ebreak = if *r_ex_valid == 1'b0 {
+                if opc == 7'd115 {
+                    if f3 == 3'b000 {
+                        if im12 == 12'd1 { 1'b1 } else { 1'b0 }
+                    } else { 1'b0 }
+                } else { 1'b0 }
+            } else { 1'b0 } >>
+
+        /* Exception valid */
+        let exc_valid = if *r_ex_valid == 1'b1 { 1'b1 }
+            else if illegal_final == 1'b1 { 1'b1 }
+            else if ecall == 1'b1 { 1'b1 }
+            else if ebreak == 1'b1 { 1'b1 }
+            else { 1'b0 } >>
+
+        /* Exception cause */
+        let ecall_cause = if *r_priv == 2'b01 { 64'd9 }
+            else if *r_priv == 2'b00 { 64'd8 }
+            else { 64'd11 } >>
+
+        let exc_cause = if *r_ex_valid == 1'b1 { *r_ex_cause }
+            else if illegal_final == 1'b1 { 64'd2 }
+            else if ecall == 1'b1 { ecall_cause }
+            else if ebreak == 1'b1 { 64'd3 }
+            else { 64'd0 } >>
+
+        let exc_tval = if *r_ex_valid == 1'b1 { *r_ex_tval }
+            else if ebreak == 1'b1 { *r_pc }
+            else { *r_tval_instr } >>
+
+        /* Debug request override */
+        let dbg_req = *r_debug_req & ~(*r_debug_mode) >>
+        let dbg_trig = *r_debug_trigger & ~(*r_debug_mode) >>
+
+        /* Interrupt cause (priority: M_EXT > M_SW > M_TIMER > S_EXT > S_SW > S_TIMER) */
+        let ic0 = 64'd0 >>
+        let ic1 = if (*r_irq_mie[5] & *r_irq_mip[5]) == 1'b1 { 64'h8000000000000005 } else { ic0 } >>
+        let ic2 = if (*r_irq_mie[1] & *r_irq_mip[1]) == 1'b1 { 64'h8000000000000001 } else { ic1 } >>
+        let ic3 = if (*r_irq_mie[9] & (*r_irq_mip[9] | *r_irq_ext_s)) == 1'b1 { 64'h8000000000000009 } else { ic2 } >>
+        let ic4 = if (*r_irq_mip[7] & *r_irq_mie[7]) == 1'b1 { 64'h8000000000000007 } else { ic3 } >>
+        let ic5 = if (*r_irq_mip[3] & *r_irq_mie[3]) == 1'b1 { 64'h8000000000000003 } else { ic4 } >>
+        let irq_cause = if (*r_irq_mip[11] & *r_irq_mie[11]) == 1'b1 { 64'h800000000000000b } else { ic5 } >>
+
+        let has_irq = irq_cause[63] & *r_irq_global >>
+        let irq_deleg = if has_irq == 1'b1 { *r_irq_mideleg[<(irq_cause)::logic[6]>] } else { 1'b0 } >>
+        let irq_take = if has_irq == 1'b1 {
+                if irq_deleg == 1'b1 {
+                    if *r_irq_sie == 1'b1 {
+                        if *r_priv == 2'b01 { 1'b1 } else { 1'b0 }
+                    } else if *r_priv == 2'b00 { 1'b1 }
+                    else { 1'b0 }
+                } else { 1'b1 }
+            } else { 1'b0 } >>
+
+        /* Final exception output with debug and interrupt override */
+        let out_ex_valid = if *r_ex_valid == 1'b1 { 1'b1 }
+            else if dbg_req == 1'b1 { 1'b1 }
+            else if dbg_trig == 1'b1 { 1'b1 }
+            else if irq_take == 1'b1 { 1'b1 }
+            else { exc_valid } >>
+
+        let debug_cause = 64'h8000000000000018 >>
+
+        let out_ex_cause = if *r_ex_valid == 1'b1 { *r_ex_cause }
+            else if dbg_req == 1'b1 { debug_cause }
+            else if dbg_trig == 1'b1 { debug_cause }
+            else if irq_take == 1'b1 { irq_cause }
+            else { exc_cause } >>
+
+        let out_ex_tval = if *r_ex_valid == 1'b1 { *r_ex_tval }
+            else { exc_tval } >>
+
+        /* Send all outputs */
+        send out.o_pc (*r_pc) >>
+        send out.o_fu (fu) >>
+        send out.o_op (op) >>
+        send out.o_rs1 (o_rs1) >>
+        send out.o_rs2 (o_rs2) >>
+        send out.o_rd (o_rd) >>
+        send out.o_result (result) >>
+        send out.o_use_imm (use_imm) >>
+        send out.o_use_pc (use_pc) >>
+        send out.o_use_zimm (use_zimm) >>
+        send out.o_is_compressed (*r_is_compressed) >>
+        send out.o_is_macro (*r_is_macro) >>
+        send out.o_is_last_macro (*r_is_last_macro) >>
+        send out.o_is_double_rd (*r_is_dbl_rd) >>
+        send out.o_bp_valid (*r_bp_valid) >>
+        send out.o_bp_taken (*r_bp_taken) >>
+        send out.o_bp_addr (*r_bp_addr) >>
+        send out.o_ex_valid (out_ex_valid) >>
+        send out.o_ex_cause (out_ex_cause) >>
+        send out.o_ex_tval (out_ex_tval) >>
+        send out.o_vfp (1'b0) >>
+        send out.o_orig_instr (*r_tval_instr) >>
+        send out.o_is_ctrl_flow (is_ctrl) >>
+        cycle 1
+    }
+}
