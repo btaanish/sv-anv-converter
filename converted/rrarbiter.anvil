@@ -1,0 +1,93 @@
+/* Hand-written Anvil for rrarbiter.sv (deprecated)
+   Fair round-robin arbiter with lock feature.
+   Wraps rr_arb_tree internally — modeled here as opaque arbiter state.
+   Concrete params: NUM_REQ=4, LOCK_IN=0.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~55
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] NUM_REQ hardcoded to 4
+       - [MANUAL-CLEANUP-NEEDED] rr_arb_tree sub-module modeled as opaque round-robin logic
+       - [MANUAL-CLEANUP-NEEDED] LOCK_IN=0 path only
+*/
+
+// [MANUAL] Channel for arbiter inputs
+chan rrarb_in_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left en : (logic@#1) @dyn - @dyn,
+    left req : (logic[4]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for arbiter outputs
+chan rrarb_out_ch {
+    left ack : (logic[4]@#1) @dyn - @dyn,
+    left vld : (logic@#1) @dyn - @dyn,
+    left idx : (logic[2]@#1) @dyn - @dyn
+}
+
+proc rrarbiter(
+    inp : left rrarb_in_ch,    // [MANUAL] flush, en, req inputs
+    out : right rrarb_out_ch   // [MANUAL] ack, vld, idx outputs
+) {
+    // [MANUAL] Round-robin priority pointer
+    reg rr_ptr : logic[2];
+
+    // [MANUAL] Input staging
+    reg r_flush : logic;
+    reg r_en : logic;
+    reg r_req : logic[4];
+
+    // [MANUAL] Snapshot
+    reg snap_ptr : logic[2];
+
+    loop {
+        // [MANUAL] Snapshot state
+        set snap_ptr := *rr_ptr >>
+
+        // [MANUAL] Receive inputs
+        let f = recv inp.flush >>
+        set r_flush := f >>
+        let e = recv inp.en >>
+        set r_en := e >>
+        let r = recv inp.req >>
+        set r_req := r >>
+
+        // [MANUAL] Compute valid: any request & enabled
+        let any_req = (*r_req & 4'b0001) | ((*r_req >> 4'd1) & 4'b0001) |
+                      ((*r_req >> 4'd2) & 4'b0001) | ((*r_req >> 4'd3) & 4'b0001) >>
+        let vld_out = <(any_req)::logic> & *r_en >>
+
+        // [MANUAL-CLEANUP-NEEDED] Round-robin selection modeled as priority from rr_ptr
+        // Simplified: grant to lowest-indexed requesting port (priority arbiter approximation)
+        let grant = if (*r_req & 4'b0001) == 4'b0001 { 4'b0001 }
+                    else if (*r_req & 4'b0010) == 4'b0010 { 4'b0010 }
+                    else if (*r_req & 4'b0100) == 4'b0100 { 4'b0100 }
+                    else if (*r_req & 4'b1000) == 4'b1000 { 4'b1000 }
+                    else { 4'b0000 } >>
+
+        // [MANUAL] Mask grant with enable
+        let ack_out = if *r_en == 1'b1 { grant } else { 4'b0000 } >>
+
+        // [MANUAL] Compute index from grant
+        let idx_out = if grant == 4'b0001 { 2'd0 }
+                      else if grant == 4'b0010 { 2'd1 }
+                      else if grant == 4'b0100 { 2'd2 }
+                      else { 2'd3 } >>
+
+        // [MANUAL] Send outputs
+        send out.ack (ack_out);
+        send out.vld (vld_out);
+        send out.idx (idx_out) >>
+
+        // [MANUAL] Update round-robin pointer
+        if *r_flush == 1'b1 {
+            set rr_ptr := 2'd0
+        } else if vld_out == 1'b1 {
+            // [MANUAL] Advance pointer past granted port
+            set rr_ptr := <(idx_out + 2'd1)::logic[2]>
+        } else {
+            cycle 1
+        }
+    }
+}
