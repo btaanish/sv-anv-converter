@@ -1,0 +1,301 @@
+/* Hand-written Anvil for axi_intf.sv
+   AXI4 and AXI4-Lite interface definitions as Anvil chan classes.
+
+   Models the following SV interfaces as chan class definitions:
+     1. AXI_BUS — full AXI4 with 5 channels (AW, W, B, AR, R)
+     2. AXI_LITE — simplified AXI4-Lite with 5 channels
+
+   Concrete params:
+     AXI_ADDR_WIDTH=64, AXI_DATA_WIDTH=64, AXI_ID_WIDTH=4, AXI_USER_WIDTH=1.
+     AXI_STRB_WIDTH=8.
+
+   AXI package type widths:
+     len_t=8, size_t=3, burst_t=2, cache_t=4, prot_t=3,
+     qos_t=4, region_t=4, atop_t=6, resp_t=2.
+
+   The DV, ASYNC, and ASYNC_GRAY variants are verification/CDC constructs
+   that don't have direct behavioral equivalents; they are omitted.
+
+   A simple loopback proc demonstrates usage.
+*/
+
+// ============================================================================
+// AXI4 Full Interface — Master-side request channels
+// ============================================================================
+
+// AW channel (Write Address) — Master drives, Slave consumes
+chan axi_aw_ch {
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_size   : (logic[3]@#1)  @dyn - @dyn,
+    left aw_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left aw_lock   : (logic@#1)     @dyn - @dyn,
+    left aw_cache  : (logic[4]@#1)  @dyn - @dyn,
+    left aw_prot   : (logic[3]@#1)  @dyn - @dyn,
+    left aw_qos    : (logic[4]@#1)  @dyn - @dyn,
+    left aw_region : (logic[4]@#1)  @dyn - @dyn,
+    left aw_atop   : (logic[6]@#1)  @dyn - @dyn,
+    left aw_user   : (logic@#1)     @dyn - @dyn,
+    left aw_valid  : (logic@#1)     @dyn - @dyn
+}
+
+// AW ready — Slave drives
+chan axi_aw_ready_ch {
+    left aw_ready : (logic@#1) @dyn - @dyn
+}
+
+// W channel (Write Data) — Master drives
+chan axi_w_ch {
+    left w_data  : (logic[64]@#1) @dyn - @dyn,
+    left w_strb  : (logic[8]@#1)  @dyn - @dyn,
+    left w_last  : (logic@#1)     @dyn - @dyn,
+    left w_user  : (logic@#1)     @dyn - @dyn,
+    left w_valid : (logic@#1)     @dyn - @dyn
+}
+
+// W ready — Slave drives
+chan axi_w_ready_ch {
+    left w_ready : (logic@#1) @dyn - @dyn
+}
+
+// B channel (Write Response) — Slave drives
+chan axi_b_ch {
+    left b_id    : (logic[4]@#1) @dyn - @dyn,
+    left b_resp  : (logic[2]@#1) @dyn - @dyn,
+    left b_user  : (logic@#1)    @dyn - @dyn,
+    left b_valid : (logic@#1)    @dyn - @dyn
+}
+
+// B ready — Master drives
+chan axi_b_ready_ch {
+    left b_ready : (logic@#1) @dyn - @dyn
+}
+
+// AR channel (Read Address) — Master drives
+chan axi_ar_ch {
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left ar_size   : (logic[3]@#1)  @dyn - @dyn,
+    left ar_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left ar_lock   : (logic@#1)     @dyn - @dyn,
+    left ar_cache  : (logic[4]@#1)  @dyn - @dyn,
+    left ar_prot   : (logic[3]@#1)  @dyn - @dyn,
+    left ar_qos    : (logic[4]@#1)  @dyn - @dyn,
+    left ar_region : (logic[4]@#1)  @dyn - @dyn,
+    left ar_user   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn
+}
+
+// AR ready — Slave drives
+chan axi_ar_ready_ch {
+    left ar_ready : (logic@#1) @dyn - @dyn
+}
+
+// R channel (Read Data) — Slave drives
+chan axi_r_ch {
+    left r_id    : (logic[4]@#1)  @dyn - @dyn,
+    left r_data  : (logic[64]@#1) @dyn - @dyn,
+    left r_resp  : (logic[2]@#1)  @dyn - @dyn,
+    left r_last  : (logic@#1)     @dyn - @dyn,
+    left r_user  : (logic@#1)     @dyn - @dyn,
+    left r_valid : (logic@#1)     @dyn - @dyn
+}
+
+// R ready — Master drives
+chan axi_r_ready_ch {
+    left r_ready : (logic@#1) @dyn - @dyn
+}
+
+// ============================================================================
+// AXI4-Lite Interface
+// ============================================================================
+
+// AXI-Lite AW channel — simplified (no ID, len, size, burst, lock, qos, region, atop, user)
+chan axi_lite_aw_ch {
+    left aw_addr  : (logic[64]@#1) @dyn - @dyn,
+    left aw_prot  : (logic[3]@#1)  @dyn - @dyn,
+    left aw_valid : (logic@#1)     @dyn - @dyn
+}
+
+// AXI-Lite AW ready
+chan axi_lite_aw_ready_ch {
+    left aw_ready : (logic@#1) @dyn - @dyn
+}
+
+// AXI-Lite W channel — no user signal
+chan axi_lite_w_ch {
+    left w_data  : (logic[64]@#1) @dyn - @dyn,
+    left w_strb  : (logic[8]@#1)  @dyn - @dyn,
+    left w_valid : (logic@#1)     @dyn - @dyn
+}
+
+// AXI-Lite W ready
+chan axi_lite_w_ready_ch {
+    left w_ready : (logic@#1) @dyn - @dyn
+}
+
+// AXI-Lite B channel — no ID, user
+chan axi_lite_b_ch {
+    left b_resp  : (logic[2]@#1) @dyn - @dyn,
+    left b_valid : (logic@#1)    @dyn - @dyn
+}
+
+// AXI-Lite B ready
+chan axi_lite_b_ready_ch {
+    left b_ready : (logic@#1) @dyn - @dyn
+}
+
+// AXI-Lite AR channel — simplified
+chan axi_lite_ar_ch {
+    left ar_addr  : (logic[64]@#1) @dyn - @dyn,
+    left ar_prot  : (logic[3]@#1)  @dyn - @dyn,
+    left ar_valid : (logic@#1)     @dyn - @dyn
+}
+
+// AXI-Lite AR ready
+chan axi_lite_ar_ready_ch {
+    left ar_ready : (logic@#1) @dyn - @dyn
+}
+
+// AXI-Lite R channel — no ID, last, user
+chan axi_lite_r_ch {
+    left r_data  : (logic[64]@#1) @dyn - @dyn,
+    left r_resp  : (logic[2]@#1)  @dyn - @dyn,
+    left r_valid : (logic@#1)     @dyn - @dyn
+}
+
+// AXI-Lite R ready
+chan axi_lite_r_ready_ch {
+    left r_ready : (logic@#1) @dyn - @dyn
+}
+
+// ============================================================================
+// Simple loopback proc to demonstrate AXI channel usage
+// ============================================================================
+
+proc axi_intf_loopback(
+    aw_in     : left axi_aw_ch,
+    aw_rdy    : right axi_aw_ready_ch,
+    w_in      : left axi_w_ch,
+    w_rdy     : right axi_w_ready_ch,
+    b_out     : right axi_b_ch,
+    b_rdy_in  : left axi_b_ready_ch,
+    ar_in     : left axi_ar_ch,
+    ar_rdy    : right axi_ar_ready_ch,
+    r_out     : right axi_r_ch,
+    r_rdy_in  : left axi_r_ready_ch
+) {
+    // Staging for AW
+    reg r_aw_id    : logic[4];
+    reg r_aw_valid : logic;
+    // Staging for W
+    reg r_w_valid  : logic;
+    reg r_w_last   : logic;
+    // Staging for AR
+    reg r_ar_id    : logic[4];
+    reg r_ar_valid : logic;
+    // Staging for ready inputs
+    reg r_b_ready  : logic;
+    reg r_r_ready  : logic;
+
+    // Output staging
+    reg o_aw_ready : logic;
+    reg o_w_ready  : logic;
+    reg o_b_id     : logic[4];
+    reg o_b_resp   : logic[2];
+    reg o_b_user   : logic;
+    reg o_b_valid  : logic;
+    reg o_ar_ready : logic;
+    reg o_r_id     : logic[4];
+    reg o_r_data   : logic[64];
+    reg o_r_resp   : logic[2];
+    reg o_r_last   : logic;
+    reg o_r_user   : logic;
+    reg o_r_valid  : logic;
+
+    // Recv AW
+    loop { let v = recv aw_in.aw_id >> set r_aw_id := v >> cycle 1 }
+    loop { let v = recv aw_in.aw_addr >> cycle 1 }
+    loop { let v = recv aw_in.aw_len >> cycle 1 }
+    loop { let v = recv aw_in.aw_size >> cycle 1 }
+    loop { let v = recv aw_in.aw_burst >> cycle 1 }
+    loop { let v = recv aw_in.aw_lock >> cycle 1 }
+    loop { let v = recv aw_in.aw_cache >> cycle 1 }
+    loop { let v = recv aw_in.aw_prot >> cycle 1 }
+    loop { let v = recv aw_in.aw_qos >> cycle 1 }
+    loop { let v = recv aw_in.aw_region >> cycle 1 }
+    loop { let v = recv aw_in.aw_atop >> cycle 1 }
+    loop { let v = recv aw_in.aw_user >> cycle 1 }
+    loop { let v = recv aw_in.aw_valid >> set r_aw_valid := v >> cycle 1 }
+
+    // Recv W
+    loop { let v = recv w_in.w_data >> cycle 1 }
+    loop { let v = recv w_in.w_strb >> cycle 1 }
+    loop { let v = recv w_in.w_last >> set r_w_last := v >> cycle 1 }
+    loop { let v = recv w_in.w_user >> cycle 1 }
+    loop { let v = recv w_in.w_valid >> set r_w_valid := v >> cycle 1 }
+
+    // Recv AR
+    loop { let v = recv ar_in.ar_id >> set r_ar_id := v >> cycle 1 }
+    loop { let v = recv ar_in.ar_addr >> cycle 1 }
+    loop { let v = recv ar_in.ar_len >> cycle 1 }
+    loop { let v = recv ar_in.ar_size >> cycle 1 }
+    loop { let v = recv ar_in.ar_burst >> cycle 1 }
+    loop { let v = recv ar_in.ar_lock >> cycle 1 }
+    loop { let v = recv ar_in.ar_cache >> cycle 1 }
+    loop { let v = recv ar_in.ar_prot >> cycle 1 }
+    loop { let v = recv ar_in.ar_qos >> cycle 1 }
+    loop { let v = recv ar_in.ar_region >> cycle 1 }
+    loop { let v = recv ar_in.ar_user >> cycle 1 }
+    loop { let v = recv ar_in.ar_valid >> set r_ar_valid := v >> cycle 1 }
+
+    // Recv ready signals
+    loop { let v = recv b_rdy_in.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv r_rdy_in.r_ready >> set r_r_ready := v >> cycle 1 }
+
+    // Send outputs
+    loop { send aw_rdy.aw_ready (*o_aw_ready) >> cycle 1 }
+    loop { send w_rdy.w_ready (*o_w_ready) >> cycle 1 }
+    loop { send b_out.b_id (*o_b_id) >> cycle 1 }
+    loop { send b_out.b_resp (*o_b_resp) >> cycle 1 }
+    loop { send b_out.b_user (*o_b_user) >> cycle 1 }
+    loop { send b_out.b_valid (*o_b_valid) >> cycle 1 }
+    loop { send ar_rdy.ar_ready (*o_ar_ready) >> cycle 1 }
+    loop { send r_out.r_id (*o_r_id) >> cycle 1 }
+    loop { send r_out.r_data (*o_r_data) >> cycle 1 }
+    loop { send r_out.r_resp (*o_r_resp) >> cycle 1 }
+    loop { send r_out.r_last (*o_r_last) >> cycle 1 }
+    loop { send r_out.r_user (*o_r_user) >> cycle 1 }
+    loop { send r_out.r_valid (*o_r_valid) >> cycle 1 }
+
+    // Simple loopback: always ready, echo ID on responses
+    loop {
+        set o_aw_ready := 1'b1 >>
+        set o_w_ready := 1'b1 >>
+        set o_ar_ready := 1'b1 >>
+        // B channel: respond when aw_valid and w_valid and w_last
+        if (*r_aw_valid == 1'b1 && *r_w_valid == 1'b1 && *r_w_last == 1'b1) {
+            set o_b_valid := 1'b1 >>
+            set o_b_id := *r_aw_id >>
+            set o_b_resp := 2'b00 >>
+            set o_b_user := 1'b0
+        } else {
+            set o_b_valid := 1'b0 >>
+            cycle 1
+        } >>
+        // R channel: respond when ar_valid
+        if (*r_ar_valid == 1'b1) {
+            set o_r_valid := 1'b1 >>
+            set o_r_id := *r_ar_id >>
+            set o_r_data := 64'd0 >>
+            set o_r_resp := 2'b00 >>
+            set o_r_last := 1'b1 >>
+            set o_r_user := 1'b0
+        } else {
+            set o_r_valid := 1'b0 >>
+            cycle 1
+        }
+    }
+}

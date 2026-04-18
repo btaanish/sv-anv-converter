@@ -1,0 +1,301 @@
+/* Hand-written Anvil for axi_lite_to_axi.sv
+   AXI4-Lite to full AXI4 adapter. Purely combinational pass-through that
+   adds default AXI4 fields (id=0, len=0, size=3, burst=FIXED, etc.) to
+   the simplified AXI-Lite request.
+
+   Concrete params:
+     AxiDataWidth=64, AxiSize=3 ($clog2(64/8)=3).
+     AXI_ADDR_WIDTH=64, AXI_DATA_WIDTH=64, AXI_ID_WIDTH=4, AXI_USER_WIDTH=1.
+     AXI_STRB_WIDTH=8.
+
+   Also models the interface wrapper axi_lite_to_axi_intf.
+   slv_aw_cache_i and slv_ar_cache_i are extra cache-hint inputs.
+*/
+
+// AXI-Lite slave request
+chan lite2axi_slv_req_ch {
+    left aw_addr  : (logic[64]@#1) @dyn - @dyn,
+    left aw_prot  : (logic[3]@#1)  @dyn - @dyn,
+    left aw_valid : (logic@#1)     @dyn - @dyn,
+    left w_data   : (logic[64]@#1) @dyn - @dyn,
+    left w_strb   : (logic[8]@#1)  @dyn - @dyn,
+    left w_valid  : (logic@#1)     @dyn - @dyn,
+    left b_ready  : (logic@#1)     @dyn - @dyn,
+    left ar_addr  : (logic[64]@#1) @dyn - @dyn,
+    left ar_prot  : (logic[3]@#1)  @dyn - @dyn,
+    left ar_valid : (logic@#1)     @dyn - @dyn,
+    left r_ready  : (logic@#1)     @dyn - @dyn
+}
+
+// Cache hint inputs
+chan lite2axi_cache_ch {
+    left aw_cache : (logic[4]@#1) @dyn - @dyn,
+    left ar_cache : (logic[4]@#1) @dyn - @dyn
+}
+
+// Full AXI master request output
+chan lite2axi_mst_req_ch {
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_size   : (logic[3]@#1)  @dyn - @dyn,
+    left aw_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left aw_lock   : (logic@#1)     @dyn - @dyn,
+    left aw_cache  : (logic[4]@#1)  @dyn - @dyn,
+    left aw_prot   : (logic[3]@#1)  @dyn - @dyn,
+    left aw_qos    : (logic[4]@#1)  @dyn - @dyn,
+    left aw_region : (logic[4]@#1)  @dyn - @dyn,
+    left aw_atop   : (logic[6]@#1)  @dyn - @dyn,
+    left aw_user   : (logic@#1)     @dyn - @dyn,
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left w_user    : (logic@#1)     @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left ar_size   : (logic[3]@#1)  @dyn - @dyn,
+    left ar_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left ar_lock   : (logic@#1)     @dyn - @dyn,
+    left ar_cache  : (logic[4]@#1)  @dyn - @dyn,
+    left ar_prot   : (logic[3]@#1)  @dyn - @dyn,
+    left ar_qos    : (logic[4]@#1)  @dyn - @dyn,
+    left ar_region : (logic[4]@#1)  @dyn - @dyn,
+    left ar_user   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Full AXI master response input
+chan lite2axi_mst_resp_ch {
+    left aw_ready : (logic@#1)     @dyn - @dyn,
+    left w_ready  : (logic@#1)     @dyn - @dyn,
+    left b_id     : (logic[4]@#1)  @dyn - @dyn,
+    left b_resp   : (logic[2]@#1)  @dyn - @dyn,
+    left b_user   : (logic@#1)     @dyn - @dyn,
+    left b_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_ready : (logic@#1)     @dyn - @dyn,
+    left r_id     : (logic[4]@#1)  @dyn - @dyn,
+    left r_data   : (logic[64]@#1) @dyn - @dyn,
+    left r_resp   : (logic[2]@#1)  @dyn - @dyn,
+    left r_last   : (logic@#1)     @dyn - @dyn,
+    left r_user   : (logic@#1)     @dyn - @dyn,
+    left r_valid  : (logic@#1)     @dyn - @dyn
+}
+
+// AXI-Lite slave response output
+chan lite2axi_slv_resp_ch {
+    left aw_ready : (logic@#1)     @dyn - @dyn,
+    left w_ready  : (logic@#1)     @dyn - @dyn,
+    left b_resp   : (logic[2]@#1)  @dyn - @dyn,
+    left b_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_ready : (logic@#1)     @dyn - @dyn,
+    left r_data   : (logic[64]@#1) @dyn - @dyn,
+    left r_resp   : (logic[2]@#1)  @dyn - @dyn,
+    left r_valid  : (logic@#1)     @dyn - @dyn
+}
+
+proc axi_lite_to_axi(
+    slv_req   : left lite2axi_slv_req_ch,
+    cache_in  : left lite2axi_cache_ch,
+    mst_req   : right lite2axi_mst_req_ch,
+    mst_resp  : left lite2axi_mst_resp_ch,
+    slv_resp  : right lite2axi_slv_resp_ch
+) {
+    // Input staging — Lite request
+    reg r_aw_addr  : logic[64];
+    reg r_aw_prot  : logic[3];
+    reg r_aw_valid : logic;
+    reg r_w_data   : logic[64];
+    reg r_w_strb   : logic[8];
+    reg r_w_valid  : logic;
+    reg r_b_ready  : logic;
+    reg r_ar_addr  : logic[64];
+    reg r_ar_prot  : logic[3];
+    reg r_ar_valid : logic;
+    reg r_r_ready  : logic;
+    // Cache hints
+    reg r_aw_cache : logic[4];
+    reg r_ar_cache : logic[4];
+    // Response from master
+    reg r_mst_aw_ready : logic;
+    reg r_mst_w_ready  : logic;
+    reg r_mst_b_resp   : logic[2];
+    reg r_mst_b_valid  : logic;
+    reg r_mst_ar_ready : logic;
+    reg r_mst_r_data   : logic[64];
+    reg r_mst_r_resp   : logic[2];
+    reg r_mst_r_valid  : logic;
+
+    // Output staging — Full AXI request
+    reg o_aw_id     : logic[4];
+    reg o_aw_addr   : logic[64];
+    reg o_aw_len    : logic[8];
+    reg o_aw_size   : logic[3];
+    reg o_aw_burst  : logic[2];
+    reg o_aw_lock   : logic;
+    reg o_aw_cache  : logic[4];
+    reg o_aw_prot   : logic[3];
+    reg o_aw_qos    : logic[4];
+    reg o_aw_region : logic[4];
+    reg o_aw_atop   : logic[6];
+    reg o_aw_user   : logic;
+    reg o_aw_valid  : logic;
+    reg o_w_data    : logic[64];
+    reg o_w_strb    : logic[8];
+    reg o_w_last    : logic;
+    reg o_w_user    : logic;
+    reg o_w_valid   : logic;
+    reg o_b_ready   : logic;
+    reg o_ar_id     : logic[4];
+    reg o_ar_addr   : logic[64];
+    reg o_ar_len    : logic[8];
+    reg o_ar_size   : logic[3];
+    reg o_ar_burst  : logic[2];
+    reg o_ar_lock   : logic;
+    reg o_ar_cache  : logic[4];
+    reg o_ar_prot   : logic[3];
+    reg o_ar_qos    : logic[4];
+    reg o_ar_region : logic[4];
+    reg o_ar_user   : logic;
+    reg o_ar_valid  : logic;
+    reg o_r_ready   : logic;
+    // Lite response
+    reg o_slv_aw_ready : logic;
+    reg o_slv_w_ready  : logic;
+    reg o_slv_b_resp   : logic[2];
+    reg o_slv_b_valid  : logic;
+    reg o_slv_ar_ready : logic;
+    reg o_slv_r_data   : logic[64];
+    reg o_slv_r_resp   : logic[2];
+    reg o_slv_r_valid  : logic;
+
+    // Recv Lite request inputs
+    loop { let v = recv slv_req.aw_addr >> set r_aw_addr := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_prot >> set r_aw_prot := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_valid >> set r_aw_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.w_data >> set r_w_data := v >> cycle 1 }
+    loop { let v = recv slv_req.w_strb >> set r_w_strb := v >> cycle 1 }
+    loop { let v = recv slv_req.w_valid >> set r_w_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_addr >> set r_ar_addr := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_prot >> set r_ar_prot := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_valid >> set r_ar_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.r_ready >> set r_r_ready := v >> cycle 1 }
+    // Cache hints
+    loop { let v = recv cache_in.aw_cache >> set r_aw_cache := v >> cycle 1 }
+    loop { let v = recv cache_in.ar_cache >> set r_ar_cache := v >> cycle 1 }
+    // Recv master response
+    loop { let v = recv mst_resp.aw_ready >> set r_mst_aw_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.w_ready >> set r_mst_w_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_id >> cycle 1 }
+    loop { let v = recv mst_resp.b_resp >> set r_mst_b_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_user >> cycle 1 }
+    loop { let v = recv mst_resp.b_valid >> set r_mst_b_valid := v >> cycle 1 }
+    loop { let v = recv mst_resp.ar_ready >> set r_mst_ar_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_id >> cycle 1 }
+    loop { let v = recv mst_resp.r_data >> set r_mst_r_data := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_resp >> set r_mst_r_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_last >> cycle 1 }
+    loop { let v = recv mst_resp.r_user >> cycle 1 }
+    loop { let v = recv mst_resp.r_valid >> set r_mst_r_valid := v >> cycle 1 }
+
+    // Send full AXI master request
+    loop { send mst_req.aw_id (*o_aw_id) >> cycle 1 }
+    loop { send mst_req.aw_addr (*o_aw_addr) >> cycle 1 }
+    loop { send mst_req.aw_len (*o_aw_len) >> cycle 1 }
+    loop { send mst_req.aw_size (*o_aw_size) >> cycle 1 }
+    loop { send mst_req.aw_burst (*o_aw_burst) >> cycle 1 }
+    loop { send mst_req.aw_lock (*o_aw_lock) >> cycle 1 }
+    loop { send mst_req.aw_cache (*o_aw_cache) >> cycle 1 }
+    loop { send mst_req.aw_prot (*o_aw_prot) >> cycle 1 }
+    loop { send mst_req.aw_qos (*o_aw_qos) >> cycle 1 }
+    loop { send mst_req.aw_region (*o_aw_region) >> cycle 1 }
+    loop { send mst_req.aw_atop (*o_aw_atop) >> cycle 1 }
+    loop { send mst_req.aw_user (*o_aw_user) >> cycle 1 }
+    loop { send mst_req.aw_valid (*o_aw_valid) >> cycle 1 }
+    loop { send mst_req.w_data (*o_w_data) >> cycle 1 }
+    loop { send mst_req.w_strb (*o_w_strb) >> cycle 1 }
+    loop { send mst_req.w_last (*o_w_last) >> cycle 1 }
+    loop { send mst_req.w_user (*o_w_user) >> cycle 1 }
+    loop { send mst_req.w_valid (*o_w_valid) >> cycle 1 }
+    loop { send mst_req.b_ready (*o_b_ready) >> cycle 1 }
+    loop { send mst_req.ar_id (*o_ar_id) >> cycle 1 }
+    loop { send mst_req.ar_addr (*o_ar_addr) >> cycle 1 }
+    loop { send mst_req.ar_len (*o_ar_len) >> cycle 1 }
+    loop { send mst_req.ar_size (*o_ar_size) >> cycle 1 }
+    loop { send mst_req.ar_burst (*o_ar_burst) >> cycle 1 }
+    loop { send mst_req.ar_lock (*o_ar_lock) >> cycle 1 }
+    loop { send mst_req.ar_cache (*o_ar_cache) >> cycle 1 }
+    loop { send mst_req.ar_prot (*o_ar_prot) >> cycle 1 }
+    loop { send mst_req.ar_qos (*o_ar_qos) >> cycle 1 }
+    loop { send mst_req.ar_region (*o_ar_region) >> cycle 1 }
+    loop { send mst_req.ar_user (*o_ar_user) >> cycle 1 }
+    loop { send mst_req.ar_valid (*o_ar_valid) >> cycle 1 }
+    loop { send mst_req.r_ready (*o_r_ready) >> cycle 1 }
+    // Send Lite slave response
+    loop { send slv_resp.aw_ready (*o_slv_aw_ready) >> cycle 1 }
+    loop { send slv_resp.w_ready (*o_slv_w_ready) >> cycle 1 }
+    loop { send slv_resp.b_resp (*o_slv_b_resp) >> cycle 1 }
+    loop { send slv_resp.b_valid (*o_slv_b_valid) >> cycle 1 }
+    loop { send slv_resp.ar_ready (*o_slv_ar_ready) >> cycle 1 }
+    loop { send slv_resp.r_data (*o_slv_r_data) >> cycle 1 }
+    loop { send slv_resp.r_resp (*o_slv_r_resp) >> cycle 1 }
+    loop { send slv_resp.r_valid (*o_slv_r_valid) >> cycle 1 }
+
+    // Combinational mapping: Lite request -> Full AXI request with defaults
+    loop {
+        // AW: pass addr/prot from Lite, default id=0, len=0, size=3(8B), burst=FIXED(0)
+        set o_aw_id := 4'd0 >>
+        set o_aw_addr := *r_aw_addr >>
+        set o_aw_len := 8'd0 >>
+        set o_aw_size := 3'd3 >>
+        set o_aw_burst := 2'd0 >>
+        set o_aw_lock := 1'b0 >>
+        set o_aw_cache := *r_aw_cache >>
+        set o_aw_prot := *r_aw_prot >>
+        set o_aw_qos := 4'd0 >>
+        set o_aw_region := 4'd0 >>
+        set o_aw_atop := 6'd0 >>
+        set o_aw_user := 1'b0 >>
+        set o_aw_valid := *r_aw_valid >>
+        // W: pass data/strb, force last=1 (single beat), user=0
+        set o_w_data := *r_w_data >>
+        set o_w_strb := *r_w_strb >>
+        set o_w_last := 1'b1 >>
+        set o_w_user := 1'b0 >>
+        set o_w_valid := *r_w_valid >>
+        // B: pass ready through
+        set o_b_ready := *r_b_ready >>
+        // AR: pass addr/prot from Lite, default id=0, len=0, size=3, burst=FIXED
+        set o_ar_id := 4'd0 >>
+        set o_ar_addr := *r_ar_addr >>
+        set o_ar_len := 8'd0 >>
+        set o_ar_size := 3'd3 >>
+        set o_ar_burst := 2'd0 >>
+        set o_ar_lock := 1'b0 >>
+        set o_ar_cache := *r_ar_cache >>
+        set o_ar_prot := *r_ar_prot >>
+        set o_ar_qos := 4'd0 >>
+        set o_ar_region := 4'd0 >>
+        set o_ar_user := 1'b0 >>
+        set o_ar_valid := *r_ar_valid >>
+        // R: pass ready through
+        set o_r_ready := *r_r_ready
+    }
+
+    // Response mapping: Full AXI response -> Lite response
+    loop {
+        set o_slv_aw_ready := *r_mst_aw_ready >>
+        set o_slv_w_ready := *r_mst_w_ready >>
+        set o_slv_b_resp := *r_mst_b_resp >>
+        set o_slv_b_valid := *r_mst_b_valid >>
+        set o_slv_ar_ready := *r_mst_ar_ready >>
+        set o_slv_r_data := *r_mst_r_data >>
+        set o_slv_r_resp := *r_mst_r_resp >>
+        set o_slv_r_valid := *r_mst_r_valid
+    }
+}

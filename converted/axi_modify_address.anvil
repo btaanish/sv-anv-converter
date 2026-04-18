@@ -1,0 +1,272 @@
+/* Hand-written Anvil for axi_modify_address.sv
+   AXI address modifier. Purely combinational pass-through that replaces
+   AW and AR addresses with externally-supplied values while forwarding
+   all other AXI signals unchanged.
+
+   Concrete params:
+     AXI_SLV_PORT_ADDR_WIDTH=64, AXI_MST_PORT_ADDR_WIDTH=64,
+     AXI_DATA_WIDTH=64, AXI_ID_WIDTH=4, AXI_USER_WIDTH=1.
+     AXI_STRB_WIDTH=8.
+*/
+
+// Slave port request input (from upstream master)
+chan mod_addr_slv_req_ch {
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_size   : (logic[3]@#1)  @dyn - @dyn,
+    left aw_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left aw_lock   : (logic@#1)     @dyn - @dyn,
+    left aw_cache  : (logic[4]@#1)  @dyn - @dyn,
+    left aw_prot   : (logic[3]@#1)  @dyn - @dyn,
+    left aw_qos    : (logic[4]@#1)  @dyn - @dyn,
+    left aw_region : (logic[4]@#1)  @dyn - @dyn,
+    left aw_atop   : (logic[6]@#1)  @dyn - @dyn,
+    left aw_user   : (logic@#1)     @dyn - @dyn,
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left w_user    : (logic@#1)     @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left ar_size   : (logic[3]@#1)  @dyn - @dyn,
+    left ar_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left ar_lock   : (logic@#1)     @dyn - @dyn,
+    left ar_cache  : (logic[4]@#1)  @dyn - @dyn,
+    left ar_prot   : (logic[3]@#1)  @dyn - @dyn,
+    left ar_qos    : (logic[4]@#1)  @dyn - @dyn,
+    left ar_region : (logic[4]@#1)  @dyn - @dyn,
+    left ar_user   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// External address inputs
+chan mod_addr_ext_ch {
+    left mst_aw_addr : (logic[64]@#1) @dyn - @dyn,
+    left mst_ar_addr : (logic[64]@#1) @dyn - @dyn
+}
+
+// Master port request output (to downstream slave)
+chan mod_addr_mst_req_ch {
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_size   : (logic[3]@#1)  @dyn - @dyn,
+    left aw_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left aw_lock   : (logic@#1)     @dyn - @dyn,
+    left aw_cache  : (logic[4]@#1)  @dyn - @dyn,
+    left aw_prot   : (logic[3]@#1)  @dyn - @dyn,
+    left aw_qos    : (logic[4]@#1)  @dyn - @dyn,
+    left aw_region : (logic[4]@#1)  @dyn - @dyn,
+    left aw_atop   : (logic[6]@#1)  @dyn - @dyn,
+    left aw_user   : (logic@#1)     @dyn - @dyn,
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left w_user    : (logic@#1)     @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left ar_size   : (logic[3]@#1)  @dyn - @dyn,
+    left ar_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left ar_lock   : (logic@#1)     @dyn - @dyn,
+    left ar_cache  : (logic[4]@#1)  @dyn - @dyn,
+    left ar_prot   : (logic[3]@#1)  @dyn - @dyn,
+    left ar_qos    : (logic[4]@#1)  @dyn - @dyn,
+    left ar_region : (logic[4]@#1)  @dyn - @dyn,
+    left ar_user   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Response path (bidirectional, shared between slave and master ports)
+chan mod_addr_resp_ch {
+    left aw_ready : (logic@#1)     @dyn - @dyn,
+    left w_ready  : (logic@#1)     @dyn - @dyn,
+    left b_id     : (logic[4]@#1)  @dyn - @dyn,
+    left b_resp   : (logic[2]@#1)  @dyn - @dyn,
+    left b_user   : (logic@#1)     @dyn - @dyn,
+    left b_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_ready : (logic@#1)     @dyn - @dyn,
+    left r_id     : (logic[4]@#1)  @dyn - @dyn,
+    left r_data   : (logic[64]@#1) @dyn - @dyn,
+    left r_resp   : (logic[2]@#1)  @dyn - @dyn,
+    left r_last   : (logic@#1)     @dyn - @dyn,
+    left r_user   : (logic@#1)     @dyn - @dyn,
+    left r_valid  : (logic@#1)     @dyn - @dyn
+}
+
+proc axi_modify_address(
+    slv_req  : left mod_addr_slv_req_ch,
+    ext_addr : left mod_addr_ext_ch,
+    mst_req  : right mod_addr_mst_req_ch,
+    mst_resp : left mod_addr_resp_ch,
+    slv_resp : right mod_addr_resp_ch
+) {
+    // Slave request staging
+    reg r_aw_id     : logic[4];
+    reg r_aw_len    : logic[8];
+    reg r_aw_size   : logic[3];
+    reg r_aw_burst  : logic[2];
+    reg r_aw_lock   : logic;
+    reg r_aw_cache  : logic[4];
+    reg r_aw_prot   : logic[3];
+    reg r_aw_qos    : logic[4];
+    reg r_aw_region : logic[4];
+    reg r_aw_atop   : logic[6];
+    reg r_aw_user   : logic;
+    reg r_aw_valid  : logic;
+    reg r_w_data    : logic[64];
+    reg r_w_strb    : logic[8];
+    reg r_w_last    : logic;
+    reg r_w_user    : logic;
+    reg r_w_valid   : logic;
+    reg r_b_ready   : logic;
+    reg r_ar_id     : logic[4];
+    reg r_ar_len    : logic[8];
+    reg r_ar_size   : logic[3];
+    reg r_ar_burst  : logic[2];
+    reg r_ar_lock   : logic;
+    reg r_ar_cache  : logic[4];
+    reg r_ar_prot   : logic[3];
+    reg r_ar_qos    : logic[4];
+    reg r_ar_region : logic[4];
+    reg r_ar_user   : logic;
+    reg r_ar_valid  : logic;
+    reg r_r_ready   : logic;
+    // External addresses
+    reg r_mst_aw_addr : logic[64];
+    reg r_mst_ar_addr : logic[64];
+    // Response staging
+    reg r_resp_aw_ready : logic;
+    reg r_resp_w_ready  : logic;
+    reg r_resp_b_id     : logic[4];
+    reg r_resp_b_resp   : logic[2];
+    reg r_resp_b_user   : logic;
+    reg r_resp_b_valid  : logic;
+    reg r_resp_ar_ready : logic;
+    reg r_resp_r_id     : logic[4];
+    reg r_resp_r_data   : logic[64];
+    reg r_resp_r_resp   : logic[2];
+    reg r_resp_r_last   : logic;
+    reg r_resp_r_user   : logic;
+    reg r_resp_r_valid  : logic;
+
+    // Recv slave request (ignore aw_addr and ar_addr — replaced by external)
+    loop { let v = recv slv_req.aw_id >> set r_aw_id := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_addr >> cycle 1 }
+    loop { let v = recv slv_req.aw_len >> set r_aw_len := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_size >> set r_aw_size := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_burst >> set r_aw_burst := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_lock >> set r_aw_lock := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_cache >> set r_aw_cache := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_prot >> set r_aw_prot := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_qos >> set r_aw_qos := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_region >> set r_aw_region := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_atop >> set r_aw_atop := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_user >> set r_aw_user := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_valid >> set r_aw_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.w_data >> set r_w_data := v >> cycle 1 }
+    loop { let v = recv slv_req.w_strb >> set r_w_strb := v >> cycle 1 }
+    loop { let v = recv slv_req.w_last >> set r_w_last := v >> cycle 1 }
+    loop { let v = recv slv_req.w_user >> set r_w_user := v >> cycle 1 }
+    loop { let v = recv slv_req.w_valid >> set r_w_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_id >> set r_ar_id := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_addr >> cycle 1 }
+    loop { let v = recv slv_req.ar_len >> set r_ar_len := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_size >> set r_ar_size := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_burst >> set r_ar_burst := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_lock >> set r_ar_lock := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_cache >> set r_ar_cache := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_prot >> set r_ar_prot := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_qos >> set r_ar_qos := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_region >> set r_ar_region := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_user >> set r_ar_user := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_valid >> set r_ar_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.r_ready >> set r_r_ready := v >> cycle 1 }
+
+    // Recv external addresses
+    loop { let v = recv ext_addr.mst_aw_addr >> set r_mst_aw_addr := v >> cycle 1 }
+    loop { let v = recv ext_addr.mst_ar_addr >> set r_mst_ar_addr := v >> cycle 1 }
+
+    // Recv master response
+    loop { let v = recv mst_resp.aw_ready >> set r_resp_aw_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.w_ready >> set r_resp_w_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_id >> set r_resp_b_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_resp >> set r_resp_b_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_user >> set r_resp_b_user := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_valid >> set r_resp_b_valid := v >> cycle 1 }
+    loop { let v = recv mst_resp.ar_ready >> set r_resp_ar_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_id >> set r_resp_r_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_data >> set r_resp_r_data := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_resp >> set r_resp_r_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_last >> set r_resp_r_last := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_user >> set r_resp_r_user := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_valid >> set r_resp_r_valid := v >> cycle 1 }
+
+    // Send master request: all fields from slave EXCEPT addresses replaced
+    loop {
+        send mst_req.aw_id (*r_aw_id) >> cycle 1
+    }
+    loop {
+        // KEY: use external address instead of slave's address
+        send mst_req.aw_addr (*r_mst_aw_addr) >> cycle 1
+    }
+    loop { send mst_req.aw_len (*r_aw_len) >> cycle 1 }
+    loop { send mst_req.aw_size (*r_aw_size) >> cycle 1 }
+    loop { send mst_req.aw_burst (*r_aw_burst) >> cycle 1 }
+    loop { send mst_req.aw_lock (*r_aw_lock) >> cycle 1 }
+    loop { send mst_req.aw_cache (*r_aw_cache) >> cycle 1 }
+    loop { send mst_req.aw_prot (*r_aw_prot) >> cycle 1 }
+    loop { send mst_req.aw_qos (*r_aw_qos) >> cycle 1 }
+    loop { send mst_req.aw_region (*r_aw_region) >> cycle 1 }
+    loop { send mst_req.aw_atop (*r_aw_atop) >> cycle 1 }
+    loop { send mst_req.aw_user (*r_aw_user) >> cycle 1 }
+    loop { send mst_req.aw_valid (*r_aw_valid) >> cycle 1 }
+    loop { send mst_req.w_data (*r_w_data) >> cycle 1 }
+    loop { send mst_req.w_strb (*r_w_strb) >> cycle 1 }
+    loop { send mst_req.w_last (*r_w_last) >> cycle 1 }
+    loop { send mst_req.w_user (*r_w_user) >> cycle 1 }
+    loop { send mst_req.w_valid (*r_w_valid) >> cycle 1 }
+    loop { send mst_req.b_ready (*r_b_ready) >> cycle 1 }
+    loop { send mst_req.ar_id (*r_ar_id) >> cycle 1 }
+    loop {
+        // KEY: use external address instead of slave's address
+        send mst_req.ar_addr (*r_mst_ar_addr) >> cycle 1
+    }
+    loop { send mst_req.ar_len (*r_ar_len) >> cycle 1 }
+    loop { send mst_req.ar_size (*r_ar_size) >> cycle 1 }
+    loop { send mst_req.ar_burst (*r_ar_burst) >> cycle 1 }
+    loop { send mst_req.ar_lock (*r_ar_lock) >> cycle 1 }
+    loop { send mst_req.ar_cache (*r_ar_cache) >> cycle 1 }
+    loop { send mst_req.ar_prot (*r_ar_prot) >> cycle 1 }
+    loop { send mst_req.ar_qos (*r_ar_qos) >> cycle 1 }
+    loop { send mst_req.ar_region (*r_ar_region) >> cycle 1 }
+    loop { send mst_req.ar_user (*r_ar_user) >> cycle 1 }
+    loop { send mst_req.ar_valid (*r_ar_valid) >> cycle 1 }
+    loop { send mst_req.r_ready (*r_r_ready) >> cycle 1 }
+
+    // Send slave response: direct passthrough from master response
+    loop { send slv_resp.aw_ready (*r_resp_aw_ready) >> cycle 1 }
+    loop { send slv_resp.w_ready (*r_resp_w_ready) >> cycle 1 }
+    loop { send slv_resp.b_id (*r_resp_b_id) >> cycle 1 }
+    loop { send slv_resp.b_resp (*r_resp_b_resp) >> cycle 1 }
+    loop { send slv_resp.b_user (*r_resp_b_user) >> cycle 1 }
+    loop { send slv_resp.b_valid (*r_resp_b_valid) >> cycle 1 }
+    loop { send slv_resp.ar_ready (*r_resp_ar_ready) >> cycle 1 }
+    loop { send slv_resp.r_id (*r_resp_r_id) >> cycle 1 }
+    loop { send slv_resp.r_data (*r_resp_r_data) >> cycle 1 }
+    loop { send slv_resp.r_resp (*r_resp_r_resp) >> cycle 1 }
+    loop { send slv_resp.r_last (*r_resp_r_last) >> cycle 1 }
+    loop { send slv_resp.r_user (*r_resp_r_user) >> cycle 1 }
+    loop { send slv_resp.r_valid (*r_resp_r_valid) >> cycle 1 }
+}
