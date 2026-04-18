@@ -1,0 +1,149 @@
+/* Hand-written Anvil for stream_fork.sv
+   Forks one input stream to N output streams.
+   Each input handshake produces exactly one handshake on each output.
+   Outputs don't need to handshake simultaneously.
+   Concrete: N_OUP=2 (no data ports, just valid/ready). */
+
+chan fork_in_ch {
+    left valid : (logic@#1) @dyn - @dyn,
+    left ready_i : (logic[2]@#1) @dyn - @dyn
+}
+
+chan fork_out_ch {
+    left ready_out : (logic@#1) @dyn - @dyn,
+    left valid_out : (logic[2]@#1) @dyn - @dyn
+}
+
+proc stream_fork(
+    inp : left fork_in_ch,
+    out : right fork_out_ch
+) {
+    /* Input FSM: 0=READY, 1=WAIT */
+    reg inp_state : logic;
+
+    /* Output FSMs: 0=READY, 1=WAIT (per output) */
+    reg oup_state_0 : logic;
+    reg oup_state_1 : logic;
+
+    /* Snapshots */
+    reg snap_inp_state : logic;
+    reg snap_oup_0 : logic;
+    reg snap_oup_1 : logic;
+
+    /* Input staging */
+    reg r_valid : logic;
+    reg r_rdy0 : logic;
+    reg r_rdy1 : logic;
+
+    loop {
+        /* Snapshot */
+        set snap_inp_state := *inp_state;
+        set snap_oup_0 := *oup_state_0 >>
+        set snap_oup_1 := *oup_state_1 >>
+
+        /* Receive */
+        let v = recv inp.valid >>
+        set r_valid := v >>
+        let ri = recv inp.ready_i >>
+        set r_rdy0 := <(ri)::logic>;
+        set r_rdy1 := <(ri >> 2'd1)::logic> >>
+
+        /* Output 0 FSM logic */
+        let oup0_ready = if *snap_oup_0 == 1'b0 {
+            if (*r_valid == 1'b1) & (*r_rdy0 == 1'b1) { 1'b1 } else { 1'b0 }
+        } else {
+            1'b1
+        } >>
+
+        let oup0_valid = if *snap_oup_0 == 1'b0 {
+            if *r_valid == 1'b1 { 1'b1 } else { 1'b0 }
+        } else {
+            1'b0
+        } >>
+
+        /* Output 1 FSM logic */
+        let oup1_ready = if *snap_oup_1 == 1'b0 {
+            if (*r_valid == 1'b1) & (*r_rdy1 == 1'b1) { 1'b1 } else { 1'b0 }
+        } else {
+            1'b1
+        } >>
+
+        let oup1_valid = if *snap_oup_1 == 1'b0 {
+            if *r_valid == 1'b1 { 1'b1 } else { 1'b0 }
+        } else {
+            1'b0
+        } >>
+
+        /* All outputs ready? */
+        let all_ready = oup0_ready & oup1_ready >>
+
+        /* Input FSM: compute ready_o */
+        let ready_o = if *snap_inp_state == 1'b0 {
+            if *r_valid == 1'b1 {
+                if (oup0_valid & oup1_valid & *r_rdy0 & *r_rdy1) == 1'b1 {
+                    1'b1
+                } else {
+                    1'b0
+                }
+            } else {
+                1'b0
+            }
+        } else {
+            if (*r_valid == 1'b1) & (all_ready == 1'b1) {
+                1'b1
+            } else {
+                1'b0
+            }
+        } >>
+
+        let valid_out = #{oup1_valid, oup0_valid} >>
+
+        send out.ready_out (ready_o);
+        send out.valid_out (valid_out) >>
+
+        /* Update input FSM */
+        if *snap_inp_state == 1'b0 {
+            if (*r_valid == 1'b1) & (ready_o == 1'b0) {
+                set inp_state := 1'b1
+            } else {
+                cycle 1
+            }
+        } else {
+            if (*r_valid == 1'b1) & (all_ready == 1'b1) {
+                set inp_state := 1'b0
+            } else {
+                cycle 1
+            }
+        } >>
+
+        /* Update output 0 FSM */
+        if *snap_oup_0 == 1'b0 {
+            if (*r_valid == 1'b1) & (*r_rdy0 == 1'b1) & (ready_o == 1'b0) {
+                set oup_state_0 := 1'b1
+            } else {
+                cycle 1
+            }
+        } else {
+            if (*r_valid == 1'b1) & (ready_o == 1'b1) {
+                set oup_state_0 := 1'b0
+            } else {
+                cycle 1
+            }
+        } >>
+
+        /* Update output 1 FSM */
+        if *snap_oup_1 == 1'b0 {
+            if (*r_valid == 1'b1) & (*r_rdy1 == 1'b1) & (ready_o == 1'b0) {
+                set oup_state_1 := 1'b1
+            } else {
+                cycle 1
+            }
+        } else {
+            if (*r_valid == 1'b1) & (ready_o == 1'b1) {
+                set oup_state_1 := 1'b0
+            } else {
+                cycle 1
+            }
+        }
+    }
+}
