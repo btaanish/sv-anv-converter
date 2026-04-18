@@ -1,0 +1,306 @@
+/* Hand-written Anvil for commit_stage.sv
+   Commits instructions to the architectural state from the scoreboard.
+   Handles CSR writes, FPU flag merging, fences, SFENCE.VMA, AMOs,
+   exception/interrupt prioritization, and dual-port commit.
+   Concrete: XLEN=64, VLEN=64, NrCommitPorts=2, TRANS_ID_BITS=5,
+   RVA=1, RVS=1, RVH=0, FpPresent=1, RVZCMP=0, SDTRIG=0,
+   DebugEn=1, DCacheType=WB. */
+
+chan commit_in_ch {
+    left halt : (logic@#1) @dyn - @dyn,
+    left flush_dcache : (logic@#1) @dyn - @dyn,
+    left single_step : (logic@#1) @dyn - @dyn,
+    left ci0_valid : (logic@#1) @dyn - @dyn,
+    left ci0_rd : (logic[5]@#1) @dyn - @dyn,
+    left ci0_result : (logic[64]@#1) @dyn - @dyn,
+    left ci0_fu : (logic[4]@#1) @dyn - @dyn,
+    left ci0_op : (logic[7]@#1) @dyn - @dyn,
+    left ci0_ex_valid : (logic@#1) @dyn - @dyn,
+    left ci0_ex_cause : (logic[64]@#1) @dyn - @dyn,
+    left ci0_ex_tval : (logic[64]@#1) @dyn - @dyn,
+    left ci0_pc : (logic[64]@#1) @dyn - @dyn,
+    left ci0_trans_id : (logic[5]@#1) @dyn - @dyn,
+    left ci0_is_rd_fpr : (logic@#1) @dyn - @dyn,
+    left ci0_vfp : (logic@#1) @dyn - @dyn,
+    left ci1_valid : (logic@#1) @dyn - @dyn,
+    left ci1_rd : (logic[5]@#1) @dyn - @dyn,
+    left ci1_result : (logic[64]@#1) @dyn - @dyn,
+    left ci1_fu : (logic[4]@#1) @dyn - @dyn,
+    left ci1_op : (logic[7]@#1) @dyn - @dyn,
+    left ci1_ex_valid : (logic@#1) @dyn - @dyn,
+    left ci1_ex_cause : (logic[64]@#1) @dyn - @dyn,
+    left ci1_is_rd_fpr : (logic@#1) @dyn - @dyn,
+    left drop0 : (logic@#1) @dyn - @dyn,
+    left drop1 : (logic@#1) @dyn - @dyn,
+    left amo_resp_ack : (logic@#1) @dyn - @dyn,
+    left amo_resp_result : (logic[64]@#1) @dyn - @dyn,
+    left csr_rdata : (logic[64]@#1) @dyn - @dyn,
+    left csr_exception_valid : (logic@#1) @dyn - @dyn,
+    left csr_exception_cause : (logic[64]@#1) @dyn - @dyn,
+    left csr_exception_tval : (logic[64]@#1) @dyn - @dyn,
+    left commit_lsu_ready : (logic@#1) @dyn - @dyn,
+    left no_st_pending : (logic@#1) @dyn - @dyn,
+    left break_from_trigger : (logic@#1) @dyn - @dyn
+}
+
+chan commit_out_ch {
+    left exception_valid : (logic@#1) @dyn - @dyn,
+    left exception_cause : (logic[64]@#1) @dyn - @dyn,
+    left exception_tval : (logic[64]@#1) @dyn - @dyn,
+    left dirty_fp_state : (logic@#1) @dyn - @dyn,
+    left commit_ack0 : (logic@#1) @dyn - @dyn,
+    left commit_ack1 : (logic@#1) @dyn - @dyn,
+    left commit_macro_ack0 : (logic@#1) @dyn - @dyn,
+    left commit_macro_ack1 : (logic@#1) @dyn - @dyn,
+    left waddr0 : (logic[5]@#1) @dyn - @dyn,
+    left waddr1 : (logic[5]@#1) @dyn - @dyn,
+    left wdata0 : (logic[64]@#1) @dyn - @dyn,
+    left wdata1 : (logic[64]@#1) @dyn - @dyn,
+    left we_gpr0 : (logic@#1) @dyn - @dyn,
+    left we_gpr1 : (logic@#1) @dyn - @dyn,
+    left we_fpr0 : (logic@#1) @dyn - @dyn,
+    left we_fpr1 : (logic@#1) @dyn - @dyn,
+    left pc : (logic[64]@#1) @dyn - @dyn,
+    left csr_op : (logic[7]@#1) @dyn - @dyn,
+    left csr_wdata : (logic[64]@#1) @dyn - @dyn,
+    left csr_write_fflags : (logic@#1) @dyn - @dyn,
+    left commit_lsu : (logic@#1) @dyn - @dyn,
+    left commit_tran_id : (logic[5]@#1) @dyn - @dyn,
+    left amo_valid_commit : (logic@#1) @dyn - @dyn,
+    left commit_csr : (logic@#1) @dyn - @dyn,
+    left fence_i : (logic@#1) @dyn - @dyn,
+    left fence : (logic@#1) @dyn - @dyn,
+    left flush_commit : (logic@#1) @dyn - @dyn,
+    left sfence_vma : (logic@#1) @dyn - @dyn,
+    left hfence_vvma : (logic@#1) @dyn - @dyn,
+    left hfence_gvma : (logic@#1) @dyn - @dyn
+}
+
+proc commit_stage(
+    inp : left commit_in_ch,
+    out : right commit_out_ch
+) {
+    /* Input staging registers */
+    reg r_halt : logic;
+    reg r_flush_dc : logic;
+    reg r_single_step : logic;
+    reg r_ci0_valid : logic;
+    reg r_ci0_rd : logic[5];
+    reg r_ci0_result : logic[64];
+    reg r_ci0_fu : logic[4];
+    reg r_ci0_op : logic[7];
+    reg r_ci0_ex_valid : logic;
+    reg r_ci0_ex_cause : logic[64];
+    reg r_ci0_ex_tval : logic[64];
+    reg r_ci0_pc : logic[64];
+    reg r_ci0_tid : logic[5];
+    reg r_ci0_is_rd_fpr : logic;
+    reg r_ci0_vfp : logic;
+    reg r_ci1_valid : logic;
+    reg r_ci1_rd : logic[5];
+    reg r_ci1_result : logic[64];
+    reg r_ci1_fu : logic[4];
+    reg r_ci1_op : logic[7];
+    reg r_ci1_ex_valid : logic;
+    reg r_ci1_ex_cause : logic[64];
+    reg r_ci1_is_rd_fpr : logic;
+    reg r_drop0 : logic;
+    reg r_drop1 : logic;
+    reg r_amo_ack : logic;
+    reg r_amo_result : logic[64];
+    reg r_csr_rdata : logic[64];
+    reg r_csr_ex_v : logic;
+    reg r_csr_ex_cause : logic[64];
+    reg r_csr_ex_tval : logic[64];
+    reg r_lsu_rdy : logic;
+    reg r_no_st : logic;
+    reg r_break : logic;
+
+    /* Recv loop */
+    loop {
+        let a1 = recv inp.halt >>
+        set r_halt := a1 >>
+        let a2 = recv inp.flush_dcache >>
+        set r_flush_dc := a2 >>
+        let a3 = recv inp.single_step >>
+        set r_single_step := a3 >>
+        let a4 = recv inp.ci0_valid >>
+        set r_ci0_valid := a4 >>
+        let a5 = recv inp.ci0_rd >>
+        set r_ci0_rd := a5 >>
+        let a6 = recv inp.ci0_result >>
+        set r_ci0_result := a6 >>
+        let a7 = recv inp.ci0_fu >>
+        set r_ci0_fu := a7 >>
+        let a8 = recv inp.ci0_op >>
+        set r_ci0_op := a8 >>
+        let a9 = recv inp.ci0_ex_valid >>
+        set r_ci0_ex_valid := a9 >>
+        let a10 = recv inp.ci0_ex_cause >>
+        set r_ci0_ex_cause := a10 >>
+        let a11 = recv inp.ci0_ex_tval >>
+        set r_ci0_ex_tval := a11 >>
+        let a12 = recv inp.ci0_pc >>
+        set r_ci0_pc := a12 >>
+        let a13 = recv inp.ci0_trans_id >>
+        set r_ci0_tid := a13 >>
+        let a14 = recv inp.ci0_is_rd_fpr >>
+        set r_ci0_is_rd_fpr := a14 >>
+        let a15 = recv inp.ci0_vfp >>
+        set r_ci0_vfp := a15 >>
+        let a16 = recv inp.ci1_valid >>
+        set r_ci1_valid := a16 >>
+        let a17 = recv inp.ci1_rd >>
+        set r_ci1_rd := a17 >>
+        let a18 = recv inp.ci1_result >>
+        set r_ci1_result := a18 >>
+        let a19 = recv inp.ci1_fu >>
+        set r_ci1_fu := a19 >>
+        let a20 = recv inp.ci1_op >>
+        set r_ci1_op := a20 >>
+        let a21 = recv inp.ci1_ex_valid >>
+        set r_ci1_ex_valid := a21 >>
+        let a22 = recv inp.ci1_ex_cause >>
+        set r_ci1_ex_cause := a22 >>
+        let a23 = recv inp.ci1_is_rd_fpr >>
+        set r_ci1_is_rd_fpr := a23 >>
+        let a24 = recv inp.drop0 >>
+        set r_drop0 := a24 >>
+        let a25 = recv inp.drop1 >>
+        set r_drop1 := a25 >>
+        let a26 = recv inp.amo_resp_ack >>
+        set r_amo_ack := a26 >>
+        let a27 = recv inp.amo_resp_result >>
+        set r_amo_result := a27 >>
+        let a28 = recv inp.csr_rdata >>
+        set r_csr_rdata := a28 >>
+        let a29 = recv inp.csr_exception_valid >>
+        set r_csr_ex_v := a29 >>
+        let a30 = recv inp.csr_exception_cause >>
+        set r_csr_ex_cause := a30 >>
+        let a31 = recv inp.csr_exception_tval >>
+        set r_csr_ex_tval := a31 >>
+        let a32 = recv inp.commit_lsu_ready >>
+        set r_lsu_rdy := a32 >>
+        let a33 = recv inp.no_st_pending >>
+        set r_no_st := a33 >>
+        let a34 = recv inp.break_from_trigger >>
+        set r_break := a34
+    }
+
+    /* Output loop: compute commit logic as combinational expressions */
+    loop {
+        let p0_active = *r_ci0_valid & ~(*r_halt) >>
+        let p0_has_exc = *r_ci0_ex_valid | *r_break >>
+        let p0_is_csr = if *r_ci0_fu == 4'd5 { 1'b1 } else { 1'b0 } >>
+        let p0_is_store = if *r_ci0_fu == 4'd7 { 1'b1 } else { 1'b0 } >>
+        let p0_is_amo = p0_is_store & *r_amo_ack >>
+        let exc_ack = p0_has_exc & *r_drop0 >>
+        let store_blocks = p0_is_store & ~p0_is_amo & ~(*r_lsu_rdy) >>
+        let csr_blocks = p0_is_csr & ~(*r_drop0) & *r_csr_ex_v >>
+        let normal_ack_base = ~p0_has_exc >>
+        let is_sfence = if *r_ci0_op == 7'd45 { 1'b1 } else { 1'b0 } >>
+        let is_fence_i = if *r_ci0_op == 7'd46 { 1'b1 } else { 1'b0 } >>
+        let is_fence = if *r_ci0_op == 7'd47 { 1'b1 } else { 1'b0 } >>
+        let fence_blocks = (is_sfence | is_fence_i | is_fence) & ~(*r_drop0) & ~(*r_no_st) >>
+        let ack0_normal = normal_ack_base & ~store_blocks & ~csr_blocks & ~fence_blocks >>
+        let ack0 = if p0_active == 1'b1 {
+            if p0_has_exc == 1'b1 { exc_ack } else {
+                if p0_is_amo == 1'b1 { *r_amo_ack } else { ack0_normal }
+            }
+        } else { 1'b0 } >>
+        let p0_no_exc_no_drop = p0_active & ~p0_has_exc & ~(*r_drop0) >>
+        let gpr0 = if p0_is_amo == 1'b1 {
+            *r_amo_ack
+        } else if p0_no_exc_no_drop == 1'b1 {
+            if *r_ci0_is_rd_fpr == 1'b1 { 1'b0 } else {
+                if csr_blocks == 1'b1 { 1'b0 } else { 1'b1 }
+            }
+        } else { 1'b0 } >>
+        let fpr0 = if p0_no_exc_no_drop == 1'b1 {
+            if p0_is_amo == 1'b0 { *r_ci0_is_rd_fpr } else { 1'b0 }
+        } else { 1'b0 } >>
+        let lsu_commit = p0_active & ~p0_has_exc & p0_is_store & ~p0_is_amo & *r_lsu_rdy >>
+        let csr_commit = p0_active & ~p0_has_exc & p0_is_csr & ~(*r_drop0) & ~(*r_csr_ex_v) >>
+        let o_csr_op = if p0_active == 1'b1 {
+            if p0_has_exc == 1'b0 {
+                if p0_is_csr == 1'b1 { *r_ci0_op } else { 7'd0 }
+            } else { 7'd0 }
+        } else { 7'd0 } >>
+        let o_csr_wdata = if p0_active == 1'b1 {
+            if p0_has_exc == 1'b0 {
+                if p0_is_csr == 1'b1 { *r_ci0_result } else { 64'd0 }
+            } else { 64'd0 }
+        } else { 64'd0 } >>
+        let o_sfence = p0_active & ~p0_has_exc & is_sfence & ~(*r_drop0) & *r_no_st >>
+        let o_fence_i = p0_active & ~p0_has_exc & is_fence_i & ~(*r_drop0) & *r_no_st >>
+        let o_fence = p0_active & ~p0_has_exc & is_fence & ~(*r_drop0) & *r_no_st >>
+        let amo_valid = p0_active & ~p0_has_exc & p0_is_amo >>
+        let o_flush_commit = p0_active & ~p0_has_exc & p0_is_amo & *r_amo_ack >>
+        let wd0 = if p0_is_amo == 1'b1 {
+            if *r_amo_ack == 1'b1 { *r_amo_result } else { *r_ci0_result }
+        } else if csr_commit == 1'b1 {
+            *r_csr_rdata
+        } else {
+            *r_ci0_result
+        } >>
+        let p1_eligible = ack0 & *r_ci1_valid & ~(*r_halt) &
+                          ~p0_is_csr & ~(*r_flush_dc) & ~p0_is_amo & ~(*r_single_step) >>
+        let ack1 = p1_eligible & ~(*r_ci1_ex_valid) >>
+        let gpr1 = if ack1 == 1'b1 {
+            if *r_drop1 == 1'b0 {
+                if *r_ci1_is_rd_fpr == 1'b1 { 1'b0 } else { 1'b1 }
+            } else { 1'b0 }
+        } else { 1'b0 } >>
+        let fpr1 = if ack1 == 1'b1 {
+            if *r_drop1 == 1'b0 { *r_ci1_is_rd_fpr } else { 1'b0 }
+        } else { 1'b0 } >>
+        let dirty_fp = (ack0 & *r_ci0_is_rd_fpr) | (*r_ci0_vfp & (*r_ci0_fu == 4'd8)) |
+                       (ack1 & *r_ci1_is_rd_fpr) >>
+        let has_csr_exc = *r_ci0_valid & ~(*r_drop0) & *r_csr_ex_v >>
+        let has_early_exc = *r_ci0_valid & ~(*r_drop0) & *r_ci0_ex_valid >>
+        let ex_v = if *r_halt == 1'b1 { 1'b0 }
+                   else if has_early_exc == 1'b1 { 1'b1 }
+                   else if has_csr_exc == 1'b1 { 1'b1 }
+                   else { 1'b0 } >>
+        let ex_cause = if has_early_exc == 1'b1 { *r_ci0_ex_cause }
+                       else if has_csr_exc == 1'b1 { *r_csr_ex_cause }
+                       else { 64'd0 } >>
+        let ex_tval = if has_early_exc == 1'b1 { *r_ci0_ex_tval }
+                      else if has_csr_exc == 1'b1 { *r_ci0_ex_tval }
+                      else { 64'd0 } >>
+
+        /* Send outputs */
+        send out.exception_valid (ex_v) >>
+        send out.exception_cause (ex_cause) >>
+        send out.exception_tval (ex_tval) >>
+        send out.dirty_fp_state (dirty_fp) >>
+        send out.commit_ack0 (ack0) >>
+        send out.commit_ack1 (ack1) >>
+        send out.commit_macro_ack0 (ack0) >>
+        send out.commit_macro_ack1 (ack1) >>
+        send out.waddr0 (*r_ci0_rd) >>
+        send out.waddr1 (*r_ci1_rd) >>
+        send out.wdata0 (wd0) >>
+        send out.wdata1 (*r_ci1_result) >>
+        send out.we_gpr0 (gpr0) >>
+        send out.we_gpr1 (gpr1) >>
+        send out.we_fpr0 (fpr0) >>
+        send out.we_fpr1 (fpr1) >>
+        send out.pc (*r_ci0_pc) >>
+        send out.csr_op (o_csr_op) >>
+        send out.csr_wdata (o_csr_wdata) >>
+        send out.csr_write_fflags (1'b0) >>
+        send out.commit_lsu (lsu_commit) >>
+        send out.commit_tran_id (*r_ci0_tid) >>
+        send out.amo_valid_commit (amo_valid) >>
+        send out.commit_csr (csr_commit) >>
+        send out.fence_i (o_fence_i) >>
+        send out.fence (o_fence) >>
+        send out.flush_commit (o_flush_commit) >>
+        send out.sfence_vma (o_sfence) >>
+        send out.hfence_vvma (1'b0) >>
+        send out.hfence_gvma (1'b0) >>
+        cycle 1
+    }
+}

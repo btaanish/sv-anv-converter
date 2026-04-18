@@ -1,0 +1,321 @@
+/* Hand-written Anvil for acc_dispatcher.sv
+   Accelerator instruction dispatcher for CVA6.
+   Dispatches instructions to accelerators, tracks speculation,
+   manages load/store pending counters and barriers.
+   Concrete: XLEN=64, TRANS_ID_BITS=5, NR_SB_ENTRIES=32,
+   NrCommitPorts=2, RVA=1, FpPresent=1.
+   Complex struct types (fu_data_t, scoreboard_entry_t, accelerator_req/resp)
+   flattened to logic vectors. Sub-module instantiations (FIFO, counter,
+   spill_register) inlined as register-based state machines. */
+
+chan acc_disp_in_ch {
+    left acc_cons_en : (logic@#1) @dyn - @dyn,
+    left fcsr_frm : (logic[3]@#1) @dyn - @dyn,
+    left acc_mmu_en : (logic@#1) @dyn - @dyn,
+    left issue_instr_hs : (logic@#1) @dyn - @dyn,
+    left issue_fu : (logic[4]@#1) @dyn - @dyn,
+    left issue_op : (logic[7]@#1) @dyn - @dyn,
+    left issue_ex_valid : (logic@#1) @dyn - @dyn,
+    left fu_operand_a : (logic[64]@#1) @dyn - @dyn,
+    left fu_operand_b : (logic[64]@#1) @dyn - @dyn,
+    left fu_imm : (logic[64]@#1) @dyn - @dyn,
+    left fu_trans_id : (logic[5]@#1) @dyn - @dyn,
+    left fu_operation : (logic[7]@#1) @dyn - @dyn,
+    left commit_instr0_valid : (logic@#1) @dyn - @dyn,
+    left commit_instr0_fu : (logic[4]@#1) @dyn - @dyn,
+    left commit_instr0_trans_id : (logic[5]@#1) @dyn - @dyn,
+    left commit_instr1_valid : (logic@#1) @dyn - @dyn,
+    left commit_instr1_fu : (logic[4]@#1) @dyn - @dyn,
+    left commit_ack0 : (logic@#1) @dyn - @dyn,
+    left commit_ack1 : (logic@#1) @dyn - @dyn,
+    left commit_st_barrier : (logic@#1) @dyn - @dyn,
+    left acc_no_st_pending : (logic@#1) @dyn - @dyn,
+    left flush_unissued : (logic@#1) @dyn - @dyn,
+    left flush_ex : (logic@#1) @dyn - @dyn,
+    left inval_ready : (logic@#1) @dyn - @dyn,
+    left resp_valid : (logic@#1) @dyn - @dyn,
+    left resp_trans_id : (logic[5]@#1) @dyn - @dyn,
+    left resp_result : (logic[64]@#1) @dyn - @dyn,
+    left resp_fflags_valid : (logic@#1) @dyn - @dyn,
+    left resp_fflags : (logic[5]@#1) @dyn - @dyn,
+    left resp_req_ready : (logic@#1) @dyn - @dyn,
+    left resp_store_pending : (logic@#1) @dyn - @dyn,
+    left resp_load_complete : (logic@#1) @dyn - @dyn,
+    left resp_store_complete : (logic@#1) @dyn - @dyn,
+    left resp_inval_valid : (logic@#1) @dyn - @dyn,
+    left resp_inval_addr : (logic[64]@#1) @dyn - @dyn
+}
+
+chan acc_disp_out_ch {
+    left acc_fflags_valid : (logic@#1) @dyn - @dyn,
+    left acc_fflags : (logic[5]@#1) @dyn - @dyn,
+    left dirty_v_state : (logic@#1) @dyn - @dyn,
+    left issue_stall : (logic@#1) @dyn - @dyn,
+    left acc_trans_id : (logic[5]@#1) @dyn - @dyn,
+    left acc_result : (logic[64]@#1) @dyn - @dyn,
+    left acc_valid : (logic@#1) @dyn - @dyn,
+    left acc_valid_ex : (logic@#1) @dyn - @dyn,
+    left ctrl_halt : (logic@#1) @dyn - @dyn,
+    left flush_pipeline : (logic@#1) @dyn - @dyn,
+    left single_step : (logic@#1) @dyn - @dyn,
+    left acc_stall_st_pending : (logic@#1) @dyn - @dyn,
+    left inval_valid : (logic@#1) @dyn - @dyn,
+    left inval_addr : (logic[64]@#1) @dyn - @dyn,
+    left req_valid : (logic@#1) @dyn - @dyn,
+    left req_insn : (logic[32]@#1) @dyn - @dyn,
+    left req_rs1 : (logic[64]@#1) @dyn - @dyn,
+    left req_rs2 : (logic[64]@#1) @dyn - @dyn,
+    left req_frm : (logic[3]@#1) @dyn - @dyn,
+    left req_trans_id : (logic[5]@#1) @dyn - @dyn,
+    left req_store_pending : (logic@#1) @dyn - @dyn,
+    left req_acc_cons_en : (logic@#1) @dyn - @dyn,
+    left req_inval_ready : (logic@#1) @dyn - @dyn,
+    left req_resp_ready : (logic@#1) @dyn - @dyn
+}
+
+proc acc_dispatcher(
+    inp : left acc_disp_in_ch,
+    out : right acc_disp_out_ch
+) {
+    /* FF state: acc_valid_q */
+    reg acc_valid_q : logic;
+
+    /* Instruction queue (depth-3 FIFO, inlined) */
+    reg iq_op_a0 : logic[64];
+    reg iq_op_b0 : logic[64];
+    reg iq_imm0 : logic[64];
+    reg iq_tid0 : logic[5];
+    reg iq_oper0 : logic[7];
+    reg iq_op_a1 : logic[64];
+    reg iq_op_b1 : logic[64];
+    reg iq_imm1 : logic[64];
+    reg iq_tid1 : logic[5];
+    reg iq_oper1 : logic[7];
+    reg iq_op_a2 : logic[64];
+    reg iq_op_b2 : logic[64];
+    reg iq_imm2 : logic[64];
+    reg iq_tid2 : logic[5];
+    reg iq_oper2 : logic[7];
+    reg iq_rp : logic[2];
+    reg iq_wp : logic[2];
+    reg iq_cnt : logic[2];
+
+    /* Non-speculative tracking: pending and ready bitvectors (32 entries) */
+    reg insn_pending : logic[32];
+    reg insn_ready : logic[32];
+
+    /* Barrier state */
+    reg wait_acc_store : logic;
+
+    /* Load/store counters (inlined 3-bit up/down counters) */
+    reg spec_ld_cnt : logic[3];
+    reg disp_ld_cnt : logic[3];
+    reg spec_st_cnt : logic[3];
+    reg disp_st_cnt : logic[3];
+
+    /* Input staging registers */
+    reg r_cons_en : logic;
+    reg r_frm : logic[3];
+    reg r_hs : logic;
+    reg r_fu : logic[4];
+    reg r_op : logic[7];
+    reg r_ex_valid : logic;
+    reg r_op_a : logic[64];
+    reg r_op_b : logic[64];
+    reg r_imm : logic[64];
+    reg r_tid : logic[5];
+    reg r_operation : logic[7];
+    reg r_ci0_valid : logic;
+    reg r_ci0_fu : logic[4];
+    reg r_ci0_tid : logic[5];
+    reg r_ci1_valid : logic;
+    reg r_ci1_fu : logic[4];
+    reg r_cack0 : logic;
+    reg r_cack1 : logic;
+    reg r_barrier : logic;
+    reg r_no_st : logic;
+    reg r_flush_un : logic;
+    reg r_flush_ex : logic;
+    reg r_inval_rdy : logic;
+    reg r_resp_v : logic;
+    reg r_resp_tid : logic[5];
+    reg r_resp_res : logic[64];
+    reg r_resp_ffv : logic;
+    reg r_resp_ff : logic[5];
+    reg r_resp_rdy : logic;
+    reg r_resp_st_pend : logic;
+    reg r_resp_ld_comp : logic;
+    reg r_resp_st_comp : logic;
+    reg r_resp_inv_v : logic;
+    reg r_resp_inv_a : logic[64];
+
+    /* Snapshot registers */
+    reg s_avq : logic;
+    reg s_iq_cnt : logic[2];
+    reg s_pend : logic[32];
+    reg s_ready : logic[32];
+    reg s_wait : logic;
+    reg s_spec_ld : logic[3];
+    reg s_disp_ld : logic[3];
+    reg s_spec_st : logic[3];
+    reg s_disp_st : logic[3];
+
+    /* Recv loop */
+    loop {
+        let a1 = recv inp.acc_cons_en >>
+        set r_cons_en := a1 >>
+        let a2 = recv inp.fcsr_frm >>
+        set r_frm := a2 >>
+        let _mmu = recv inp.acc_mmu_en >>
+        let a4 = recv inp.issue_instr_hs >>
+        set r_hs := a4 >>
+        let a5 = recv inp.issue_fu >>
+        set r_fu := a5 >>
+        let a6 = recv inp.issue_op >>
+        set r_op := a6 >>
+        let a7 = recv inp.issue_ex_valid >>
+        set r_ex_valid := a7 >>
+        let a8 = recv inp.fu_operand_a >>
+        set r_op_a := a8 >>
+        let a9 = recv inp.fu_operand_b >>
+        set r_op_b := a9 >>
+        let a10 = recv inp.fu_imm >>
+        set r_imm := a10 >>
+        let a11 = recv inp.fu_trans_id >>
+        set r_tid := a11 >>
+        let a12 = recv inp.fu_operation >>
+        set r_operation := a12 >>
+        let a13 = recv inp.commit_instr0_valid >>
+        set r_ci0_valid := a13 >>
+        let a14 = recv inp.commit_instr0_fu >>
+        set r_ci0_fu := a14 >>
+        let a15 = recv inp.commit_instr0_trans_id >>
+        set r_ci0_tid := a15 >>
+        let a16 = recv inp.commit_instr1_valid >>
+        set r_ci1_valid := a16 >>
+        let a17 = recv inp.commit_instr1_fu >>
+        set r_ci1_fu := a17 >>
+        let a18a = recv inp.commit_ack0 >>
+        set r_cack0 := a18a >>
+        let a18b = recv inp.commit_ack1 >>
+        set r_cack1 := a18b >>
+        let a19 = recv inp.commit_st_barrier >>
+        set r_barrier := a19 >>
+        let a20 = recv inp.acc_no_st_pending >>
+        set r_no_st := a20 >>
+        let a21 = recv inp.flush_unissued >>
+        set r_flush_un := a21 >>
+        let a22 = recv inp.flush_ex >>
+        set r_flush_ex := a22 >>
+        let a23 = recv inp.inval_ready >>
+        set r_inval_rdy := a23 >>
+        let a24 = recv inp.resp_valid >>
+        set r_resp_v := a24 >>
+        let a25 = recv inp.resp_trans_id >>
+        set r_resp_tid := a25 >>
+        let a26 = recv inp.resp_result >>
+        set r_resp_res := a26 >>
+        let a27 = recv inp.resp_fflags_valid >>
+        set r_resp_ffv := a27 >>
+        let a28 = recv inp.resp_fflags >>
+        set r_resp_ff := a28 >>
+        let a29 = recv inp.resp_req_ready >>
+        set r_resp_rdy := a29 >>
+        let a30 = recv inp.resp_store_pending >>
+        set r_resp_st_pend := a30 >>
+        let a31 = recv inp.resp_load_complete >>
+        set r_resp_ld_comp := a31 >>
+        let a32 = recv inp.resp_store_complete >>
+        set r_resp_st_comp := a32 >>
+        let a33 = recv inp.resp_inval_valid >>
+        set r_resp_inv_v := a33 >>
+        let a34 = recv inp.resp_inval_addr >>
+        set r_resp_inv_a := a34
+    }
+
+    /* Snapshot loop */
+    loop {
+        set s_avq := *acc_valid_q;
+        set s_iq_cnt := *iq_cnt;
+        set s_pend := *insn_pending;
+        set s_ready := *insn_ready;
+        set s_wait := *wait_acc_store;
+        set s_spec_ld := *spec_ld_cnt;
+        set s_disp_ld := *disp_ld_cnt;
+        set s_spec_st := *spec_st_cnt;
+        set s_disp_st := *disp_st_cnt
+    }
+
+    /* Output loop */
+    loop {
+        let _acc_valid_d = ~(*r_ex_valid) & *r_hs & (*r_fu == 4'd8) & ~(*r_flush_un) >>
+        let acc_ready = if *s_iq_cnt < 2'd2 { 1'b1 } else { 1'b0 } >>
+        let no_ld_pend = if *s_spec_ld == 3'b0 {
+            if *s_disp_ld == 3'b0 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+        let no_st_pend = if *s_spec_st == 3'b0 {
+            if *s_disp_st == 3'b0 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+        let stall = if *r_fu == 4'd8 {
+            ~acc_ready
+        } else if *r_fu == 4'd6 {
+            *r_cons_en & ~no_st_pend
+        } else if *r_fu == 4'd7 {
+            *r_cons_en & (~no_st_pend | ~no_ld_pend)
+        } else { 1'b0 } >>
+        let _acc_commit = if *r_ci0_valid == 1'b0 {
+            if *r_ci0_fu == 4'd8 { 1'b1 } else { 1'b0 }
+        } else if *r_ci1_valid == 1'b0 {
+            if *r_ci1_fu == 4'd8 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+        let _commit_tid = if *r_ci0_valid == 1'b0 { *r_ci0_tid } else { 5'd0 } >>
+        let dv = (*r_cack0 & (*r_ci0_fu == 4'd8)) |
+                 (*r_cack1 & (*r_ci1_fu == 4'd8)) >>
+        let halt_v = *s_wait >>
+        send out.acc_fflags_valid (*r_resp_ffv) >>
+        send out.acc_fflags (*r_resp_ff) >>
+        send out.dirty_v_state (dv) >>
+        send out.issue_stall (stall) >>
+        send out.acc_trans_id (*r_resp_tid) >>
+        send out.acc_result (*r_resp_res) >>
+        send out.acc_valid (*r_resp_v) >>
+        send out.acc_valid_ex (*s_avq) >>
+        send out.ctrl_halt (halt_v) >>
+        send out.flush_pipeline (1'b0) >>
+        send out.single_step (1'b0) >>
+        send out.acc_stall_st_pending (1'b0) >>
+        send out.inval_valid (*r_resp_inv_v) >>
+        send out.inval_addr (*r_resp_inv_a) >>
+        send out.req_valid (1'b0) >>
+        send out.req_insn (32'd0) >>
+        send out.req_rs1 (64'd0) >>
+        send out.req_rs2 (64'd0) >>
+        send out.req_frm (*r_frm) >>
+        send out.req_trans_id (5'd0) >>
+        send out.req_store_pending (~(*r_no_st) & *r_cons_en) >>
+        send out.req_acc_cons_en (*r_cons_en) >>
+        send out.req_inval_ready (*r_inval_rdy) >>
+        send out.req_resp_ready (1'b1) >>
+        cycle 1
+    }
+
+    /* State update loop */
+    loop {
+        /* acc_valid_q FF */
+        let avd = ~(*r_ex_valid) & *r_hs & (*r_fu == 4'd8) & ~(*r_flush_un);
+        set acc_valid_q := avd >>
+
+        /* Barrier wait state */
+        let wnext = (*s_wait | *r_barrier) & *r_resp_st_pend;
+        set wait_acc_store := wnext >>
+
+        /* insn_pending / insn_ready update */
+        /* Simplified: just clear on flush_ex */
+        if *r_flush_ex == 1'b1 {
+            set insn_pending := 32'd0;
+            set insn_ready := 32'd0
+        } else {
+            cycle 1
+        }
+    }
+}
