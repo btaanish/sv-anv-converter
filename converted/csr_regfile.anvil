@@ -1,0 +1,611 @@
+/* Hand-written Anvil for csr_regfile.sv
+   CSR Register File as specified by RISC-V.
+   Handles CSR reads/writes, privilege level management, exception/trap handling,
+   interrupt management, debug mode, mret/sret/dret, counters.
+   Concrete: XLEN=64, VLEN=64, NrCommitPorts=2, ASID_WIDTH=16, PPNW=44,
+   FpPresent=1, RVS=1, RVU=1, RVH=0, DebugEn=1, TvalEn=1,
+   MHPMCounterNum=6. CSR OP encoding: WRITE=0, SET=1, CLEAR=2, READ=3,
+   MRET=4, SRET=5, DRET=6. Privilege levels: M=3, S=1, U=0. */
+
+chan csr_in_ch {
+    left time_irq : (logic@#1) @dyn - @dyn,
+    left commit_ack_0 : (logic@#1) @dyn - @dyn,
+    left commit_ack_1 : (logic@#1) @dyn - @dyn,
+    left boot_addr : (logic[64]@#1) @dyn - @dyn,
+    left hart_id : (logic[64]@#1) @dyn - @dyn,
+    left ex_valid : (logic@#1) @dyn - @dyn,
+    left ex_cause : (logic[64]@#1) @dyn - @dyn,
+    left ex_tval : (logic[64]@#1) @dyn - @dyn,
+    left csr_op : (logic[3]@#1) @dyn - @dyn,
+    left csr_addr : (logic[12]@#1) @dyn - @dyn,
+    left csr_wdata : (logic[64]@#1) @dyn - @dyn,
+    left dirty_fp_state : (logic@#1) @dyn - @dyn,
+    left csr_write_fflags : (logic@#1) @dyn - @dyn,
+    left dirty_v_state : (logic@#1) @dyn - @dyn,
+    left pc : (logic[64]@#1) @dyn - @dyn,
+    left acc_fflags_ex : (logic[5]@#1) @dyn - @dyn,
+    left acc_fflags_ex_valid : (logic@#1) @dyn - @dyn,
+    left irq : (logic[2]@#1) @dyn - @dyn,
+    left ipi : (logic@#1) @dyn - @dyn,
+    left debug_req : (logic@#1) @dyn - @dyn,
+    left perf_data : (logic[64]@#1) @dyn - @dyn
+}
+
+chan csr_out_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left halt_csr : (logic@#1) @dyn - @dyn,
+    left csr_rdata : (logic[64]@#1) @dyn - @dyn,
+    left csr_exc_valid : (logic@#1) @dyn - @dyn,
+    left csr_exc_cause : (logic[64]@#1) @dyn - @dyn,
+    left csr_exc_tval : (logic[64]@#1) @dyn - @dyn,
+    left epc : (logic[64]@#1) @dyn - @dyn,
+    left eret : (logic@#1) @dyn - @dyn,
+    left trap_vector_base : (logic[64]@#1) @dyn - @dyn,
+    left priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left v : (logic@#1) @dyn - @dyn,
+    left fs : (logic[2]@#1) @dyn - @dyn,
+    left fflags : (logic[5]@#1) @dyn - @dyn,
+    left frm : (logic[3]@#1) @dyn - @dyn,
+    left fprec : (logic[7]@#1) @dyn - @dyn,
+    left vs : (logic[2]@#1) @dyn - @dyn,
+    left irq_mie : (logic[64]@#1) @dyn - @dyn,
+    left irq_mip : (logic[64]@#1) @dyn - @dyn,
+    left irq_sie : (logic@#1) @dyn - @dyn,
+    left irq_mideleg : (logic[64]@#1) @dyn - @dyn,
+    left irq_global_enable : (logic@#1) @dyn - @dyn,
+    left en_translation : (logic@#1) @dyn - @dyn,
+    left en_ld_st_translation : (logic@#1) @dyn - @dyn,
+    left ld_st_priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left sum : (logic@#1) @dyn - @dyn,
+    left mxr : (logic@#1) @dyn - @dyn,
+    left satp_ppn : (logic[44]@#1) @dyn - @dyn,
+    left asid : (logic[16]@#1) @dyn - @dyn,
+    left set_debug_pc : (logic@#1) @dyn - @dyn,
+    left tvm : (logic@#1) @dyn - @dyn,
+    left tw : (logic@#1) @dyn - @dyn,
+    left tsr : (logic@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left single_step : (logic@#1) @dyn - @dyn,
+    left icache_en : (logic@#1) @dyn - @dyn,
+    left dcache_en : (logic@#1) @dyn - @dyn,
+    left perf_addr : (logic[12]@#1) @dyn - @dyn,
+    left perf_data_out : (logic[64]@#1) @dyn - @dyn,
+    left perf_we : (logic@#1) @dyn - @dyn,
+    left mcountinhibit_out : (logic[32]@#1) @dyn - @dyn
+}
+
+proc csr_regfile(
+    inp : left csr_in_ch,
+    out : right csr_out_ch
+) {
+    /* ---- Input staging registers ---- */
+    reg r_time_irq : logic;
+    reg r_ack_0 : logic;
+    reg r_ack_1 : logic;
+    reg r_hart_id : logic[64];
+    reg r_ex_valid : logic;
+    reg r_ex_cause : logic[64];
+    reg r_ex_tval : logic[64];
+    reg r_csr_op : logic[3];
+    reg r_csr_addr : logic[12];
+    reg r_csr_wdata : logic[64];
+    reg r_dirty_fp : logic;
+    reg r_dirty_v : logic;
+    reg r_pc : logic[64];
+    reg r_irq : logic[2];
+    reg r_ipi : logic;
+    reg r_debug_req : logic;
+    reg r_perf_data : logic[64];
+
+    /* ---- CSR state registers ---- */
+    reg mstatus : logic[64];
+    reg mtvec : logic[64];
+    reg medeleg : logic[64];
+    reg mideleg : logic[64];
+    reg mip_r : logic[64];
+    reg mie_r : logic[64];
+    reg mcounteren : logic[64];
+    reg mscratch : logic[64];
+    reg mepc : logic[64];
+    reg mcause : logic[64];
+    reg mtval : logic[64];
+    reg stvec : logic[64];
+    reg scounteren : logic[64];
+    reg sscratch : logic[64];
+    reg sepc : logic[64];
+    reg scause : logic[64];
+    reg stval : logic[64];
+    reg satp : logic[64];
+    reg fcsr_r : logic[15];
+    reg dcsr : logic[32];
+    reg dpc : logic[64];
+    reg dscratch0 : logic[64];
+    reg dscratch1 : logic[64];
+    reg priv_lvl : logic[2];
+    reg debug_mode_r : logic;
+    reg cycle_ctr : logic[64];
+    reg instret_ctr : logic[64];
+    reg mcountinhibit : logic[9];
+    reg dcache : logic[64];
+    reg icache : logic[64];
+    reg en_ld_st_translation : logic;
+    reg wfi_r : logic;
+
+    /* ---- Snapshot registers (avoid borrow conflicts) ---- */
+    reg s_mstatus : logic[64];
+    reg s_mtvec : logic[64];
+    reg s_medeleg : logic[64];
+    reg s_mideleg : logic[64];
+    reg s_mip : logic[64];
+    reg s_mie : logic[64];
+    reg s_mcounteren : logic[64];
+    reg s_mscratch : logic[64];
+    reg s_mepc : logic[64];
+    reg s_mcause : logic[64];
+    reg s_mtval : logic[64];
+    reg s_stvec : logic[64];
+    reg s_scounteren : logic[64];
+    reg s_sscratch : logic[64];
+    reg s_sepc : logic[64];
+    reg s_scause : logic[64];
+    reg s_stval : logic[64];
+    reg s_satp : logic[64];
+    reg s_fcsr : logic[15];
+    reg s_dcsr : logic[32];
+    reg s_dpc : logic[64];
+    reg s_dscratch0 : logic[64];
+    reg s_dscratch1 : logic[64];
+    reg s_priv : logic[2];
+    reg s_dbg : logic;
+    reg s_cycle : logic[64];
+    reg s_instret : logic[64];
+    reg s_mcinh : logic[9];
+    reg s_dcache : logic[64];
+    reg s_icache : logic[64];
+    reg s_elst : logic;
+    reg s_wfi : logic;
+    reg s_perf : logic[64];
+
+    /* ---- Input recv loops ---- */
+    loop { let x = recv inp.time_irq >> set r_time_irq := x }
+    loop { let x = recv inp.commit_ack_0 >> set r_ack_0 := x }
+    loop { let x = recv inp.commit_ack_1 >> set r_ack_1 := x }
+    loop { let x = recv inp.boot_addr >> cycle 1 }
+    loop { let x = recv inp.hart_id >> set r_hart_id := x }
+    loop { let x = recv inp.ex_valid >> set r_ex_valid := x }
+    loop { let x = recv inp.ex_cause >> set r_ex_cause := x }
+    loop { let x = recv inp.ex_tval >> set r_ex_tval := x }
+    loop { let x = recv inp.csr_op >> set r_csr_op := x }
+    loop { let x = recv inp.csr_addr >> set r_csr_addr := x }
+    loop { let x = recv inp.csr_wdata >> set r_csr_wdata := x }
+    loop { let x = recv inp.dirty_fp_state >> set r_dirty_fp := x }
+    loop { let x = recv inp.csr_write_fflags >> cycle 1 }
+    loop { let x = recv inp.dirty_v_state >> set r_dirty_v := x }
+    loop { let x = recv inp.pc >> set r_pc := x }
+    loop { let x = recv inp.acc_fflags_ex >> cycle 1 }
+    loop { let x = recv inp.acc_fflags_ex_valid >> cycle 1 }
+    loop { let x = recv inp.irq >> set r_irq := x }
+    loop { let x = recv inp.ipi >> set r_ipi := x }
+    loop { let x = recv inp.debug_req >> set r_debug_req := x }
+    loop { let x = recv inp.perf_data >> set r_perf_data := x }
+
+    /* ---- Snapshot loop ---- */
+    loop {
+        set s_mstatus := *mstatus >>
+        set s_mtvec := *mtvec >>
+        set s_medeleg := *medeleg >>
+        set s_mideleg := *mideleg >>
+        set s_mip := *mip_r >>
+        set s_mie := *mie_r >>
+        set s_mcounteren := *mcounteren >>
+        set s_mscratch := *mscratch >>
+        set s_mepc := *mepc >>
+        set s_mcause := *mcause >>
+        set s_mtval := *mtval >>
+        set s_stvec := *stvec >>
+        set s_scounteren := *scounteren >>
+        set s_sscratch := *sscratch >>
+        set s_sepc := *sepc >>
+        set s_scause := *scause >>
+        set s_stval := *stval >>
+        set s_satp := *satp >>
+        set s_fcsr := *fcsr_r >>
+        set s_dcsr := *dcsr >>
+        set s_dpc := *dpc >>
+        set s_dscratch0 := *dscratch0 >>
+        set s_dscratch1 := *dscratch1 >>
+        set s_priv := *priv_lvl >>
+        set s_dbg := *debug_mode_r >>
+        set s_cycle := *cycle_ctr >>
+        set s_instret := *instret_ctr >>
+        set s_mcinh := *mcountinhibit >>
+        set s_dcache := *dcache >>
+        set s_icache := *icache >>
+        set s_elst := *en_ld_st_translation >>
+        set s_wfi := *wfi_r >>
+        set s_perf := *r_perf_data
+    }
+
+    /* ---- Main output and state update loop ---- */
+    loop {
+        /* --- CSR op decode --- */
+        let csr_we = if (*r_csr_op == 3'd3) | (*r_csr_op == 3'd4) |
+                        (*r_csr_op == 3'd5) | (*r_csr_op == 3'd6) { 1'b0 } else { 1'b1 } >>
+        let csr_rd = if (*r_csr_op == 3'd4) | (*r_csr_op == 3'd5) |
+                        (*r_csr_op == 3'd6) { 1'b0 } else { 1'b1 } >>
+        let is_mret = if *r_csr_op == 3'd4 { 1'b1 } else { 1'b0 } >>
+        let is_sret = if *r_csr_op == 3'd5 { 1'b1 } else { 1'b0 } >>
+        let is_dret = if *r_csr_op == 3'd6 { 1'b1 } else { 1'b0 } >>
+
+        /* --- Privilege check --- */
+        let addr_priv = <(*r_csr_addr >> 64'd8)::logic[2]> >>
+        let dbg_only = (<(*r_csr_addr >> 64'd4)::logic[8]> == 8'h7B) & (*s_dbg == 1'b0) >>
+        let priv_viol = if (*r_csr_op == 3'd0) | (*r_csr_op == 3'd1) |
+                           (*r_csr_op == 3'd2) | (*r_csr_op == 3'd3) {
+            if *s_priv < addr_priv { 1'b1 }
+            else if dbg_only == 1'b1 { 1'b1 }
+            else { 1'b0 }
+        } else { 1'b0 } >>
+        let eff_we = csr_we & ~priv_viol >>
+        let eff_rd = csr_rd & ~priv_viol >>
+
+        /* --- CSR read data --- */
+        let rdata =
+            if *r_csr_addr == 12'h300 { *s_mstatus }
+            else if *r_csr_addr == 12'h301 { 64'h8000000000141101 }
+            else if *r_csr_addr == 12'h302 { *s_medeleg }
+            else if *r_csr_addr == 12'h303 { *s_mideleg }
+            else if *r_csr_addr == 12'h304 { *s_mie }
+            else if *r_csr_addr == 12'h305 { *s_mtvec }
+            else if *r_csr_addr == 12'h306 { *s_mcounteren }
+            else if *r_csr_addr == 12'h340 { *s_mscratch }
+            else if *r_csr_addr == 12'h341 { *s_mepc }
+            else if *r_csr_addr == 12'h342 { *s_mcause }
+            else if *r_csr_addr == 12'h343 { *s_mtval }
+            else if *r_csr_addr == 12'h344 { *s_mip }
+            else if *r_csr_addr == 12'h320 { <(*s_mcinh)::logic[64]> }
+            else if *r_csr_addr == 12'hB00 { *s_cycle }
+            else if *r_csr_addr == 12'hB02 { *s_instret }
+            else if *r_csr_addr == 12'hC00 { *s_cycle }
+            else if *r_csr_addr == 12'hC02 { *s_instret }
+            else if *r_csr_addr == 12'hF11 { 64'h0602 }
+            else if *r_csr_addr == 12'hF12 { 64'h3 }
+            else if *r_csr_addr == 12'hF13 { 64'h1 }
+            else if *r_csr_addr == 12'hF14 { *r_hart_id }
+            else if *r_csr_addr == 12'h100 { *s_mstatus & 64'h80000003000DE162 }
+            else if *r_csr_addr == 12'h104 { *s_mie & *s_mideleg }
+            else if *r_csr_addr == 12'h144 { *s_mip & *s_mideleg }
+            else if *r_csr_addr == 12'h105 { *s_stvec }
+            else if *r_csr_addr == 12'h106 { *s_scounteren }
+            else if *r_csr_addr == 12'h140 { *s_sscratch }
+            else if *r_csr_addr == 12'h141 { *s_sepc }
+            else if *r_csr_addr == 12'h142 { *s_scause }
+            else if *r_csr_addr == 12'h143 { *s_stval }
+            else if *r_csr_addr == 12'h180 { *s_satp }
+            else if *r_csr_addr == 12'h001 { <(*s_fcsr)::logic[64]> & 64'h1F }
+            else if *r_csr_addr == 12'h002 { <(<(*s_fcsr >> 15'd5)::logic[3]>)::logic[64]> }
+            else if *r_csr_addr == 12'h003 { <(*s_fcsr)::logic[64]> & 64'hFF }
+            else if *r_csr_addr == 12'h7B0 { <(*s_dcsr)::logic[64]> }
+            else if *r_csr_addr == 12'h7B1 { *s_dpc }
+            else if *r_csr_addr == 12'h7B2 { *s_dscratch0 }
+            else if *r_csr_addr == 12'h7B3 { *s_dscratch1 }
+            else if (*r_csr_addr >= 12'hB03) & (*r_csr_addr <= 12'hB08) { *s_perf }
+            else if (*r_csr_addr >= 12'h323) & (*r_csr_addr <= 12'h328) { *s_perf }
+            else if (*r_csr_addr >= 12'hC03) & (*r_csr_addr <= 12'hC08) { *s_perf }
+            else { 64'd0 } >>
+
+        /* CSR write data based on op */
+        let wdata_eff = if *r_csr_op == 3'd0 { *r_csr_wdata }
+                        else if *r_csr_op == 3'd1 { *r_csr_wdata | rdata }
+                        else if *r_csr_op == 3'd2 { (~(*r_csr_wdata)) & rdata }
+                        else { *r_csr_wdata } >>
+
+        /* Known address check */
+        let known_addr =
+            (*r_csr_addr == 12'h300) | (*r_csr_addr == 12'h301) |
+            (*r_csr_addr == 12'h302) | (*r_csr_addr == 12'h303) |
+            (*r_csr_addr == 12'h304) | (*r_csr_addr == 12'h305) |
+            (*r_csr_addr == 12'h306) | (*r_csr_addr == 12'h320) |
+            (*r_csr_addr == 12'h340) | (*r_csr_addr == 12'h341) |
+            (*r_csr_addr == 12'h342) | (*r_csr_addr == 12'h343) |
+            (*r_csr_addr == 12'h344) |
+            (*r_csr_addr == 12'hB00) | (*r_csr_addr == 12'hB02) |
+            (*r_csr_addr == 12'hC00) | (*r_csr_addr == 12'hC02) |
+            (*r_csr_addr == 12'hF11) | (*r_csr_addr == 12'hF12) |
+            (*r_csr_addr == 12'hF13) | (*r_csr_addr == 12'hF14) |
+            (*r_csr_addr == 12'h100) | (*r_csr_addr == 12'h104) |
+            (*r_csr_addr == 12'h144) | (*r_csr_addr == 12'h105) |
+            (*r_csr_addr == 12'h106) | (*r_csr_addr == 12'h140) |
+            (*r_csr_addr == 12'h141) | (*r_csr_addr == 12'h142) |
+            (*r_csr_addr == 12'h143) | (*r_csr_addr == 12'h180) |
+            (*r_csr_addr == 12'h001) | (*r_csr_addr == 12'h002) |
+            (*r_csr_addr == 12'h003) |
+            (*r_csr_addr == 12'h7B0) | (*r_csr_addr == 12'h7B1) |
+            (*r_csr_addr == 12'h7B2) | (*r_csr_addr == 12'h7B3) |
+            ((*r_csr_addr >= 12'hB03) & (*r_csr_addr <= 12'hB08)) |
+            ((*r_csr_addr >= 12'h323) & (*r_csr_addr <= 12'h328)) |
+            ((*r_csr_addr >= 12'hC03) & (*r_csr_addr <= 12'hC08)) >>
+        let read_exc = eff_rd & ~known_addr >>
+        let csr_exc_valid = priv_viol | read_exc >>
+
+        /* --- Flush logic --- */
+        let base_flush = if eff_we == 1'b1 {
+            if (*r_csr_addr == 12'h001) | (*r_csr_addr == 12'h002) |
+               (*r_csr_addr == 12'h003) | (*r_csr_addr == 12'h100) |
+               (*r_csr_addr == 12'h180) { 1'b1 }
+            else { 1'b0 }
+        } else { 1'b0 } >>
+        let flush_out = if *r_ex_valid == 1'b1 { 1'b0 } else { base_flush } >>
+
+        /* --- Counter logic --- */
+        let a0 = if (*r_ack_0 == 1'b1) & (*r_ex_valid == 1'b0) { 64'd1 } else { 64'd0 } >>
+        let a1_v = if (*r_ack_1 == 1'b1) & (*r_ex_valid == 1'b0) { 64'd1 } else { 64'd0 } >>
+        let instret_inc = if *s_dbg == 1'b0 { a0 + a1_v } else { 64'd0 } >>
+        let next_instret = *s_instret + instret_inc >>
+        let next_cycle = if *s_dbg == 1'b0 { *s_cycle + 64'd1 } else { *s_cycle } >>
+
+        /* --- Performance counter interface --- */
+        let perf_we_out = if eff_we == 1'b1 {
+            if ((*r_csr_addr >= 12'hB03) & (*r_csr_addr <= 12'hB08)) |
+               ((*r_csr_addr >= 12'h323) & (*r_csr_addr <= 12'h328)) { 1'b1 }
+            else { 1'b0 }
+        } else { 1'b0 } >>
+
+        /* --- eret --- */
+        let eret_out = is_mret | is_sret | is_dret >>
+
+        /* --- Trap delegation --- */
+        let cause_low = *r_ex_cause & 64'h3F >>
+        let cause_msb = *r_ex_cause & 64'h8000000000000000 >>
+        let ideleg_hit = (*s_mideleg >> cause_low) & 64'd1 >>
+        let edeleg_hit = (*s_medeleg >> cause_low) & 64'd1 >>
+        let trap_to_m = if *r_ex_valid == 1'b1 {
+            if (cause_msb != 64'd0) & (ideleg_hit == 64'd1) { 1'b0 }
+            else if (cause_msb == 64'd0) & (edeleg_hit == 64'd1) { 1'b0 }
+            else { 1'b1 }
+        } else { 1'b0 } >>
+        let trap_to_s = (*r_ex_valid == 1'b1) & ~trap_to_m >>
+
+        /* --- epc output --- */
+        let epc_out = if is_mret == 1'b1 { *s_mepc }
+                      else if is_sret == 1'b1 { *s_sepc }
+                      else if is_dret == 1'b1 { *s_dpc }
+                      else { 64'd0 } >>
+
+        /* --- trap vector base --- */
+        let tvb_out = if trap_to_s == 1'b1 { *s_stvec } else { *s_mtvec } >>
+
+        /* --- Address translation --- */
+        let satp_mode = <(*s_satp >> 64'd60)::logic[4]> >>
+        let en_trans = if satp_mode != 4'd0 {
+            if *s_priv != 2'd3 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+        let mprv_bit = <(*s_mstatus >> 64'd17)::logic> >>
+        let mpp_bits = <(*s_mstatus >> 64'd11)::logic[2]> >>
+        let en_ld_st_d = if (mprv_bit == 1'b1) & (satp_mode != 4'd0) &
+                            (mpp_bits != 2'd3) { 1'b1 }
+                         else { en_trans } >>
+        let ld_st_priv_out = if mprv_bit == 1'b1 { mpp_bits } else { *s_priv } >>
+
+        /* --- Debug --- */
+        let set_debug_pc_out = if (*s_dbg == 1'b0) & (*r_ex_valid == 1'b1) &
+                                  (*r_ex_cause == 64'hE) { 1'b1 }
+                               else { 1'b0 } >>
+
+        /* --- Interrupt pending --- */
+        let irq_bit0 = <(*r_irq)::logic[64]> & 64'd1 >>
+        let ipi_bit = <(*r_ipi)::logic[64]> >>
+        let tirq_bit = <(*r_time_irq)::logic[64]> >>
+        let new_mip = (*s_mip & ~64'h888) |
+                      (irq_bit0 << 64'd11) |
+                      (ipi_bit << 64'd3) |
+                      (tirq_bit << 64'd7) >>
+
+        /* --- mstatus field extracts from snapshot --- */
+        let ms_sie = <(*s_mstatus >> 64'd1)::logic> >>
+        let ms_mie = <(*s_mstatus >> 64'd3)::logic> >>
+        let ms_spie = <(*s_mstatus >> 64'd5)::logic> >>
+        let ms_mpie = <(*s_mstatus >> 64'd7)::logic> >>
+        let ms_fs = <(*s_mstatus >> 64'd13)::logic[2]> >>
+        let ms_vs = <(*s_mstatus >> 64'd9)::logic[2]> >>
+        let ms_sum = <(*s_mstatus >> 64'd18)::logic> >>
+        let ms_mxr = <(*s_mstatus >> 64'd19)::logic> >>
+        let ms_tvm = <(*s_mstatus >> 64'd20)::logic> >>
+        let ms_tw = <(*s_mstatus >> 64'd21)::logic> >>
+        let ms_tsr = <(*s_mstatus >> 64'd22)::logic> >>
+        let ms_spp = <(*s_mstatus >> 64'd8)::logic> >>
+
+        /* --- Send all outputs --- */
+        send out.flush (flush_out) >>
+        send out.halt_csr (*s_wfi) >>
+        send out.csr_rdata (rdata) >>
+        send out.csr_exc_valid (csr_exc_valid) >>
+        send out.csr_exc_cause (64'd2) >>
+        send out.csr_exc_tval (<(*r_csr_addr)::logic[64]>) >>
+        send out.epc (epc_out) >>
+        send out.eret (eret_out) >>
+        send out.trap_vector_base (tvb_out) >>
+        send out.priv_lvl (*s_priv) >>
+        send out.v (1'b0) >>
+        send out.fs (ms_fs) >>
+        send out.fflags (<(*s_fcsr)::logic[5]>) >>
+        send out.frm (<(*s_fcsr >> 15'd5)::logic[3]>) >>
+        send out.fprec (<(*s_fcsr >> 15'd8)::logic[7]>) >>
+        send out.vs (ms_vs) >>
+        send out.irq_mie (*s_mie) >>
+        send out.irq_mip (*s_mip) >>
+        send out.irq_sie (ms_sie) >>
+        send out.irq_mideleg (*s_mideleg) >>
+        send out.irq_global_enable ((<(ms_mie)::logic> & (*s_priv == 2'd3)) | (*s_priv != 2'd3)) >>
+        send out.en_translation (en_trans) >>
+        send out.en_ld_st_translation (*s_elst) >>
+        send out.ld_st_priv_lvl (ld_st_priv_out) >>
+        send out.sum (ms_sum) >>
+        send out.mxr (ms_mxr) >>
+        send out.satp_ppn (<(*s_satp)::logic[44]>) >>
+        send out.asid (<(*s_satp >> 64'd44)::logic[16]>) >>
+        send out.set_debug_pc (set_debug_pc_out) >>
+        send out.tvm (ms_tvm) >>
+        send out.tw (ms_tw) >>
+        send out.tsr (ms_tsr) >>
+        send out.debug_mode (*s_dbg) >>
+        send out.single_step (<(*s_dcsr >> 32'd2)::logic>) >>
+        send out.icache_en (<(*s_icache)::logic>) >>
+        send out.dcache_en (<(*s_dcache)::logic>) >>
+        send out.perf_addr (*r_csr_addr) >>
+        send out.perf_data_out (wdata_eff) >>
+        send out.perf_we (perf_we_out) >>
+        send out.mcountinhibit_out (<(*s_mcinh)::logic[32]>) >>
+
+        /* ---- State updates ---- */
+        set cycle_ctr := next_cycle >>
+        set instret_ctr := next_instret >>
+
+        if *r_ex_valid == 1'b1 {
+            if trap_to_s == 1'b1 {
+                /* Trap to S-mode */
+                let ms_new = (*s_mstatus & ~64'h122) |
+                             (<(ms_sie)::logic[64]> << 64'd5) >>
+                set mstatus := ms_new & ~64'd2 >>
+                set scause := *r_ex_cause >>
+                set sepc := *r_pc >>
+                set stval := *r_ex_tval >>
+                set priv_lvl := 2'd1 >>
+                set mip_r := new_mip >>
+                set en_ld_st_translation := en_ld_st_d >>
+                set mie_r := *s_mie >>
+                set debug_mode_r := *s_dbg
+            } else {
+                /* Trap to M-mode */
+                let ms_new2 = (*s_mstatus & ~64'h1888) |
+                              (<(ms_mie)::logic[64]> << 64'd7) |
+                              (<(*s_priv)::logic[64]> << 64'd11) >>
+                set mstatus := ms_new2 & ~64'd8 >>
+                set mcause := *r_ex_cause >>
+                set mepc := *r_pc >>
+                set mtval := *r_ex_tval >>
+                set priv_lvl := 2'd3 >>
+                set mip_r := new_mip >>
+                set en_ld_st_translation := en_ld_st_d >>
+                set mie_r := *s_mie >>
+                set debug_mode_r := *s_dbg
+            }
+        } else if is_mret == 1'b1 {
+            let ms_r = (*s_mstatus & ~64'h1888) |
+                       (<(ms_mpie)::logic[64]> << 64'd3) |
+                       (64'd1 << 64'd7) >>
+            set mstatus := ms_r >>
+            set priv_lvl := mpp_bits >>
+            set mip_r := new_mip >>
+            set en_ld_st_translation := en_ld_st_d >>
+            set mie_r := *s_mie >>
+            set debug_mode_r := *s_dbg
+        } else if is_sret == 1'b1 {
+            let ms_s = (*s_mstatus & ~64'h122) |
+                       (<(ms_spie)::logic[64]> << 64'd1) |
+                       (64'd1 << 64'd5) >>
+            set mstatus := ms_s >>
+            set priv_lvl := #{1'b0, ms_spp} >>
+            set mip_r := new_mip >>
+            set en_ld_st_translation := en_ld_st_d >>
+            set mie_r := *s_mie >>
+            set debug_mode_r := *s_dbg
+        } else if is_dret == 1'b1 {
+            set priv_lvl := <(*s_dcsr)::logic[2]> >>
+            set debug_mode_r := 1'b0 >>
+            set mip_r := new_mip >>
+            set en_ld_st_translation := en_ld_st_d >>
+            set mstatus := *s_mstatus >>
+            set mie_r := *s_mie
+        } else if eff_we == 1'b1 {
+            /* Normal CSR write */
+            let n_mstatus =
+                if *r_csr_addr == 12'h300 { wdata_eff }
+                else if *r_csr_addr == 12'h100 {
+                    let smask = 64'h80000003000DE162 >>
+                    (*s_mstatus & ~smask) | (wdata_eff & smask)
+                }
+                else { *s_mstatus } >>
+            let n_mie =
+                if *r_csr_addr == 12'h304 { wdata_eff }
+                else if *r_csr_addr == 12'h104 {
+                    (*s_mie & ~(*s_mideleg)) | (wdata_eff & *s_mideleg)
+                }
+                else { *s_mie } >>
+            let n_mip =
+                if *r_csr_addr == 12'h144 {
+                    let sip_mask = 64'd2 & *s_mideleg >>
+                    (new_mip & ~sip_mask) | (wdata_eff & sip_mask)
+                }
+                else { new_mip } >>
+            let n_mtvec = if *r_csr_addr == 12'h305 {
+                (wdata_eff & ~64'd2) | (wdata_eff & 64'd1)
+            } else { *s_mtvec } >>
+            let n_mscratch = if *r_csr_addr == 12'h340 { wdata_eff } else { *s_mscratch } >>
+            let n_mepc = if *r_csr_addr == 12'h341 { wdata_eff & ~64'd1 } else { *s_mepc } >>
+            let n_mcause = if *r_csr_addr == 12'h342 { wdata_eff } else { *s_mcause } >>
+            let n_mtval = if *r_csr_addr == 12'h343 { wdata_eff } else { *s_mtval } >>
+            let n_medeleg = if *r_csr_addr == 12'h302 { wdata_eff } else { *s_medeleg } >>
+            let n_mideleg = if *r_csr_addr == 12'h303 { wdata_eff } else { *s_mideleg } >>
+            let n_mcounteren = if *r_csr_addr == 12'h306 { wdata_eff } else { *s_mcounteren } >>
+            let n_mcinh = if *r_csr_addr == 12'h320 { <(wdata_eff)::logic[9]> } else { *s_mcinh } >>
+            let n_stvec = if *r_csr_addr == 12'h105 {
+                (wdata_eff & ~64'd2) | (wdata_eff & 64'd1)
+            } else { *s_stvec } >>
+            let n_scounteren = if *r_csr_addr == 12'h106 { wdata_eff } else { *s_scounteren } >>
+            let n_sscratch = if *r_csr_addr == 12'h140 { wdata_eff } else { *s_sscratch } >>
+            let n_sepc = if *r_csr_addr == 12'h141 { wdata_eff & ~64'd1 } else { *s_sepc } >>
+            let n_scause = if *r_csr_addr == 12'h142 { wdata_eff } else { *s_scause } >>
+            let n_stval = if *r_csr_addr == 12'h143 { wdata_eff } else { *s_stval } >>
+            let n_satp = if *r_csr_addr == 12'h180 { wdata_eff } else { *s_satp } >>
+            let n_fcsr =
+                if *r_csr_addr == 12'h001 {
+                    (<(wdata_eff)::logic[15]> & 15'd31) | (*s_fcsr & ~15'd31)
+                } else if *r_csr_addr == 12'h002 {
+                    (<(wdata_eff << 64'd5)::logic[15]> & 15'h0E0) | (*s_fcsr & ~15'h0E0)
+                } else if *r_csr_addr == 12'h003 {
+                    (<(wdata_eff)::logic[15]> & 15'h0FF) | (*s_fcsr & ~15'h0FF)
+                } else { *s_fcsr } >>
+            let n_dcsr = if *r_csr_addr == 12'h7B0 { <(wdata_eff)::logic[32]> } else { *s_dcsr } >>
+            let n_dpc = if *r_csr_addr == 12'h7B1 { wdata_eff } else { *s_dpc } >>
+            let n_ds0 = if *r_csr_addr == 12'h7B2 { wdata_eff } else { *s_dscratch0 } >>
+            let n_ds1 = if *r_csr_addr == 12'h7B3 { wdata_eff } else { *s_dscratch1 } >>
+
+            set mstatus := n_mstatus >>
+            set mie_r := n_mie >>
+            set mip_r := n_mip >>
+            set mtvec := n_mtvec >>
+            set mscratch := n_mscratch >>
+            set mepc := n_mepc >>
+            set mcause := n_mcause >>
+            set mtval := n_mtval >>
+            set medeleg := n_medeleg >>
+            set mideleg := n_mideleg >>
+            set mcounteren := n_mcounteren >>
+            set mcountinhibit := n_mcinh >>
+            set stvec := n_stvec >>
+            set scounteren := n_scounteren >>
+            set sscratch := n_sscratch >>
+            set sepc := n_sepc >>
+            set scause := n_scause >>
+            set stval := n_stval >>
+            set satp := n_satp >>
+            set fcsr_r := n_fcsr >>
+            set dcsr := n_dcsr >>
+            set dpc := n_dpc >>
+            set dscratch0 := n_ds0 >>
+            set dscratch1 := n_ds1 >>
+            set en_ld_st_translation := en_ld_st_d >>
+            set priv_lvl := *s_priv >>
+            set debug_mode_r := *s_dbg
+        } else {
+            /* No write, no exception, no ret */
+            set mip_r := new_mip >>
+            set mstatus := *s_mstatus >>
+            set en_ld_st_translation := en_ld_st_d >>
+            set priv_lvl := *s_priv >>
+            set debug_mode_r := *s_dbg >>
+            set mie_r := *s_mie
+        }
+    }
+}
