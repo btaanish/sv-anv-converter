@@ -1,0 +1,101 @@
+/* Hand-written Anvil for prioarbiter.sv (deprecated)
+   Priority arbiter with lock-in feature.
+   Port 0 has highest priority, port 1 next, etc.
+   Concrete params: NUM_REQ=4, LOCK_IN=0.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~65
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] NUM_REQ hardcoded to 4
+       - [MANUAL-CLEANUP-NEEDED] LOCK_IN=0 path only — lock registers present but unused
+       - [MANUAL-CLEANUP-NEEDED] onehot_to_bin sub-module inlined as match
+*/
+
+// [MANUAL] Channel for arbiter inputs
+chan prio_in_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left en : (logic@#1) @dyn - @dyn,
+    left req : (logic[4]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for arbiter outputs
+chan prio_out_ch {
+    left ack : (logic[4]@#1) @dyn - @dyn,
+    left vld : (logic@#1) @dyn - @dyn,
+    left idx : (logic[2]@#1) @dyn - @dyn
+}
+
+proc prioarbiter(
+    inp : left prio_in_ch,    // [MANUAL] flush, en, req inputs
+    out : right prio_out_ch   // [MANUAL] ack, vld, idx outputs
+) {
+    // [MANUAL] Lock registers (LOCK_IN=0, so these stay zero)
+    reg lock_q : logic;
+    reg arb_sel_lock_q : logic[2];
+
+    // [MANUAL] Input staging
+    reg r_flush : logic;
+    reg r_en : logic;
+    reg r_req : logic[4];
+
+    // [MANUAL] Snapshots
+    reg snap_lock : logic;
+    reg snap_arb_sel : logic[2];
+
+    loop {
+        // [MANUAL] Snapshot lock state
+        set snap_lock := *lock_q;
+        set snap_arb_sel := *arb_sel_lock_q >>
+
+        // [MANUAL] Receive inputs
+        let f = recv inp.flush >>
+        set r_flush := f >>
+        let e = recv inp.en >>
+        set r_en := e >>
+        let r = recv inp.req >>
+        set r_req := r >>
+
+        // [MANUAL] Compute vld_o = |req_i & en_i
+        let any_req = <((*r_req & 4'b0001) | ((*r_req >> 4'd1) & 4'b0001) |
+                       ((*r_req >> 4'd2) & 4'b0001) | ((*r_req >> 4'd3) & 4'b0001))::logic> >>
+        let vld_out = any_req & *r_en >>
+
+        // [MANUAL] Priority arbitration: port 0 highest priority
+        // ack_o[0] = req_i[0] ? en_i : 0
+        // ack_o[i] = req_i[i] & ~|ack_o[i-1:0] ? en_i : 0
+        let ack0 = if (*r_req & 4'b0001) == 4'b0001 { *r_en } else { 1'b0 } >>
+        let ack1 = if ((*r_req & 4'b0010) == 4'b0010) & (ack0 == 1'b0) { *r_en } else { 1'b0 } >>
+        let ack2 = if ((*r_req & 4'b0100) == 4'b0100) & (ack0 == 1'b0) & (ack1 == 1'b0) { *r_en } else { 1'b0 } >>
+        let ack3 = if ((*r_req & 4'b1000) == 4'b1000) & (ack0 == 1'b0) & (ack1 == 1'b0) & (ack2 == 1'b0) { *r_en } else { 1'b0 } >>
+
+        let ack_out = #{ack3, ack2, ack1, ack0} >>
+
+        // [MANUAL] onehot_to_bin: convert one-hot ack to binary index
+        // [MANUAL-CLEANUP-NEEDED] Inlined onehot_to_bin for NUM_REQ=4
+        let idx_raw = if ack0 == 1'b1 { 2'd0 }
+                  else if ack1 == 1'b1 { 2'd1 }
+                  else if ack2 == 1'b1 { 2'd2 }
+                  else { 2'd3 } >>
+
+        // [MANUAL] idx_o = lock_q ? arb_sel_lock_q : idx
+        // LOCK_IN=0, so lock_q is always 0
+        let idx_out = if *snap_lock == 1'b1 { *snap_arb_sel } else { idx_raw } >>
+
+        // [MANUAL] Send outputs
+        send out.ack (ack_out);
+        send out.vld (vld_out);
+        send out.idx (idx_out) >>
+
+        // [MANUAL] Update lock registers (always_ff)
+        // LOCK_IN=0: lock_d=0, arb_sel_lock_d=0
+        if *r_flush == 1'b1 {
+            set lock_q := 1'b0;
+            set arb_sel_lock_q := 2'd0
+        } else {
+            // [MANUAL] LOCK_IN=0 path: always write zeros
+            set lock_q := 1'b0;
+            set arb_sel_lock_q := 2'd0
+        }
+    }
+}

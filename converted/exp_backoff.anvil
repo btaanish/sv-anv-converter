@@ -1,0 +1,102 @@
+/* Hand-written Anvil for exp_backoff.sv
+   Exponential backoff counter with randomization.
+   Uses 16-bit LFSR to generate random wait counts, masked with
+   exponentially increasing mask on each failed trial.
+   Concrete params: Seed=0xFFFF, MaxExp=16, WIDTH=16.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~70
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] Seed hardcoded to 16'hFFFF
+       - [MANUAL-CLEANUP-NEEDED] MaxExp=16, WIDTH=16 (MaxExp==WIDTH, so no zero-padding needed)
+       - [MANUAL-CLEANUP-NEEDED] LFSR taps hardcoded for 16-bit: bits 0, 2, 3, 5
+       - [MANUAL-CLEANUP-NEEDED] Replication in mask_d modeled as shift+OR
+*/
+
+// [MANUAL] Channel for backoff inputs
+chan expbo_in_ch {
+    left set_pulse : (logic@#1) @dyn - @dyn,
+    left clr_pulse : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for backoff output
+chan expbo_out_ch {
+    left is_zero : (logic@#1) @dyn - @dyn
+}
+
+proc exp_backoff(
+    inp : left expbo_in_ch,   // [MANUAL] set_i, clr_i inputs
+    out : right expbo_out_ch  // [MANUAL] is_zero_o output
+) {
+    // [MANUAL] LFSR state — 16 bits, reset to Seed=0xFFFF
+    reg lfsr_q : logic[16];
+    // [MANUAL] Backoff counter — counts down to zero
+    reg cnt_q : logic[16];
+    // [MANUAL] Exponential mask — shifts left on each set
+    reg mask_q : logic[16];
+
+    // [MANUAL] Input staging
+    reg r_set : logic;
+    reg r_clr : logic;
+
+    // [MANUAL] Snapshots
+    reg snap_lfsr : logic[16];
+    reg snap_cnt : logic[16];
+    reg snap_mask : logic[16];
+
+    // [MANUAL] Recv loop
+    loop {
+        let s = recv inp.set_pulse >>
+        set r_set := s >>
+        let c = recv inp.clr_pulse >>
+        set r_clr := c
+    }
+
+    // [MANUAL] Main logic loop
+    loop {
+        // Snapshot all state
+        set snap_lfsr := *lfsr_q;
+        set snap_cnt := *cnt_q;
+        set snap_mask := *mask_q >>
+
+        // [MANUAL] Compute is_zero_o = (cnt_q == 0)
+        let is_zero_val = if *snap_cnt == 16'd0 { 1'b1 } else { 1'b0 } >>
+
+        // [MANUAL] Send output
+        send out.is_zero (is_zero_val) >>
+
+        // [MANUAL] LFSR feedback: taps at bits 0, 2, 3, 5 (positions 15-15, 15-13, 15-12, 15-10)
+        let fb = <((*snap_lfsr & 16'd1) ^ ((*snap_lfsr >> 16'd2) & 16'd1) ^
+                   ((*snap_lfsr >> 16'd3) & 16'd1) ^ ((*snap_lfsr >> 16'd5) & 16'd1))::logic> >>
+
+        // [MANUAL] Compute next LFSR: shift right, insert feedback at MSB
+        let lfsr_shifted = <(*snap_lfsr >> 16'd1)::logic[16]> >>
+        let lfsr_next = if fb == 1'b1 { lfsr_shifted | 16'h8000 }
+                        else { lfsr_shifted & 16'h7FFF } >>
+
+        // [MANUAL] Compute next mask: clear on clr, shift left + set bit 0 on set
+        let mask_next = <((*snap_mask << 16'd1) | 16'd1)::logic[16]> >>
+
+        // [MANUAL] Compute next counter
+        let cnt_dec = if *snap_cnt != 16'd0 { <(*snap_cnt - 16'd1)::logic[16]> } else { 16'd0 } >>
+
+        // [MANUAL] Update state based on set/clr pulses
+        if *r_clr == 1'b1 {
+            // Clear: reset counter and mask to zero
+            set cnt_q := 16'd0;
+            set mask_q := 16'd0;
+            set lfsr_q := *snap_lfsr
+        } else if *r_set == 1'b1 {
+            // Set: load counter with masked LFSR, expand mask, advance LFSR
+            set cnt_q := *snap_mask & *snap_lfsr;
+            set mask_q := mask_next;
+            set lfsr_q := lfsr_next
+        } else {
+            // Idle: decrement counter
+            set cnt_q := cnt_dec;
+            set mask_q := *snap_mask;
+            set lfsr_q := *snap_lfsr
+        }
+    }
+}
