@@ -1,0 +1,109 @@
+/* Hand-written Anvil for spill_register_flushable.sv
+   Two-register spill register that cuts all combinational paths.
+   Register A accepts input, spills to Register B when A drains but downstream not ready.
+   Concrete: T=logic[32], Bypass=0. */
+
+chan spill_in_ch {
+    left valid : (logic@#1) @dyn - @dyn,
+    left flush : (logic@#1) @dyn - @dyn,
+    left data : (logic[32]@#1) @dyn - @dyn,
+    left ready_i : (logic@#1) @dyn - @dyn
+}
+
+chan spill_out_ch {
+    left rdy : (logic@#1) @dyn - @dyn,
+    left valid_out : (logic@#1) @dyn - @dyn,
+    left data_out : (logic[32]@#1) @dyn - @dyn
+}
+
+proc spill_register_flushable(
+    inp : left spill_in_ch,
+    out : right spill_out_ch
+) {
+    /* Register A */
+    reg a_data : logic[32];
+    reg a_full : logic;
+
+    /* Register B */
+    reg b_data : logic[32];
+    reg b_full : logic;
+
+    /* Snapshots */
+    reg snap_a_data : logic[32];
+    reg snap_a_full : logic;
+    reg snap_b_data : logic[32];
+    reg snap_b_full : logic;
+
+    /* Input staging */
+    reg r_valid : logic;
+    reg r_flush : logic;
+    reg r_data : logic[32];
+    reg r_ready_i : logic;
+
+    loop {
+        /* Snapshot state */
+        set snap_a_data := *a_data;
+        set snap_a_full := *a_full;
+        set snap_b_data := *b_data >>
+        set snap_b_full := *b_full >>
+
+        /* Receive inputs */
+        let vi = recv inp.valid >>
+        set r_valid := vi >>
+        let fl = recv inp.flush >>
+        set r_flush := fl >>
+        let d = recv inp.data >>
+        set r_data := d >>
+        let ri = recv inp.ready_i >>
+        set r_ready_i := ri >>
+
+        /* Compute control signals */
+        let ready_o = ~(*snap_a_full) | ~(*snap_b_full);
+
+        /* a_fill = valid_i && ready_o && !flush_i */
+        let a_fill = *r_valid & ready_o & ~(*r_flush);
+
+        /* a_drain = (a_full && !b_full) || flush_i */
+        let a_drain = (*snap_a_full & ~(*snap_b_full)) | *r_flush;
+
+        /* b_fill = a_drain && !ready_i && !flush_i */
+        let b_fill = a_drain & ~(*r_ready_i) & ~(*r_flush);
+
+        /* b_drain = (b_full && ready_i) || flush_i */
+        let b_drain = (*snap_b_full & *r_ready_i) | *r_flush;
+
+        /* Output: valid if either register is full */
+        let valid_o = *snap_a_full | *snap_b_full;
+
+        /* Output data: B register has priority (drain spill first) */
+        let data_out = if *snap_b_full == 1'b1 {
+            *snap_b_data
+        } else {
+            *snap_a_data
+        };
+
+        send out.rdy (ready_o);
+        send out.valid_out (valid_o);
+        send out.data_out (data_out) >>
+
+        /* Update Register A */
+        if a_fill == 1'b1 {
+            set a_data := *r_data;
+            set a_full := 1'b1
+        } else if a_drain == 1'b1 {
+            set a_full := 1'b0
+        } else {
+            cycle 1
+        } >>
+
+        /* Update Register B */
+        if b_fill == 1'b1 {
+            set b_data := *snap_a_data;
+            set b_full := 1'b1
+        } else if b_drain == 1'b1 {
+            set b_full := 1'b0
+        } else {
+            cycle 1
+        }
+    }
+}

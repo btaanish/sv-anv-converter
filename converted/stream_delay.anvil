@@ -1,0 +1,72 @@
+/* Hand-written Anvil for stream_delay.sv
+   Adds a fixed 1-cycle delay to a stream handshake.
+   Concrete: FixedDelay=1, StallRandom=0, payload_t=logic[32].
+   FSM: Idle -> Ready (skips Valid since delay=1). */
+
+chan delay_in_ch {
+    left payload : (logic[32]@#1) @dyn - @dyn,
+    left valid : (logic@#1) @dyn - @dyn,
+    left ready_i : (logic@#1) @dyn - @dyn
+}
+
+chan delay_out_ch {
+    left payload_out : (logic[32]@#1) @dyn - @dyn,
+    left valid_out : (logic@#1) @dyn - @dyn,
+    left ready_out : (logic@#1) @dyn - @dyn
+}
+
+proc stream_delay(
+    inp : left delay_in_ch,
+    out : right delay_out_ch
+) {
+    /* State: 0=Idle, 1=Ready */
+    reg state : logic;
+
+    /* Snapshots */
+    reg snap_state : logic;
+
+    /* Input staging */
+    reg r_payload : logic[32];
+    reg r_valid : logic;
+    reg r_ready_i : logic;
+
+    loop {
+        /* Snapshot */
+        set snap_state := *state >>
+
+        /* Receive inputs */
+        let p = recv inp.payload >>
+        set r_payload := p >>
+        let v = recv inp.valid >>
+        set r_valid := v >>
+        let ri = recv inp.ready_i >>
+        set r_ready_i := ri >>
+
+        /* Payload passes through directly */
+        send out.payload_out (*r_payload) >>
+
+        /* FSM logic */
+        if *snap_state == 1'b0 {
+            /* Idle state */
+            if *r_valid == 1'b1 {
+                /* FixedDelay=1: go directly to Ready */
+                send out.valid_out (1'b0);
+                send out.ready_out (1'b0) >>
+                set state := 1'b1
+            } else {
+                send out.valid_out (1'b0);
+                send out.ready_out (1'b0) >>
+                cycle 1
+            }
+        } else {
+            /* Ready state: assert valid, pass ready */
+            send out.valid_out (1'b1);
+            send out.ready_out (*r_ready_i) >>
+            if *r_ready_i == 1'b1 {
+                set state := 1'b0
+            } else {
+                cycle 1
+            }
+        }
+    }
+}
