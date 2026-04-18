@@ -1,0 +1,599 @@
+/* Hand-written Anvil for csr_regfile.sv
+   CSR Register File for CVA6 RISC-V processor.
+   Concrete params: XLEN=64, VLEN=39, PLEN=56, NrCommitPorts=2,
+   MHPMCounterNum=6, NrPMPEntries=8, ASID_WIDTH=16, VMID_WIDTH=1,
+   PPNW=44, ModeW=4.
+   All structs (mstatus, dcsr, fcsr, satp, etc.) flattened to logic vectors.
+   SV package constants inlined. Privilege levels: M=2'b11, S=2'b01, U=2'b00.
+   CSR addresses inlined as 12-bit hex literals. */
+
+/* CSR read helper: returns 64-bit data based on 12-bit CSR address */
+func csr_read_mux(addr, mstatus, mie, mip, mtvec, mscratch, mepc, mcause, mtval,
+                   medeleg, mideleg, mcounteren, misa_code,
+                   stvec, sscratch, sepc, scause, stval, scounteren,
+                   satp, dcsr, dpc, dscratch0, dscratch1,
+                   cycle_val, instret_val, mcountinhibit,
+                   hart_id, dcache, icache,
+                   perf_data, fcsr, fiom,
+                   hedeleg, hideleg, hcounteren, htval, htinst,
+                   vstvec, vsscratch, vsepc, vscause, vstval, vsatp,
+                   hstatus, hgatp, vsstatus, acc_cons, jvt, scontext,
+                   mtinst, mtval2) {
+    match (addr) {
+        /* Floating-point CSRs */
+        12'h001 => <(fcsr)::logic[64]>,
+        12'h002 => <(fcsr)::logic[64]>,
+        12'h003 => <(fcsr)::logic[64]>,
+        12'h800 => <(fcsr)::logic[64]>,
+        /* Debug CSRs */
+        12'h7B0 => <(dcsr)::logic[64]>,
+        12'h7B1 => dpc,
+        12'h7B2 => dscratch0,
+        12'h7B3 => dscratch1,
+        /* Trigger CSRs - return 0 as placeholder */
+        12'h7A0 => 64'd0,
+        12'h7A1 => 64'd0,
+        12'h7A2 => 64'd0,
+        12'h7A3 => 64'd0,
+        12'h7A8 => 64'd0,
+        12'h5A8 => scontext,
+        /* VS-mode CSRs */
+        12'h200 => vsstatus,
+        12'h204 => <(mie & hideleg)::logic[64]>,
+        12'h244 => <(mip & hideleg)::logic[64]>,
+        12'h205 => vstvec,
+        12'h240 => vsscratch,
+        12'h241 => vsepc,
+        12'h242 => vscause,
+        12'h243 => vstval,
+        12'h280 => <(vsatp)::logic[64]>,
+        /* Supervisor CSRs */
+        12'h100 => mstatus,
+        12'h104 => <(mie & mideleg)::logic[64]>,
+        12'h144 => <(mip & mideleg)::logic[64]>,
+        12'h105 => stvec,
+        12'h106 => scounteren,
+        12'h140 => sscratch,
+        12'h141 => sepc,
+        12'h142 => scause,
+        12'h143 => stval,
+        12'h180 => <(satp)::logic[64]>,
+        12'h10A => <(fiom)::logic[64]>,
+        /* Hypervisor CSRs */
+        12'h600 => <(hstatus)::logic[64]>,
+        12'h602 => hedeleg,
+        12'h603 => hideleg,
+        12'h604 => <(mie)::logic[64]>,
+        12'h644 => <(mip)::logic[64]>,
+        12'h645 => <(mip)::logic[64]>,
+        12'h606 => hcounteren,
+        12'h643 => htval,
+        12'h64A => htinst,
+        12'h680 => <(hgatp)::logic[64]>,
+        12'h60A => 64'd0,
+        /* Machine CSRs */
+        12'h300 => mstatus,
+        12'h301 => misa_code,
+        12'h302 => medeleg,
+        12'h303 => mideleg,
+        12'h304 => mie,
+        12'h305 => mtvec,
+        12'h306 => mcounteren,
+        12'h340 => mscratch,
+        12'h341 => mepc,
+        12'h342 => mcause,
+        12'h343 => mtval,
+        12'h344 => mip,
+        12'h30A => 64'd0,
+        12'h310 => 64'd0,
+        12'h34A => mtinst,
+        12'h34B => mtval2,
+        /* Vendor/Arch IDs */
+        12'hF11 => 64'd0,
+        12'hF12 => 64'd0,
+        12'hF13 => 64'd0,
+        12'hF14 => hart_id,
+        12'hF15 => 64'd0,
+        /* Counter inhibit */
+        12'h320 => <(mcountinhibit)::logic[64]>,
+        /* Counters */
+        12'hB00 => cycle_val,
+        12'hB02 => instret_val,
+        12'hC00 => cycle_val,
+        12'hC02 => instret_val,
+        /* Cache control */
+        12'h701 => dcache,
+        12'h700 => icache,
+        /* Accelerator */
+        12'h7C1 => acc_cons,
+        /* JVT */
+        12'h017 => jvt,
+        /* HPM counters/events -> perf_data */
+        12'hB03 => perf_data,
+        12'hB04 => perf_data,
+        12'hB05 => perf_data,
+        12'hB06 => perf_data,
+        12'hB07 => perf_data,
+        12'hB08 => perf_data,
+        12'h323 => perf_data,
+        12'h324 => perf_data,
+        12'h325 => perf_data,
+        12'h326 => perf_data,
+        12'h327 => perf_data,
+        12'h328 => perf_data,
+        12'hC03 => perf_data,
+        12'hC04 => perf_data,
+        12'hC05 => perf_data,
+        12'hC06 => perf_data,
+        12'hC07 => perf_data,
+        12'hC08 => perf_data,
+        _ => 64'd0
+    }
+}
+
+chan csr_in_ch {
+    left time_irq : (logic@#1) @dyn - @dyn,
+    left commit_ack : (logic[2]@#1) @dyn - @dyn,
+    left boot_addr : (logic[39]@#1) @dyn - @dyn,
+    left hart_id : (logic[64]@#1) @dyn - @dyn,
+    left ex_valid : (logic@#1) @dyn - @dyn,
+    left ex_cause : (logic[64]@#1) @dyn - @dyn,
+    left ex_tval : (logic[64]@#1) @dyn - @dyn,
+    left ex_tval2 : (logic[64]@#1) @dyn - @dyn,
+    left ex_tinst : (logic[64]@#1) @dyn - @dyn,
+    left ex_gva : (logic@#1) @dyn - @dyn,
+    left csr_op : (logic[3]@#1) @dyn - @dyn,
+    left csr_addr : (logic[12]@#1) @dyn - @dyn,
+    left csr_wdata : (logic[64]@#1) @dyn - @dyn,
+    left dirty_fp_state : (logic@#1) @dyn - @dyn,
+    left csr_write_fflags : (logic@#1) @dyn - @dyn,
+    left dirty_v_state : (logic@#1) @dyn - @dyn,
+    left pc : (logic[39]@#1) @dyn - @dyn,
+    left acc_fflags_ex : (logic[5]@#1) @dyn - @dyn,
+    left acc_fflags_ex_valid : (logic@#1) @dyn - @dyn,
+    left csr_hs_ld_st_inst : (logic@#1) @dyn - @dyn,
+    left irq : (logic[2]@#1) @dyn - @dyn,
+    left ipi : (logic@#1) @dyn - @dyn,
+    left debug_req : (logic@#1) @dyn - @dyn,
+    left perf_data : (logic[64]@#1) @dyn - @dyn,
+    left commit_instr_fu : (logic[4]@#1) @dyn - @dyn,
+    left commit_instr_op : (logic[8]@#1) @dyn - @dyn
+}
+
+chan csr_out_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left halt_csr : (logic@#1) @dyn - @dyn,
+    left csr_rdata : (logic[64]@#1) @dyn - @dyn,
+    left csr_exc_valid : (logic@#1) @dyn - @dyn,
+    left csr_exc_cause : (logic[64]@#1) @dyn - @dyn,
+    left csr_exc_tval : (logic[64]@#1) @dyn - @dyn,
+    left epc : (logic[39]@#1) @dyn - @dyn,
+    left eret : (logic@#1) @dyn - @dyn,
+    left trap_vector_base : (logic[39]@#1) @dyn - @dyn,
+    left priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left mbe : (logic@#1) @dyn - @dyn,
+    left v : (logic@#1) @dyn - @dyn,
+    left fs : (logic[2]@#1) @dyn - @dyn,
+    left vfs : (logic[2]@#1) @dyn - @dyn,
+    left fflags : (logic[5]@#1) @dyn - @dyn,
+    left frm : (logic[3]@#1) @dyn - @dyn,
+    left fprec : (logic[7]@#1) @dyn - @dyn,
+    left vs : (logic[2]@#1) @dyn - @dyn,
+    left irq_ctrl_mie : (logic[64]@#1) @dyn - @dyn,
+    left irq_ctrl_mideleg : (logic[64]@#1) @dyn - @dyn,
+    left irq_ctrl_mip : (logic[64]@#1) @dyn - @dyn,
+    left irq_ctrl_hideleg : (logic[64]@#1) @dyn - @dyn,
+    left irq_ctrl_global_enable : (logic@#1) @dyn - @dyn,
+    left en_translation : (logic@#1) @dyn - @dyn,
+    left en_g_translation : (logic@#1) @dyn - @dyn,
+    left en_ld_st_translation : (logic@#1) @dyn - @dyn,
+    left en_ld_st_g_translation : (logic@#1) @dyn - @dyn,
+    left ld_st_priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left ld_st_v : (logic@#1) @dyn - @dyn,
+    left sum : (logic@#1) @dyn - @dyn,
+    left vs_sum : (logic@#1) @dyn - @dyn,
+    left mxr : (logic@#1) @dyn - @dyn,
+    left vmxr : (logic@#1) @dyn - @dyn,
+    left satp_ppn : (logic[44]@#1) @dyn - @dyn,
+    left asid : (logic[16]@#1) @dyn - @dyn,
+    left vsatp_ppn : (logic[44]@#1) @dyn - @dyn,
+    left vs_asid : (logic[16]@#1) @dyn - @dyn,
+    left hgatp_ppn : (logic[44]@#1) @dyn - @dyn,
+    left vmid : (logic[1]@#1) @dyn - @dyn,
+    left mcbie : (logic[2]@#1) @dyn - @dyn,
+    left scbie : (logic[2]@#1) @dyn - @dyn,
+    left hcbie : (logic[2]@#1) @dyn - @dyn,
+    left mcbcfe : (logic@#1) @dyn - @dyn,
+    left scbcfe : (logic@#1) @dyn - @dyn,
+    left hcbcfe : (logic@#1) @dyn - @dyn,
+    left set_debug_pc : (logic@#1) @dyn - @dyn,
+    left tvm : (logic@#1) @dyn - @dyn,
+    left tw : (logic@#1) @dyn - @dyn,
+    left vtw : (logic@#1) @dyn - @dyn,
+    left tsr : (logic@#1) @dyn - @dyn,
+    left hu : (logic@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left single_step : (logic@#1) @dyn - @dyn,
+    left icache_en : (logic@#1) @dyn - @dyn,
+    left dcache_en : (logic@#1) @dyn - @dyn,
+    left acc_cons_en : (logic@#1) @dyn - @dyn,
+    left perf_addr : (logic[12]@#1) @dyn - @dyn,
+    left perf_data_out : (logic[64]@#1) @dyn - @dyn,
+    left perf_we : (logic@#1) @dyn - @dyn,
+    left mcountinhibit : (logic[32]@#1) @dyn - @dyn,
+    left jvt : (logic[64]@#1) @dyn - @dyn,
+    left debug_from_trigger : (logic@#1) @dyn - @dyn,
+    left break_from_trigger : (logic@#1) @dyn - @dyn
+}
+
+proc csr_regfile(
+    inp : left csr_in_ch,
+    out : right csr_out_ch
+) {
+    /* --- CSR State Registers (XLEN=64) --- */
+    reg mstatus_q : logic[64];
+    reg mie_q : logic[64];
+    reg mip_q : logic[64];
+    reg mtvec_q : logic[64];
+    reg mscratch_q : logic[64];
+    reg mepc_q : logic[64];
+    reg mcause_q : logic[64];
+    reg mtval_q : logic[64];
+    reg medeleg_q : logic[64];
+    reg mideleg_q : logic[64];
+    reg mcounteren_q : logic[64];
+    reg mtinst_q : logic[64];
+    reg mtval2_q : logic[64];
+
+    reg stvec_q : logic[64];
+    reg sscratch_q : logic[64];
+    reg sepc_q : logic[64];
+    reg scause_q : logic[64];
+    reg stval_q : logic[64];
+    reg scounteren_q : logic[64];
+    reg satp_q : logic[64];
+
+    reg hstatus_q : logic[64];
+    reg hedeleg_q : logic[64];
+    reg hideleg_q : logic[64];
+    reg hcounteren_q : logic[64];
+    reg htval_q : logic[64];
+    reg htinst_q : logic[64];
+    reg hgatp_q : logic[64];
+
+    reg vsstatus_q : logic[64];
+    reg vstvec_q : logic[64];
+    reg vsscratch_q : logic[64];
+    reg vsepc_q : logic[64];
+    reg vscause_q : logic[64];
+    reg vstval_q : logic[64];
+    reg vsatp_q : logic[64];
+
+    reg dcsr_q : logic[32];
+    reg dpc_q : logic[64];
+    reg dscratch0_q : logic[64];
+    reg dscratch1_q : logic[64];
+
+    reg fcsr_q : logic[32];
+    reg jvt_q : logic[64];
+    reg scontext_q : logic[64];
+
+    reg priv_lvl_q : logic[2];
+    reg v_q : logic;
+    reg debug_mode_q : logic;
+    reg wfi_q : logic;
+    reg fiom_q : logic;
+
+    reg cycle_q : logic[64];
+    reg instret_q : logic[64];
+    reg mcountinhibit_q : logic[9];
+
+    reg dcache_q : logic[64];
+    reg icache_q : logic[64];
+    reg acc_cons_q : logic[64];
+
+    reg en_ld_st_translation_q : logic;
+    reg en_ld_st_g_translation_q : logic;
+
+    reg mcbie_q : logic[2];
+    reg scbie_q : logic[2];
+    reg hcbie_q : logic[2];
+    reg mcbcfe_q : logic;
+    reg scbcfe_q : logic;
+    reg hcbcfe_q : logic;
+
+    /* --- Input Staging Registers --- */
+    reg r_time_irq : logic;
+    reg r_commit_ack : logic[2];
+    reg r_boot_addr : logic[39];
+    reg r_hart_id : logic[64];
+    reg r_ex_valid : logic;
+    reg r_ex_cause : logic[64];
+    reg r_ex_tval : logic[64];
+    reg r_ex_tval2 : logic[64];
+    reg r_ex_tinst : logic[64];
+    reg r_ex_gva : logic;
+    reg r_csr_op : logic[3];
+    reg r_csr_addr : logic[12];
+    reg r_csr_wdata : logic[64];
+    reg r_dirty_fp_state : logic;
+    reg r_csr_write_fflags : logic;
+    reg r_dirty_v_state : logic;
+    reg r_pc : logic[39];
+    reg r_acc_fflags_ex : logic[5];
+    reg r_acc_fflags_ex_valid : logic;
+    reg r_csr_hs_ld_st_inst : logic;
+    reg r_irq : logic[2];
+    reg r_ipi : logic;
+    reg r_debug_req : logic;
+    reg r_perf_data : logic[64];
+    reg r_commit_fu : logic[4];
+    reg r_commit_op : logic[8];
+
+    /* --- Input Recv Loops --- */
+    loop { let x = recv inp.time_irq >> set r_time_irq := x }
+    loop { let x = recv inp.commit_ack >> set r_commit_ack := x }
+    loop { let x = recv inp.boot_addr >> set r_boot_addr := x }
+    loop { let x = recv inp.hart_id >> set r_hart_id := x }
+    loop { let x = recv inp.ex_valid >> set r_ex_valid := x }
+    loop { let x = recv inp.ex_cause >> set r_ex_cause := x }
+    loop { let x = recv inp.ex_tval >> set r_ex_tval := x }
+    loop { let x = recv inp.ex_tval2 >> set r_ex_tval2 := x }
+    loop { let x = recv inp.ex_tinst >> set r_ex_tinst := x }
+    loop { let x = recv inp.ex_gva >> set r_ex_gva := x }
+    loop { let x = recv inp.csr_op >> set r_csr_op := x }
+    loop { let x = recv inp.csr_addr >> set r_csr_addr := x }
+    loop { let x = recv inp.csr_wdata >> set r_csr_wdata := x }
+    loop { let x = recv inp.dirty_fp_state >> set r_dirty_fp_state := x }
+    loop { let x = recv inp.csr_write_fflags >> set r_csr_write_fflags := x }
+    loop { let x = recv inp.dirty_v_state >> set r_dirty_v_state := x }
+    loop { let x = recv inp.pc >> set r_pc := x }
+    loop { let x = recv inp.acc_fflags_ex >> set r_acc_fflags_ex := x }
+    loop { let x = recv inp.acc_fflags_ex_valid >> set r_acc_fflags_ex_valid := x }
+    loop { let x = recv inp.csr_hs_ld_st_inst >> set r_csr_hs_ld_st_inst := x }
+    loop { let x = recv inp.irq >> set r_irq := x }
+    loop { let x = recv inp.ipi >> set r_ipi := x }
+    loop { let x = recv inp.debug_req >> set r_debug_req := x }
+    loop { let x = recv inp.perf_data >> set r_perf_data := x }
+    loop { let x = recv inp.commit_instr_fu >> set r_commit_fu := x }
+    loop { let x = recv inp.commit_instr_op >> set r_commit_op := x }
+
+    /* --- Main Logic + Output Loop --- */
+    loop {
+        /* CSR operation decode: csr_op encoding from ariane_pkg
+           CSR_WRITE=3'b001, CSR_SET=3'b010, CSR_CLEAR=3'b011, CSR_READ=3'b100 */
+        let csr_we = if (*r_csr_op == 3'b001) { 1'b1 }
+                     else if (*r_csr_op == 3'b010) { 1'b1 }
+                     else if (*r_csr_op == 3'b011) { 1'b1 }
+                     else { 1'b0 } >>
+        let csr_read = if (*r_csr_op != 3'b000) { 1'b1 } else { 1'b0 } >>
+
+        /* Compute write data based on op */
+        let csr_wdata = if (*r_csr_op == 3'b001) { *r_csr_wdata }
+                        else if (*r_csr_op == 3'b010) { *r_csr_wdata }
+                        else if (*r_csr_op == 3'b011) { *r_csr_wdata }
+                        else { 64'd0 } >>
+
+        /* ISA code: RV64IMAFDCSU with H */
+        let misa_code = 64'h8000000000141129 >>
+
+        /* CSR read via helper function */
+        let rdata = call csr_read_mux(*r_csr_addr, *mstatus_q, *mie_q, *mip_q, *mtvec_q,
+            *mscratch_q, *mepc_q, *mcause_q, *mtval_q,
+            *medeleg_q, *mideleg_q, *mcounteren_q, misa_code,
+            *stvec_q, *sscratch_q, *sepc_q, *scause_q, *stval_q, *scounteren_q,
+            *satp_q, *dcsr_q, *dpc_q, *dscratch0_q, *dscratch1_q,
+            *cycle_q, *instret_q, <(*mcountinhibit_q)::logic[64]>,
+            *r_hart_id, *dcache_q, *icache_q,
+            *r_perf_data, <(*fcsr_q)::logic[64]>, <(*fiom_q)::logic[64]>,
+            *hedeleg_q, *hideleg_q, *hcounteren_q, *htval_q, *htinst_q,
+            *vstvec_q, *vsscratch_q, *vsepc_q, *vscause_q, *vstval_q, *vsatp_q,
+            *hstatus_q, *hgatp_q, *vsstatus_q, *acc_cons_q, *jvt_q, *scontext_q,
+            *mtinst_q, *mtval2_q) >>
+
+        /* Privilege level output: in debug mode, report M-mode */
+        let priv_out = if (*debug_mode_q == 1'b1) { 2'b11 } else { *priv_lvl_q } >>
+
+        /* Compute mip updates: external interrupts, software interrupt, timer */
+        let mip_next = *mip_q >>
+
+        /* Counters: increment cycle and instret */
+        let cycle_next = if (*mcountinhibit_q[0] == 1'b0) { *cycle_q + 64'd1 } else { *cycle_q } >>
+        let instret_next = if (*r_commit_ack[0] == 1'b1) { *instret_q + 64'd1 } else { *instret_q } >>
+
+        /* CSR write: update registers based on address when csr_we is active */
+        let mstatus_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h300)) { csr_wdata } else { *mstatus_q } >>
+        let mie_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h304)) { csr_wdata } else { *mie_q } >>
+        let mtvec_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h305)) { csr_wdata } else { *mtvec_q } >>
+        let mscratch_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h340)) { csr_wdata } else { *mscratch_q } >>
+        let mepc_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h341)) { csr_wdata } else { *mepc_q } >>
+        let mcause_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h342)) { csr_wdata } else { *mcause_q } >>
+        let mtval_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h343)) { csr_wdata } else { *mtval_q } >>
+        let mip_wr = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h344)) { csr_wdata } else { mip_next } >>
+        let medeleg_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h302)) { csr_wdata } else { *medeleg_q } >>
+        let mideleg_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h303)) { csr_wdata } else { *mideleg_q } >>
+        let mcounteren_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h306)) { csr_wdata } else { *mcounteren_q } >>
+        let mtinst_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h34A)) { csr_wdata } else { *mtinst_q } >>
+        let mtval2_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h34B)) { csr_wdata } else { *mtval2_q } >>
+
+        let stvec_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h105)) { csr_wdata } else { *stvec_q } >>
+        let sscratch_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h140)) { csr_wdata } else { *sscratch_q } >>
+        let sepc_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h141)) { csr_wdata } else { *sepc_q } >>
+        let scause_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h142)) { csr_wdata } else { *scause_q } >>
+        let stval_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h143)) { csr_wdata } else { *stval_q } >>
+        let scounteren_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h106)) { csr_wdata } else { *scounteren_q } >>
+        let satp_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h180)) { csr_wdata } else { *satp_q } >>
+
+        let hedeleg_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h602)) { csr_wdata } else { *hedeleg_q } >>
+        let hideleg_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h603)) { csr_wdata } else { *hideleg_q } >>
+        let hcounteren_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h606)) { csr_wdata } else { *hcounteren_q } >>
+        let htval_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h643)) { csr_wdata } else { *htval_q } >>
+        let htinst_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h64A)) { csr_wdata } else { *htinst_q } >>
+        let hgatp_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h680)) { csr_wdata } else { *hgatp_q } >>
+        let hstatus_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h600)) { csr_wdata } else { *hstatus_q } >>
+
+        let vstvec_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h205)) { csr_wdata } else { *vstvec_q } >>
+        let vsscratch_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h240)) { csr_wdata } else { *vsscratch_q } >>
+        let vsepc_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h241)) { csr_wdata } else { *vsepc_q } >>
+        let vscause_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h242)) { csr_wdata } else { *vscause_q } >>
+        let vstval_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h243)) { csr_wdata } else { *vstval_q } >>
+        let vsatp_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h280)) { csr_wdata } else { *vsatp_q } >>
+        let vsstatus_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h200)) { csr_wdata } else { *vsstatus_q } >>
+
+        let dcsr_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h7B0)) { <(csr_wdata)::logic[32]> } else { *dcsr_q } >>
+        let dpc_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h7B1)) { csr_wdata } else { *dpc_q } >>
+        let dscratch0_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h7B2)) { csr_wdata } else { *dscratch0_q } >>
+        let dscratch1_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h7B3)) { csr_wdata } else { *dscratch1_q } >>
+
+        let fcsr_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h003)) { <(csr_wdata)::logic[32]> }
+                        else if ((csr_we == 1'b1) & (*r_csr_addr == 12'h001)) { <(csr_wdata)::logic[32]> }
+                        else if ((csr_we == 1'b1) & (*r_csr_addr == 12'h002)) { <(csr_wdata)::logic[32]> }
+                        else { *fcsr_q } >>
+        let jvt_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h017)) { csr_wdata } else { *jvt_q } >>
+        let scontext_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h5A8)) { csr_wdata } else { *scontext_q } >>
+
+        let dcache_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h701)) { csr_wdata } else { *dcache_q } >>
+        let icache_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h700)) { csr_wdata } else { *icache_q } >>
+        let acc_cons_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h7C1)) { csr_wdata } else { *acc_cons_q } >>
+
+        let mcountinhibit_next = if ((csr_we == 1'b1) & (*r_csr_addr == 12'h320)) { <(csr_wdata)::logic[9]> } else { *mcountinhibit_q } >>
+
+        /* Performance counter write-through */
+        let is_perf_addr = if (*r_csr_addr == 12'hB03) { 1'b1 }
+            else if (*r_csr_addr == 12'hB04) { 1'b1 }
+            else if (*r_csr_addr == 12'hB05) { 1'b1 }
+            else if (*r_csr_addr == 12'hB06) { 1'b1 }
+            else if (*r_csr_addr == 12'hB07) { 1'b1 }
+            else if (*r_csr_addr == 12'hB08) { 1'b1 }
+            else if (*r_csr_addr == 12'h323) { 1'b1 }
+            else if (*r_csr_addr == 12'h324) { 1'b1 }
+            else if (*r_csr_addr == 12'h325) { 1'b1 }
+            else if (*r_csr_addr == 12'h326) { 1'b1 }
+            else if (*r_csr_addr == 12'h327) { 1'b1 }
+            else if (*r_csr_addr == 12'h328) { 1'b1 }
+            else { 1'b0 } >>
+        let perf_we = csr_we & is_perf_addr >>
+
+        /* Flush on CSR write (side effects) */
+        let flush_out = csr_we >>
+
+        /* Translation enables (simplified) */
+        let en_translation = if ((*satp_q[63] == 1'b1) & (priv_out != 2'b11)) { 1'b1 } else { 1'b0 } >>
+        let en_ld_st_trans = *en_ld_st_translation_q >>
+        let en_ld_st_g_trans = *en_ld_st_g_translation_q >>
+
+        /* Send all outputs */
+        send out.flush (flush_out) >>
+        send out.halt_csr (*wfi_q) >>
+        send out.csr_rdata (rdata) >>
+        send out.csr_exc_valid (1'b0) >>
+        send out.csr_exc_cause (64'd0) >>
+        send out.csr_exc_tval (64'd0) >>
+        send out.epc (<(*mepc_q)::logic[39]>) >>
+        send out.eret (1'b0) >>
+        send out.trap_vector_base (<(*mtvec_q)::logic[39]>) >>
+        send out.priv_lvl (priv_out) >>
+        send out.mbe (1'b0) >>
+        send out.v (*v_q) >>
+        send out.fs (<(*mstatus_q)::logic[2]>) >>
+        send out.vfs (<(*vsstatus_q)::logic[2]>) >>
+        send out.fflags (<(*fcsr_q)::logic[5]>) >>
+        send out.frm (<(*fcsr_q)::logic[3]>) >>
+        send out.fprec (<(*fcsr_q)::logic[7]>) >>
+        send out.vs (<(*mstatus_q)::logic[2]>) >>
+        send out.irq_ctrl_mie (*mie_q) >>
+        send out.irq_ctrl_mideleg (*mideleg_q) >>
+        send out.irq_ctrl_mip (*mip_q) >>
+        send out.irq_ctrl_hideleg (*hideleg_q) >>
+        send out.irq_ctrl_global_enable (1'b1) >>
+        send out.en_translation (en_translation) >>
+        send out.en_g_translation (1'b0) >>
+        send out.en_ld_st_translation (en_ld_st_trans) >>
+        send out.en_ld_st_g_translation (en_ld_st_g_trans) >>
+        send out.ld_st_priv_lvl (priv_out) >>
+        send out.ld_st_v (*v_q) >>
+        send out.sum (<(*mstatus_q)::logic>) >>
+        send out.vs_sum (<(*vsstatus_q)::logic>) >>
+        send out.mxr (<(*mstatus_q)::logic>) >>
+        send out.vmxr (<(*vsstatus_q)::logic>) >>
+        send out.satp_ppn (<(*satp_q)::logic[44]>) >>
+        send out.asid (<(*satp_q)::logic[16]>) >>
+        send out.vsatp_ppn (<(*vsatp_q)::logic[44]>) >>
+        send out.vs_asid (<(*vsatp_q)::logic[16]>) >>
+        send out.hgatp_ppn (<(*hgatp_q)::logic[44]>) >>
+        send out.vmid (<(*hgatp_q)::logic[1]>) >>
+        send out.mcbie (*mcbie_q) >>
+        send out.scbie (*scbie_q) >>
+        send out.hcbie (*hcbie_q) >>
+        send out.mcbcfe (*mcbcfe_q) >>
+        send out.scbcfe (*scbcfe_q) >>
+        send out.hcbcfe (*hcbcfe_q) >>
+        send out.set_debug_pc (1'b0) >>
+        send out.tvm (<(*mstatus_q)::logic>) >>
+        send out.tw (<(*mstatus_q)::logic>) >>
+        send out.vtw (<(*hstatus_q)::logic>) >>
+        send out.tsr (<(*mstatus_q)::logic>) >>
+        send out.hu (<(*hstatus_q)::logic>) >>
+        send out.debug_mode (*debug_mode_q) >>
+        send out.single_step (<(*dcsr_q)::logic>) >>
+        send out.icache_en (<(*icache_q)::logic>) >>
+        send out.dcache_en (<(*dcache_q)::logic>) >>
+        send out.acc_cons_en (<(*acc_cons_q)::logic>) >>
+        send out.perf_addr (*r_csr_addr) >>
+        send out.perf_data_out (csr_wdata) >>
+        send out.perf_we (perf_we) >>
+        send out.mcountinhibit (<(*mcountinhibit_q)::logic[32]>) >>
+        send out.jvt (*jvt_q) >>
+        send out.debug_from_trigger (1'b0) >>
+        send out.break_from_trigger (1'b0) >>
+
+        /* Update all state registers */
+        set mstatus_q := mstatus_next;
+        set mie_q := mie_next;
+        set mip_q := mip_wr;
+        set mtvec_q := mtvec_next;
+        set mscratch_q := mscratch_next;
+        set mepc_q := mepc_next;
+        set mcause_q := mcause_next;
+        set mtval_q := mtval_next;
+        set medeleg_q := medeleg_next;
+        set mideleg_q := mideleg_next;
+        set mcounteren_q := mcounteren_next;
+        set mtinst_q := mtinst_next;
+        set mtval2_q := mtval2_next;
+        set stvec_q := stvec_next;
+        set sscratch_q := sscratch_next;
+        set sepc_q := sepc_next;
+        set scause_q := scause_next;
+        set stval_q := stval_next;
+        set scounteren_q := scounteren_next;
+        set satp_q := satp_next;
+        set hstatus_q := hstatus_next;
+        set hedeleg_q := hedeleg_next;
+        set hideleg_q := hideleg_next;
+        set hcounteren_q := hcounteren_next;
+        set htval_q := htval_next;
+        set htinst_q := htinst_next;
+        set hgatp_q := hgatp_next;
+        set vsstatus_q := vsstatus_next;
+        set vstvec_q := vstvec_next;
+        set vsscratch_q := vsscratch_next;
+        set vsepc_q := vsepc_next;
+        set vscause_q := vscause_next;
+        set vstval_q := vstval_next;
+        set vsatp_q := vsatp_next;
+        set dcsr_q := dcsr_next;
+        set dpc_q := dpc_next;
+        set dscratch0_q := dscratch0_next;
+        set dscratch1_q := dscratch1_next;
+        set fcsr_q := fcsr_next;
+        set jvt_q := jvt_next;
+        set scontext_q := scontext_next;
+        set dcache_q := dcache_next;
+        set icache_q := icache_next;
+        set acc_cons_q := acc_cons_next;
+        set mcountinhibit_q := mcountinhibit_next;
+        set cycle_q := cycle_next;
+        set instret_q := instret_next
+    }
+}
