@@ -1,0 +1,91 @@
+/* Hand-written Anvil for itype_detector.sv
+   Instruction type detector for E-Trace ITI.
+   Produces itype based on instruction operation and status.
+   Concrete params: ITYPE_LEN=3.
+   SV package types flattened:
+     ariane_pkg::fu_op → logic[8] constants
+     iti_pkg::itype_t → logic[3] constants
+   itype values: STANDARD=0, EXC=1, INT=2, ERET=3,
+                 NON_TAKEN_BR=4, TAKEN_BR=5, UNINF_JMP=6
+   fu_op branch ops: EQ=20, NE=21, LTS=22, GES=23, LTU=24, GEU=25
+   fu_op return ops: MRET=50, SRET=51, DRET=52
+   fu_op JALR=7 */
+
+chan itype_det_in_ch {
+    left valid_i : (logic@#1) @dyn - @dyn,
+    left exception_i : (logic@#1) @dyn - @dyn,
+    left interrupt_i : (logic@#1) @dyn - @dyn,
+    left op_i : (logic[8]@#1) @dyn - @dyn,
+    left branch_taken_i : (logic@#1) @dyn - @dyn
+}
+
+chan itype_det_out_ch {
+    left itype_o : (logic[3]@#1) @dyn - @dyn
+}
+
+proc itype_detector(
+    inp : left itype_det_in_ch,
+    out : right itype_det_out_ch
+) {
+    reg r_valid : logic;
+    reg r_exc : logic;
+    reg r_int : logic;
+    reg r_op : logic[8];
+    reg r_bt : logic;
+
+    loop {
+        let v = recv inp.valid_i >>
+        set r_valid := v >>
+        let e = recv inp.exception_i >>
+        set r_exc := e >>
+        let i = recv inp.interrupt_i >>
+        set r_int := i >>
+        let o = recv inp.op_i >>
+        set r_op := o >>
+        let b = recv inp.branch_taken_i >>
+        set r_bt := b >>
+
+        /* eret: MRET=50, SRET=51, DRET=52 */
+        let is_mret = if (*r_op == 8'd50) { 1'b1 } else { 1'b0 };
+        let is_sret = if (*r_op == 8'd51) { 1'b1 } else { 1'b0 };
+        let is_dret = if (*r_op == 8'd52) { 1'b1 } else { 1'b0 };
+        let eret = is_mret | is_sret | is_dret;
+
+        /* is_branch: EQ=20, NE=21, LTS=22, GES=23, LTU=24, GEU=25 */
+        let is_eq = if (*r_op == 8'd20) { 1'b1 } else { 1'b0 };
+        let is_ne = if (*r_op == 8'd21) { 1'b1 } else { 1'b0 };
+        let is_lts = if (*r_op == 8'd22) { 1'b1 } else { 1'b0 };
+        let is_ges = if (*r_op == 8'd23) { 1'b1 } else { 1'b0 };
+        let is_ltu = if (*r_op == 8'd24) { 1'b1 } else { 1'b0 };
+        let is_geu = if (*r_op == 8'd25) { 1'b1 } else { 1'b0 };
+        let is_branch = is_eq | is_ne | is_lts | is_ges | is_ltu | is_geu;
+
+        let nontaken_branch = is_branch & ~(*r_bt);
+        let taken_branch = is_branch & *r_bt;
+        let updiscon = if (*r_op == 8'd7) { 1'b1 } else { 1'b0 };
+
+        /* Priority encoding: exception > interrupt > valid instruction types */
+        let itype_val = if (*r_exc == 1'b1) {
+            3'd1
+        } else if (*r_int == 1'b1) {
+            3'd2
+        } else if (*r_valid == 1'b1) {
+            if (eret == 1'b1) {
+                3'd3
+            } else if (nontaken_branch == 1'b1) {
+                3'd4
+            } else if (taken_branch == 1'b1) {
+                3'd5
+            } else if (updiscon == 1'b1) {
+                3'd6
+            } else {
+                3'd0
+            }
+        } else {
+            3'd0
+        } >>
+
+        send out.itype_o (itype_val) >>
+        cycle 1
+    }
+}
