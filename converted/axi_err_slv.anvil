@@ -1,0 +1,243 @@
+/* Hand-written Anvil for axi_err_slv.sv
+   AXI error slave: responds to all AXI transactions with error responses.
+
+   Concrete params:
+     AxiIdWidth=4, MaxTrans=1,
+     Resp=2'b11 (RESP_DECERR), RespWidth=64,
+     RespData=64'hCA11AB1EBADCAB1E, ATOPs=0 (filter omitted).
+
+   Architecture:
+     Write path: AW accepted -> W beats consumed -> B error response
+     Read path:  AR accepted -> R error beats generated (len+1 beats)
+
+   Uses FIFO-like staging registers (MaxTrans=1 means depth-1 FIFOs).
+*/
+
+// Slave request input
+chan err_slv_req_ch {
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Slave response output
+chan err_slv_resp_ch {
+    left aw_ready : (logic@#1)     @dyn - @dyn,
+    left w_ready  : (logic@#1)     @dyn - @dyn,
+    left b_id     : (logic[4]@#1)  @dyn - @dyn,
+    left b_resp   : (logic[2]@#1)  @dyn - @dyn,
+    left b_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_ready : (logic@#1)     @dyn - @dyn,
+    left r_id     : (logic[4]@#1)  @dyn - @dyn,
+    left r_data   : (logic[64]@#1) @dyn - @dyn,
+    left r_resp   : (logic[2]@#1)  @dyn - @dyn,
+    left r_last   : (logic@#1)     @dyn - @dyn,
+    left r_valid  : (logic@#1)     @dyn - @dyn
+}
+
+proc axi_err_slv(
+    req  : left err_slv_req_ch,
+    resp : right err_slv_resp_ch
+) {
+    // Input staging
+    reg r_aw_id    : logic[4];
+    reg r_aw_len   : logic[8];
+    reg r_aw_valid : logic;
+    reg r_w_last   : logic;
+    reg r_w_valid  : logic;
+    reg r_b_ready  : logic;
+    reg r_ar_id    : logic[4];
+    reg r_ar_len   : logic[8];
+    reg r_ar_valid : logic;
+    reg r_r_ready  : logic;
+
+    // Output staging
+    reg o_aw_ready : logic;
+    reg o_w_ready  : logic;
+    reg o_b_id     : logic[4];
+    reg o_b_resp   : logic[2];
+    reg o_b_valid  : logic;
+    reg o_ar_ready : logic;
+    reg o_r_id     : logic[4];
+    reg o_r_data   : logic[64];
+    reg o_r_resp   : logic[2];
+    reg o_r_last   : logic;
+    reg o_r_valid  : logic;
+
+    // Write path FIFO state (depth 1)
+    // w_fifo: stores AW id, waiting for W beats
+    reg w_fifo_valid : logic;
+    reg w_fifo_id    : logic[4];
+    // b_fifo: stores id for B response
+    reg b_fifo_valid : logic;
+    reg b_fifo_id    : logic[4];
+
+    // Read path state
+    // r_fifo: stores AR id and len
+    reg r_fifo_valid : logic;
+    reg r_fifo_id    : logic[4];
+    reg r_fifo_len   : logic[8];
+    // r_busy: currently generating R beats
+    reg r_busy       : logic;
+    reg r_beat_cnt   : logic[8];
+    reg r_cur_id     : logic[4];
+
+    // Recv inputs
+    loop { let v = recv req.aw_id >> set r_aw_id := v >> cycle 1 }
+    loop { let v = recv req.aw_len >> set r_aw_len := v >> cycle 1 }
+    loop { let v = recv req.aw_valid >> set r_aw_valid := v >> cycle 1 }
+    loop { let v = recv req.w_data >> cycle 1 }
+    loop { let v = recv req.w_last >> set r_w_last := v >> cycle 1 }
+    loop { let v = recv req.w_valid >> set r_w_valid := v >> cycle 1 }
+    loop { let v = recv req.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv req.ar_id >> set r_ar_id := v >> cycle 1 }
+    loop { let v = recv req.ar_len >> set r_ar_len := v >> cycle 1 }
+    loop { let v = recv req.ar_valid >> set r_ar_valid := v >> cycle 1 }
+    loop { let v = recv req.r_ready >> set r_r_ready := v >> cycle 1 }
+
+    // Send outputs
+    loop { send resp.aw_ready (*o_aw_ready) >> cycle 1 }
+    loop { send resp.w_ready (*o_w_ready) >> cycle 1 }
+    loop { send resp.b_id (*o_b_id) >> cycle 1 }
+    loop { send resp.b_resp (*o_b_resp) >> cycle 1 }
+    loop { send resp.b_valid (*o_b_valid) >> cycle 1 }
+    loop { send resp.ar_ready (*o_ar_ready) >> cycle 1 }
+    loop { send resp.r_id (*o_r_id) >> cycle 1 }
+    loop { send resp.r_data (*o_r_data) >> cycle 1 }
+    loop { send resp.r_resp (*o_r_resp) >> cycle 1 }
+    loop { send resp.r_last (*o_r_last) >> cycle 1 }
+    loop { send resp.r_valid (*o_r_valid) >> cycle 1 }
+
+    // ==============================
+    // Write path: AW channel
+    // ==============================
+    // Accept AW when w_fifo is empty
+    loop {
+        if (*r_aw_valid == 1'b1 && *w_fifo_valid == 1'b0) {
+            set o_aw_ready := 1'b1 >>
+            set w_fifo_valid := 1'b1 >>
+            set w_fifo_id := *r_aw_id
+        } else {
+            if (*w_fifo_valid == 1'b1) {
+                set o_aw_ready := 1'b0 >>
+                cycle 1
+            } else {
+                set o_aw_ready := 1'b1 >>
+                cycle 1
+            }
+        }
+    }
+
+    // ==============================
+    // Write path: W channel
+    // ==============================
+    // Consume W beats when w_fifo has data and b_fifo is empty
+    loop {
+        if (*w_fifo_valid == 1'b1 && *b_fifo_valid == 1'b0) {
+            set o_w_ready := 1'b1 >>
+            // On last beat: pop w_fifo, push b_fifo
+            if (*r_w_valid == 1'b1 && *r_w_last == 1'b1) {
+                set w_fifo_valid := 1'b0 >>
+                set b_fifo_valid := 1'b1 >>
+                set b_fifo_id := *w_fifo_id
+            } else {
+                cycle 1
+            }
+        } else {
+            set o_w_ready := 1'b0 >>
+            cycle 1
+        }
+    }
+
+    // ==============================
+    // Write path: B channel
+    // ==============================
+    // Send B response when b_fifo has data
+    loop {
+        if (*b_fifo_valid == 1'b1) {
+            set o_b_valid := 1'b1 >>
+            set o_b_id := *b_fifo_id >>
+            set o_b_resp := 2'b11 >>
+            if (*r_b_ready == 1'b1) {
+                set b_fifo_valid := 1'b0
+            } else {
+                cycle 1
+            }
+        } else {
+            set o_b_valid := 1'b0 >>
+            cycle 1
+        }
+    }
+
+    // ==============================
+    // Read path: AR channel
+    // ==============================
+    // Accept AR when r_fifo is empty
+    loop {
+        if (*r_ar_valid == 1'b1 && *r_fifo_valid == 1'b0) {
+            set o_ar_ready := 1'b1 >>
+            set r_fifo_valid := 1'b1 >>
+            set r_fifo_id := *r_ar_id >>
+            set r_fifo_len := *r_ar_len
+        } else {
+            if (*r_fifo_valid == 1'b1) {
+                set o_ar_ready := 1'b0 >>
+                cycle 1
+            } else {
+                set o_ar_ready := 1'b1 >>
+                cycle 1
+            }
+        }
+    }
+
+    // ==============================
+    // Read path: R channel FSM
+    // ==============================
+    // When r_fifo has data and not busy: start new burst
+    // When busy: send R beats, decrement counter, last when counter=0
+    loop {
+        if (*r_busy == 1'b1) {
+            // Sending R beats
+            set o_r_valid := 1'b1 >>
+            set o_r_id := *r_cur_id >>
+            set o_r_data := 64'hCA11AB1EBADCAB1E >>
+            set o_r_resp := 2'b11 >>
+            if (*r_beat_cnt == 8'd0) {
+                set o_r_last := 1'b1
+            } else {
+                set o_r_last := 1'b0
+            } >>
+            // Wait for r_ready
+            if (*r_r_ready == 1'b1) {
+                if (*r_beat_cnt == 8'd0) {
+                    // Last beat: done with this transaction
+                    set r_busy := 1'b0 >>
+                    set r_fifo_valid := 1'b0
+                } else {
+                    // Decrement counter
+                    set r_beat_cnt := *r_beat_cnt - 8'd1
+                }
+            } else {
+                cycle 1
+            }
+        } else {
+            set o_r_valid := 1'b0 >>
+            // Check if r_fifo has a new transaction
+            if (*r_fifo_valid == 1'b1) {
+                set r_busy := 1'b1 >>
+                set r_cur_id := *r_fifo_id >>
+                set r_beat_cnt := *r_fifo_len
+            } else {
+                cycle 1
+            }
+        }
+    }
+}

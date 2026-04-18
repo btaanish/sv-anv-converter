@@ -1,0 +1,136 @@
+/* Hand-written Anvil for axi_res_tbl.sv
+   AXI reservation table for LR/SC atomics. Tracks address reservations by AXI ID.
+
+   Concrete params:
+     AXI_ADDR_WIDTH=64, AXI_ID_WIDTH=4, N_IDS=16.
+
+   Behavior:
+     - Table of 16 x 64-bit entries (one per AXI ID)
+     - Three operations with fixed priority: CLR > SET > CHECK
+     - CLR: invalidate all entries matching an address
+     - SET: set entry[id] = addr
+     - CHECK: test if entry[id] == addr
+*/
+
+// Clear request channel
+chan res_tbl_clr_ch {
+    left clr_addr : (logic[64]@#1) @dyn - @dyn,
+    left clr_req  : (logic@#1) @dyn - @dyn
+}
+
+// Clear grant output
+chan res_tbl_clr_gnt_ch {
+    left clr_gnt : (logic@#1) @dyn - @dyn
+}
+
+// Set request channel
+chan res_tbl_set_ch {
+    left set_addr : (logic[64]@#1) @dyn - @dyn,
+    left set_id   : (logic[4]@#1) @dyn - @dyn,
+    left set_req  : (logic@#1) @dyn - @dyn
+}
+
+// Set grant output
+chan res_tbl_set_gnt_ch {
+    left set_gnt : (logic@#1) @dyn - @dyn
+}
+
+// Check request channel
+chan res_tbl_check_ch {
+    left check_addr : (logic[64]@#1) @dyn - @dyn,
+    left check_id   : (logic[4]@#1) @dyn - @dyn,
+    left check_req  : (logic@#1) @dyn - @dyn
+}
+
+// Check result output
+chan res_tbl_check_out_ch {
+    left check_gnt : (logic@#1) @dyn - @dyn,
+    left check_res : (logic@#1) @dyn - @dyn
+}
+
+type tbl_addr = (logic[64]);
+
+proc axi_res_tbl(
+    clr_in   : left res_tbl_clr_ch,
+    clr_out  : right res_tbl_clr_gnt_ch,
+    set_in   : left res_tbl_set_ch,
+    set_out  : right res_tbl_set_gnt_ch,
+    chk_in   : left res_tbl_check_ch,
+    chk_out  : right res_tbl_check_out_ch
+) {
+    // Table: 16 entries of 64-bit addresses
+    reg tbl : tbl_addr[16];
+
+    // Input staging registers
+    reg r_clr_addr  : logic[64];
+    reg r_clr_req   : logic;
+    reg r_set_addr  : logic[64];
+    reg r_set_id    : logic[4];
+    reg r_set_req   : logic;
+    reg r_chk_addr  : logic[64];
+    reg r_chk_id    : logic[4];
+    reg r_chk_req   : logic;
+
+    // Output staging
+    reg o_clr_gnt   : logic;
+    reg o_set_gnt   : logic;
+    reg o_chk_gnt   : logic;
+    reg o_chk_res   : logic;
+
+    // Receive all inputs
+    loop { let v = recv clr_in.clr_addr >> set r_clr_addr := v >> cycle 1 }
+    loop { let v = recv clr_in.clr_req >> set r_clr_req := v >> cycle 1 }
+    loop { let v = recv set_in.set_addr >> set r_set_addr := v >> cycle 1 }
+    loop { let v = recv set_in.set_id >> set r_set_id := v >> cycle 1 }
+    loop { let v = recv set_in.set_req >> set r_set_req := v >> cycle 1 }
+    loop { let v = recv chk_in.check_addr >> set r_chk_addr := v >> cycle 1 }
+    loop { let v = recv chk_in.check_id >> set r_chk_id := v >> cycle 1 }
+    loop { let v = recv chk_in.check_req >> set r_chk_req := v >> cycle 1 }
+
+    // Send outputs
+    loop { send clr_out.clr_gnt (*o_clr_gnt) >> cycle 1 }
+    loop { send set_out.set_gnt (*o_set_gnt) >> cycle 1 }
+    loop { send chk_out.check_gnt (*o_chk_gnt) >> cycle 1 }
+    loop { send chk_out.check_res (*o_chk_res) >> cycle 1 }
+
+    // Main priority logic: CLR > SET > CHECK
+    loop {
+        if (*r_clr_req == 1'b1) {
+            // CLR: clear all entries matching address
+            set o_clr_gnt := 1'b1 >>
+            set o_set_gnt := 1'b0 >>
+            set o_chk_gnt := 1'b0 >>
+            set o_chk_res := 1'b0 >>
+            // Clear matching entries using generate
+            generate (i : 0, 15, 1) {
+                if (<(*tbl[i])::logic[64]> == *r_clr_addr) {
+                    set tbl[i] := <(64'd0)::tbl_addr>
+                } else {
+                    set tbl[i] := *tbl[i]
+                }
+            }
+        } else if (*r_set_req == 1'b1) {
+            // SET: write entry[id] = addr
+            set o_set_gnt := 1'b1 >>
+            set o_clr_gnt := 1'b0 >>
+            set o_chk_gnt := 1'b0 >>
+            set o_chk_res := 1'b0 >>
+            set tbl[*r_set_id] := <(*r_set_addr)::tbl_addr>
+        } else if (*r_chk_req == 1'b1) {
+            // CHECK: test if entry[id] == addr
+            if (<(*tbl[*r_chk_id])::logic[64]> == *r_chk_addr) {
+                set o_chk_res := 1'b1
+            } else {
+                set o_chk_res := 1'b0
+            } >>
+            set o_chk_gnt := 1'b1 >>
+            set o_clr_gnt := 1'b0 >>
+            set o_set_gnt := 1'b0
+        } else {
+            set o_clr_gnt := 1'b0 >>
+            set o_set_gnt := 1'b0 >>
+            set o_chk_gnt := 1'b0 >>
+            set o_chk_res := 1'b0
+        }
+    }
+}
