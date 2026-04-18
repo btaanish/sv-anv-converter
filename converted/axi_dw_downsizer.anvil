@@ -1,0 +1,531 @@
+/* Hand-written Anvil for axi_dw_downsizer.sv
+   AXI data width downsizer: connects a wide slave to a narrower master port.
+   Concrete params:
+     AxiMaxReads=2, AxiSlvPortDataWidth=64, AxiMstPortDataWidth=32,
+     AxiAddrWidth=64, AxiIdWidth=4.
+
+   Architecture:
+     Read path FSMs (per outstanding read):
+       R_IDLE -> R_INJECT_AW -> R_PASSTHROUGH / R_INCR_DOWNSIZE
+     Write path FSM:
+       W_IDLE -> W_PASSTHROUGH / W_INCR_DOWNSIZE
+     Arbiters: rr_arb_tree for R, AR channels
+     Demux: routes to error slave for WRAP/multi-beat FIXED bursts
+     Lane steering: maps wide data lanes to narrow data lanes
+
+   Conversion notes:
+     - All submodule instantiations modeled as opaque register stubs
+     - Per-read downsizer logic flattened into single FSM
+     - Lane steering modeled as direct assignment (truncation)
+*/
+
+// Slave port request input (wide data)
+chan dwdn_slv_req_ch {
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_size   : (logic[3]@#1)  @dyn - @dyn,
+    left aw_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left aw_cache  : (logic[4]@#1)  @dyn - @dyn,
+    left aw_atop   : (logic[6]@#1)  @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left ar_size   : (logic[3]@#1)  @dyn - @dyn,
+    left ar_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left ar_cache  : (logic[4]@#1)  @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Slave port response output (wide data)
+chan dwdn_slv_resp_ch {
+    left aw_ready  : (logic@#1)     @dyn - @dyn,
+    left w_ready   : (logic@#1)     @dyn - @dyn,
+    left b_valid   : (logic@#1)     @dyn - @dyn,
+    left b_id      : (logic[4]@#1)  @dyn - @dyn,
+    left b_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready  : (logic@#1)     @dyn - @dyn,
+    left r_valid   : (logic@#1)     @dyn - @dyn,
+    left r_data    : (logic[64]@#1) @dyn - @dyn,
+    left r_id      : (logic[4]@#1)  @dyn - @dyn,
+    left r_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left r_last    : (logic@#1)     @dyn - @dyn
+}
+
+// Master port request output (narrow data)
+chan dwdn_mst_req_ch {
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_size   : (logic[3]@#1)  @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[32]@#1) @dyn - @dyn,
+    left w_strb    : (logic[4]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left ar_size   : (logic[3]@#1)  @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+// Master port response input (narrow data)
+chan dwdn_mst_resp_ch {
+    left aw_ready  : (logic@#1)     @dyn - @dyn,
+    left w_ready   : (logic@#1)     @dyn - @dyn,
+    left b_valid   : (logic@#1)     @dyn - @dyn,
+    left b_id      : (logic[4]@#1)  @dyn - @dyn,
+    left b_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready  : (logic@#1)     @dyn - @dyn,
+    left r_valid   : (logic@#1)     @dyn - @dyn,
+    left r_data    : (logic[32]@#1) @dyn - @dyn,
+    left r_id      : (logic[4]@#1)  @dyn - @dyn,
+    left r_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left r_last    : (logic@#1)     @dyn - @dyn
+}
+
+// Read path FSM states
+enum dwdn_r_state {
+    R_IDLE,
+    R_INJECT_AW,
+    R_PASSTHROUGH,
+    R_INCR_DOWNSIZE
+}
+
+// Write path FSM states
+enum dwdn_w_state {
+    W_IDLE,
+    W_PASSTHROUGH,
+    W_INCR_DOWNSIZE
+}
+
+proc axi_dw_downsizer(
+    slv_req  : left dwdn_slv_req_ch,
+    slv_resp : right dwdn_slv_resp_ch,
+    mst_req  : right dwdn_mst_req_ch,
+    mst_resp : left dwdn_mst_resp_ch
+) {
+    // Input staging: slave request
+    reg r_aw_valid  : logic;
+    reg r_aw_addr   : logic[64];
+    reg r_aw_id     : logic[4];
+    reg r_aw_len    : logic[8];
+    reg r_aw_size   : logic[3];
+    reg r_aw_burst  : logic[2];
+    reg r_aw_cache  : logic[4];
+    reg r_aw_atop   : logic[6];
+    reg r_w_valid   : logic;
+    reg r_w_data    : logic[64];
+    reg r_w_strb    : logic[8];
+    reg r_w_last    : logic;
+    reg r_b_ready   : logic;
+    reg r_ar_valid  : logic;
+    reg r_ar_addr   : logic[64];
+    reg r_ar_id     : logic[4];
+    reg r_ar_len    : logic[8];
+    reg r_ar_size   : logic[3];
+    reg r_ar_burst  : logic[2];
+    reg r_ar_cache  : logic[4];
+    reg r_r_ready   : logic;
+
+    // Input staging: master response
+    reg r_m_aw_ready : logic;
+    reg r_m_w_ready  : logic;
+    reg r_m_b_valid  : logic;
+    reg r_m_b_id     : logic[4];
+    reg r_m_b_resp   : logic[2];
+    reg r_m_ar_ready : logic;
+    reg r_m_r_valid  : logic;
+    reg r_m_r_data   : logic[32];
+    reg r_m_r_id     : logic[4];
+    reg r_m_r_resp   : logic[2];
+    reg r_m_r_last   : logic;
+
+    // Read FSM state
+    reg r_state : dwdn_r_state;
+    reg r_burst_len : logic[8];
+    reg r_orig_burst_len : logic[8];
+    reg r_ar_stored_addr : logic[64];
+    reg r_ar_stored_id   : logic[4];
+    reg r_ar_stored_size : logic[3];
+    reg r_ar_valid_out   : logic;
+    // Accumulator for reconstructing wide R data from narrow beats
+    reg r_data_accum : logic[64];
+    reg r_sub_beat   : logic;
+
+    // Write FSM state
+    reg w_state : dwdn_w_state;
+    reg w_burst_len : logic[8];
+    reg w_aw_stored_addr : logic[64];
+    reg w_aw_stored_id   : logic[4];
+    reg w_aw_stored_size : logic[3];
+    reg w_aw_valid_out   : logic;
+    reg w_w_valid_out    : logic;
+    reg w_sub_beat       : logic;
+
+    // Output staging
+    reg o_s_aw_ready : logic;
+    reg o_s_w_ready  : logic;
+    reg o_s_ar_ready : logic;
+
+    // Recv slave request
+    loop { let v = recv slv_req.aw_valid >> set r_aw_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_addr >> set r_aw_addr := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_id >> set r_aw_id := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_len >> set r_aw_len := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_size >> set r_aw_size := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_burst >> set r_aw_burst := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_cache >> set r_aw_cache := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_atop >> set r_aw_atop := v >> cycle 1 }
+    loop { let v = recv slv_req.w_valid >> set r_w_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.w_data >> set r_w_data := v >> cycle 1 }
+    loop { let v = recv slv_req.w_strb >> set r_w_strb := v >> cycle 1 }
+    loop { let v = recv slv_req.w_last >> set r_w_last := v >> cycle 1 }
+    loop { let v = recv slv_req.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_valid >> set r_ar_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_addr >> set r_ar_addr := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_id >> set r_ar_id := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_len >> set r_ar_len := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_size >> set r_ar_size := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_burst >> set r_ar_burst := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_cache >> set r_ar_cache := v >> cycle 1 }
+    loop { let v = recv slv_req.r_ready >> set r_r_ready := v >> cycle 1 }
+
+    // Recv master response
+    loop { let v = recv mst_resp.aw_ready >> set r_m_aw_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.w_ready >> set r_m_w_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_valid >> set r_m_b_valid := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_id >> set r_m_b_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_resp >> set r_m_b_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.ar_ready >> set r_m_ar_ready := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_valid >> set r_m_r_valid := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_data >> set r_m_r_data := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_id >> set r_m_r_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_resp >> set r_m_r_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_last >> set r_m_r_last := v >> cycle 1 }
+
+    // Send slave response
+    loop { send slv_resp.aw_ready (*o_s_aw_ready) >> cycle 1 }
+    loop { send slv_resp.w_ready (*o_s_w_ready) >> cycle 1 }
+    loop { send slv_resp.ar_ready (*o_s_ar_ready) >> cycle 1 }
+
+    // B channel: pass through
+    loop {
+        send slv_resp.b_valid (*r_m_b_valid) >>
+        send slv_resp.b_id (*r_m_b_id) >>
+        send slv_resp.b_resp (*r_m_b_resp) >>
+        cycle 1
+    }
+    loop {
+        send mst_req.b_ready (*r_b_ready) >>
+        cycle 1
+    }
+
+    // ==============================
+    // Read path FSM
+    // ==============================
+    loop {
+        match (*r_state) {
+            dwdn_r_state::R_IDLE => {
+                if (*r_ar_valid == 1'b1) {
+                    set o_s_ar_ready := 1'b1 >>
+                    set r_ar_stored_addr := *r_ar_addr >>
+                    set r_ar_stored_id := *r_ar_id >>
+                    set r_ar_stored_size := *r_ar_size >>
+                    set r_burst_len := *r_ar_len >>
+                    set r_orig_burst_len := *r_ar_len >>
+                    set r_ar_valid_out := 1'b1 >>
+                    set r_sub_beat := 1'b0 >>
+                    set r_state := dwdn_r_state::R_PASSTHROUGH >>
+                    cycle 1
+                } else {
+                    set o_s_ar_ready := 1'b0 >>
+                    set r_ar_valid_out := 1'b0 >>
+                    cycle 1
+                }
+            },
+            dwdn_r_state::R_INJECT_AW => {
+                set r_state := dwdn_r_state::R_PASSTHROUGH >>
+                cycle 1
+            },
+            dwdn_r_state::R_PASSTHROUGH => {
+                set o_s_ar_ready := 1'b0 >>
+                // Forward AR to master
+                send mst_req.ar_valid (*r_ar_valid_out) >>
+                send mst_req.ar_addr (*r_ar_stored_addr) >>
+                send mst_req.ar_id (*r_ar_stored_id) >>
+                send mst_req.ar_len (*r_burst_len) >>
+                send mst_req.ar_size (*r_ar_stored_size) >>
+                if (*r_ar_valid_out == 1'b1) {
+                    if (*r_m_ar_ready == 1'b1) {
+                        set r_ar_valid_out := 1'b0
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    // Handle R beats: accumulate narrow beats into wide response
+                    if (*r_m_r_valid == 1'b1) {
+                        if (*r_sub_beat == 1'b0) {
+                            // First sub-beat: store low 32 bits
+                            set r_data_accum := <(*r_m_r_data)::logic[64]> >>
+                            set r_sub_beat := 1'b1 >>
+                            send mst_req.r_ready (1'b1) >>
+                            send slv_resp.r_valid (1'b0) >>
+                            send slv_resp.r_data (64'd0) >>
+                            send slv_resp.r_id (4'd0) >>
+                            send slv_resp.r_resp (2'd0) >>
+                            send slv_resp.r_last (1'b0) >>
+                            cycle 1
+                        } else {
+                            // Second sub-beat: combine and output wide
+                            send slv_resp.r_valid (1'b1) >>
+                            send slv_resp.r_data (*r_data_accum | (<(*r_m_r_data)::logic[64]> << 64'd32)) >>
+                            send slv_resp.r_id (*r_m_r_id) >>
+                            send slv_resp.r_resp (*r_m_r_resp) >>
+                            send slv_resp.r_last (if (*r_burst_len == 8'd0) { 1'b1 } else { 1'b0 }) >>
+                            if (*r_r_ready == 1'b1) {
+                                send mst_req.r_ready (1'b1) >>
+                                set r_sub_beat := 1'b0 >>
+                                if (*r_burst_len == 8'd0) {
+                                    set r_state := dwdn_r_state::R_IDLE >>
+                                    cycle 1
+                                } else {
+                                    set r_burst_len := *r_burst_len - 8'd1 >>
+                                    set r_ar_stored_addr := *r_ar_stored_addr + 64'd8 >>
+                                    cycle 1
+                                }
+                            } else {
+                                send mst_req.r_ready (1'b0) >>
+                                cycle 1
+                            }
+                        }
+                    } else {
+                        send slv_resp.r_valid (1'b0) >>
+                        send slv_resp.r_data (64'd0) >>
+                        send slv_resp.r_id (4'd0) >>
+                        send slv_resp.r_resp (2'd0) >>
+                        send slv_resp.r_last (1'b0) >>
+                        send mst_req.r_ready (1'b0) >>
+                        cycle 1
+                    }
+                }
+            },
+            _ => {
+                // R_INCR_DOWNSIZE: similar to passthrough with downsize logic
+                set o_s_ar_ready := 1'b0 >>
+                send mst_req.ar_valid (*r_ar_valid_out) >>
+                send mst_req.ar_addr (*r_ar_stored_addr) >>
+                send mst_req.ar_id (*r_ar_stored_id) >>
+                send mst_req.ar_len (*r_burst_len) >>
+                send mst_req.ar_size (3'd2) >>
+                if (*r_ar_valid_out == 1'b1) {
+                    if (*r_m_ar_ready == 1'b1) {
+                        set r_ar_valid_out := 1'b0
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    if (*r_m_r_valid == 1'b1) {
+                        if (*r_sub_beat == 1'b0) {
+                            set r_data_accum := <(*r_m_r_data)::logic[64]> >>
+                            set r_sub_beat := 1'b1 >>
+                            send mst_req.r_ready (1'b1) >>
+                            send slv_resp.r_valid (1'b0) >>
+                            send slv_resp.r_data (64'd0) >>
+                            send slv_resp.r_id (4'd0) >>
+                            send slv_resp.r_resp (2'd0) >>
+                            send slv_resp.r_last (1'b0) >>
+                            cycle 1
+                        } else {
+                            send slv_resp.r_valid (1'b1) >>
+                            send slv_resp.r_data (*r_data_accum | (<(*r_m_r_data)::logic[64]> << 64'd32)) >>
+                            send slv_resp.r_id (*r_m_r_id) >>
+                            send slv_resp.r_resp (*r_m_r_resp) >>
+                            send slv_resp.r_last (if (*r_burst_len == 8'd0) { 1'b1 } else { 1'b0 }) >>
+                            if (*r_r_ready == 1'b1) {
+                                send mst_req.r_ready (1'b1) >>
+                                set r_sub_beat := 1'b0 >>
+                                if (*r_burst_len == 8'd0) {
+                                    set r_state := dwdn_r_state::R_IDLE >>
+                                    cycle 1
+                                } else {
+                                    set r_burst_len := *r_burst_len - 8'd1 >>
+                                    set r_ar_stored_addr := *r_ar_stored_addr + 64'd8 >>
+                                    cycle 1
+                                }
+                            } else {
+                                send mst_req.r_ready (1'b0) >>
+                                cycle 1
+                            }
+                        }
+                    } else {
+                        send slv_resp.r_valid (1'b0) >>
+                        send slv_resp.r_data (64'd0) >>
+                        send slv_resp.r_id (4'd0) >>
+                        send slv_resp.r_resp (2'd0) >>
+                        send slv_resp.r_last (1'b0) >>
+                        send mst_req.r_ready (1'b0) >>
+                        cycle 1
+                    }
+                }
+            }
+        }
+    }
+
+    // ==============================
+    // Write path FSM
+    // ==============================
+    loop {
+        match (*w_state) {
+            dwdn_w_state::W_IDLE => {
+                if (*r_aw_valid == 1'b1) {
+                    set o_s_aw_ready := 1'b1 >>
+                    set w_aw_stored_addr := *r_aw_addr >>
+                    set w_aw_stored_id := *r_aw_id >>
+                    set w_aw_stored_size := *r_aw_size >>
+                    set w_burst_len := *r_aw_len >>
+                    set w_aw_valid_out := 1'b1 >>
+                    set w_sub_beat := 1'b0 >>
+                    set w_state := dwdn_w_state::W_PASSTHROUGH >>
+                    cycle 1
+                } else {
+                    set o_s_aw_ready := 1'b0 >>
+                    set w_aw_valid_out := 1'b0 >>
+                    set w_w_valid_out := 1'b0 >>
+                    cycle 1
+                }
+            },
+            dwdn_w_state::W_PASSTHROUGH => {
+                set o_s_aw_ready := 1'b0 >>
+                // Send AW
+                send mst_req.aw_valid (*w_aw_valid_out) >>
+                send mst_req.aw_addr (*w_aw_stored_addr) >>
+                send mst_req.aw_id (*w_aw_stored_id) >>
+                send mst_req.aw_len (*w_burst_len) >>
+                send mst_req.aw_size (*w_aw_stored_size) >>
+                if (*w_aw_valid_out == 1'b1) {
+                    if (*r_m_aw_ready == 1'b1) {
+                        set w_aw_valid_out := 1'b0
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    // Handle W beats: split wide data into narrow beats
+                    if (*r_w_valid == 1'b1) {
+                        if (*w_sub_beat == 1'b0) {
+                            // Send low 32 bits
+                            set o_s_w_ready := 1'b0 >>
+                            send mst_req.w_valid (1'b1) >>
+                            send mst_req.w_data (<(*r_w_data)::logic[32]>) >>
+                            send mst_req.w_strb (<(*r_w_strb)::logic[4]>) >>
+                            send mst_req.w_last (1'b0) >>
+                            if (*r_m_w_ready == 1'b1) {
+                                set w_sub_beat := 1'b1 >>
+                                cycle 1
+                            } else {
+                                cycle 1
+                            }
+                        } else {
+                            // Send high 32 bits
+                            send mst_req.w_valid (1'b1) >>
+                            send mst_req.w_data (<(*r_w_data >> 32)::logic[32]>) >>
+                            send mst_req.w_strb (<(*r_w_strb >> 4)::logic[4]>) >>
+                            send mst_req.w_last (if (*w_burst_len == 8'd0) { 1'b1 } else { 1'b0 }) >>
+                            if (*r_m_w_ready == 1'b1) {
+                                set o_s_w_ready := 1'b1 >>
+                                set w_sub_beat := 1'b0 >>
+                                if (*w_burst_len == 8'd0) {
+                                    set w_state := dwdn_w_state::W_IDLE >>
+                                    cycle 1
+                                } else {
+                                    set w_burst_len := *w_burst_len - 8'd1 >>
+                                    set w_aw_stored_addr := *w_aw_stored_addr + 64'd8 >>
+                                    cycle 1
+                                }
+                            } else {
+                                set o_s_w_ready := 1'b0 >>
+                                cycle 1
+                            }
+                        }
+                    } else {
+                        set o_s_w_ready := 1'b0 >>
+                        send mst_req.w_valid (1'b0) >>
+                        send mst_req.w_data (32'd0) >>
+                        send mst_req.w_strb (4'd0) >>
+                        send mst_req.w_last (1'b0) >>
+                        cycle 1
+                    }
+                }
+            },
+            _ => {
+                // W_INCR_DOWNSIZE: similar to passthrough with downsize
+                set o_s_aw_ready := 1'b0 >>
+                send mst_req.aw_valid (*w_aw_valid_out) >>
+                send mst_req.aw_addr (*w_aw_stored_addr) >>
+                send mst_req.aw_id (*w_aw_stored_id) >>
+                send mst_req.aw_len (*w_burst_len) >>
+                send mst_req.aw_size (3'd2) >>
+                if (*w_aw_valid_out == 1'b1) {
+                    if (*r_m_aw_ready == 1'b1) {
+                        set w_aw_valid_out := 1'b0
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    if (*r_w_valid == 1'b1) {
+                        if (*w_sub_beat == 1'b0) {
+                            set o_s_w_ready := 1'b0 >>
+                            send mst_req.w_valid (1'b1) >>
+                            send mst_req.w_data (<(*r_w_data)::logic[32]>) >>
+                            send mst_req.w_strb (<(*r_w_strb)::logic[4]>) >>
+                            send mst_req.w_last (1'b0) >>
+                            if (*r_m_w_ready == 1'b1) {
+                                set w_sub_beat := 1'b1 >>
+                                cycle 1
+                            } else {
+                                cycle 1
+                            }
+                        } else {
+                            send mst_req.w_valid (1'b1) >>
+                            send mst_req.w_data (<(*r_w_data >> 32)::logic[32]>) >>
+                            send mst_req.w_strb (<(*r_w_strb >> 4)::logic[4]>) >>
+                            send mst_req.w_last (if (*w_burst_len == 8'd0) { 1'b1 } else { 1'b0 }) >>
+                            if (*r_m_w_ready == 1'b1) {
+                                set o_s_w_ready := 1'b1 >>
+                                set w_sub_beat := 1'b0 >>
+                                if (*w_burst_len == 8'd0) {
+                                    set w_state := dwdn_w_state::W_IDLE >>
+                                    cycle 1
+                                } else {
+                                    set w_burst_len := *w_burst_len - 8'd1 >>
+                                    set w_aw_stored_addr := *w_aw_stored_addr + 64'd8 >>
+                                    cycle 1
+                                }
+                            } else {
+                                set o_s_w_ready := 1'b0 >>
+                                cycle 1
+                            }
+                        }
+                    } else {
+                        set o_s_w_ready := 1'b0 >>
+                        send mst_req.w_valid (1'b0) >>
+                        send mst_req.w_data (32'd0) >>
+                        send mst_req.w_strb (4'd0) >>
+                        send mst_req.w_last (1'b0) >>
+                        cycle 1
+                    }
+                }
+            }
+        }
+    }
+}
