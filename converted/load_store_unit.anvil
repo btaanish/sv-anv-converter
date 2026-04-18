@@ -1,0 +1,413 @@
+/* Hand-written Anvil for load_store_unit.sv
+   Load Store Unit: coordinates address generation, MMU interface,
+   misaligned exception detection, and load/store functional units.
+   Concrete params: XLEN=64, VLEN=64, PLEN=56, TRANS_ID_BITS=3,
+   IS_XLEN64=1, MmuPresent=1, RVA=1, RVH=0, EnableAccelerator=0,
+   NrLoadPipeRegs=1, NrStorePipeRegs=0, SV=39, PPNW=44,
+   ASID_WIDTH=16, VMID_WIDTH=1, GPLEN=41, TvalEn=1.
+   Clock/reset implicit. Sub-module instantiation omitted
+   (store_unit, load_unit, lsu_bypass, cva6_mmu, pmp_data_if
+   modeled as external channel interfaces). */
+
+/* fu_t encoding (matches ariane_pkg): NONE=0, LOAD=1, STORE=2 */
+/* exception cause encoding (riscv): LD_ADDR_MISALIGNED=4,
+   ST_ADDR_MISALIGNED=6, LOAD_PAGE_FAULT=13, STORE_PAGE_FAULT=15 */
+
+/* Operation encodings used for misalignment detection (8 bits):
+   LD=0x00, SD=0x03, FLD=0x0B, FSD=0x0F,
+   AMO_LRD=0x40, AMO_SCD=0x41, AMO_SWAPD=0x42, AMO_ADDD=0x43,
+   AMO_ANDD=0x44, AMO_ORD=0x45, AMO_XORD=0x46, AMO_MAXD=0x47,
+   AMO_MAXDU=0x48, AMO_MIND=0x49, AMO_MINDU=0x4A,
+   LW=0x01, LWU=0x04, SW=0x02, FLW=0x0A, FSW=0x0E,
+   AMO_LRW=0x30, AMO_SCW=0x31, AMO_SWAPW=0x32, AMO_ADDW=0x33,
+   AMO_ANDW=0x34, AMO_ORW=0x35, AMO_XORW=0x36, AMO_MAXW=0x37,
+   AMO_MAXWU=0x38, AMO_MINW=0x39, AMO_MINWU=0x3A,
+   LH=0x05, LHU=0x06, SH=0x07, FLH=0x0C, FSH=0x0D */
+
+chan lsu_in_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left stall_st_pending : (logic@#1) @dyn - @dyn,
+    left amo_valid_commit : (logic@#1) @dyn - @dyn,
+    left tinst : (logic[32]@#1) @dyn - @dyn,
+    left fu_imm : (logic[64]@#1) @dyn - @dyn,
+    left fu_operand_a : (logic[64]@#1) @dyn - @dyn,
+    left fu_operand_b : (logic[64]@#1) @dyn - @dyn,
+    left fu_fu : (logic[4]@#1) @dyn - @dyn,
+    left fu_operation : (logic[8]@#1) @dyn - @dyn,
+    left fu_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left lsu_valid : (logic@#1) @dyn - @dyn,
+    left speculative_load : (logic@#1) @dyn - @dyn,
+    left commit : (logic@#1) @dyn - @dyn,
+    left commit_tran_id : (logic[3]@#1) @dyn - @dyn,
+    left en_ld_st_translation : (logic@#1) @dyn - @dyn,
+    left mbe : (logic@#1) @dyn - @dyn,
+    left ld_st_v : (logic@#1) @dyn - @dyn,
+    left ld_translation_req : (logic@#1) @dyn - @dyn,
+    left ld_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left st_translation_req : (logic@#1) @dyn - @dyn,
+    left st_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left translation_valid : (logic@#1) @dyn - @dyn,
+    left mmu_paddr : (logic[56]@#1) @dyn - @dyn,
+    left mmu_ex_valid : (logic@#1) @dyn - @dyn,
+    left dtlb_hit : (logic@#1) @dyn - @dyn,
+    left dtlb_ppn : (logic[44]@#1) @dyn - @dyn,
+    left pop_ld : (logic@#1) @dyn - @dyn,
+    left pop_st : (logic@#1) @dyn - @dyn,
+    left ld_valid : (logic@#1) @dyn - @dyn,
+    left ld_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left ld_result : (logic[64]@#1) @dyn - @dyn,
+    left ld_ex_valid : (logic@#1) @dyn - @dyn,
+    left st_valid : (logic@#1) @dyn - @dyn,
+    left st_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left st_result : (logic[64]@#1) @dyn - @dyn,
+    left st_ex_valid : (logic@#1) @dyn - @dyn,
+    left store_buffer_empty : (logic@#1) @dyn - @dyn,
+    left commit_rdy : (logic@#1) @dyn - @dyn,
+    left no_st_pending_in : (logic@#1) @dyn - @dyn,
+    left lsu_rdy_in : (logic@#1) @dyn - @dyn
+}
+
+chan lsu_out_ch {
+    left no_st_pending : (logic@#1) @dyn - @dyn,
+    left lsu_rdy : (logic@#1) @dyn - @dyn,
+    left load_valid : (logic@#1) @dyn - @dyn,
+    left load_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left load_result : (logic[64]@#1) @dyn - @dyn,
+    left load_ex_valid : (logic@#1) @dyn - @dyn,
+    left store_valid : (logic@#1) @dyn - @dyn,
+    left store_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left store_result : (logic[64]@#1) @dyn - @dyn,
+    left store_ex_valid : (logic@#1) @dyn - @dyn,
+    left commit_rdy : (logic@#1) @dyn - @dyn,
+    left csr_hs_ld_st_inst : (logic@#1) @dyn - @dyn,
+    left itlb_miss : (logic@#1) @dyn - @dyn,
+    left dtlb_miss : (logic@#1) @dyn - @dyn,
+    left rvfi_mem_paddr : (logic[56]@#1) @dyn - @dyn,
+    left translation_req : (logic@#1) @dyn - @dyn,
+    left mmu_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left st_translation_req_out : (logic@#1) @dyn - @dyn,
+    left misaligned_ex_valid : (logic@#1) @dyn - @dyn,
+    left misaligned_ex_cause : (logic[64]@#1) @dyn - @dyn,
+    left misaligned_ex_tval : (logic[64]@#1) @dyn - @dyn,
+    left ld_valid_out : (logic@#1) @dyn - @dyn,
+    left st_valid_out : (logic@#1) @dyn - @dyn,
+    left lsu_ctrl_fu : (logic[4]@#1) @dyn - @dyn,
+    left lsu_ctrl_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left lsu_ctrl_operation : (logic[8]@#1) @dyn - @dyn,
+    left lsu_ctrl_data : (logic[64]@#1) @dyn - @dyn,
+    left lsu_ctrl_be : (logic[8]@#1) @dyn - @dyn,
+    left lsu_ctrl_trans_id : (logic[3]@#1) @dyn - @dyn
+}
+
+/* Byte-enable generation function for 64-bit (8 bytes).
+   transfer_size: 0=byte, 1=halfword, 2=word, 3=doubleword */
+func be_gen_64(addr_low3, transfer_size) {
+    match (transfer_size) {
+        2'b11 => 8'hFF,
+        2'b10 => if (addr_low3 == 3'd4) { 8'hF0 } else { 8'h0F },
+        2'b01 => match (addr_low3) {
+            3'd0 => 8'h03,
+            3'd2 => 8'h0C,
+            3'd4 => 8'h30,
+            3'd6 => 8'hC0,
+            _    => 8'h03
+        },
+        _ => match (addr_low3) {
+            3'd0 => 8'h01,
+            3'd1 => 8'h02,
+            3'd2 => 8'h04,
+            3'd3 => 8'h08,
+            3'd4 => 8'h10,
+            3'd5 => 8'h20,
+            3'd6 => 8'h40,
+            3'd7 => 8'h80,
+            _    => 8'h01
+        }
+    }
+}
+
+/* Extract transfer size from operation encoding (2 bits) */
+func extract_xfer_size(operation) {
+    match (<(operation)::logic[4]>) {
+        4'h0 => 2'b11,
+        4'h3 => 2'b11,
+        4'h1 => 2'b10,
+        4'h4 => 2'b10,
+        4'h2 => 2'b10,
+        4'h5 => 2'b01,
+        4'h6 => 2'b01,
+        4'h7 => 2'b01,
+        _    => 2'b00
+    }
+}
+
+proc load_store_unit(
+    inp : left lsu_in_ch,
+    out : right lsu_out_ch
+) {
+    /* Input staging registers */
+    reg r_flush : logic;
+    reg r_stall : logic;
+    reg r_avc : logic;
+    reg r_tinst : logic[32];
+    reg r_imm : logic[64];
+    reg r_opa : logic[64];
+    reg r_opb : logic[64];
+    reg r_fu : logic[4];
+    reg r_op : logic[8];
+    reg r_tid : logic[3];
+    reg r_valid : logic;
+    reg r_spec_ld : logic;
+    reg r_commit : logic;
+    reg r_commit_tid : logic[3];
+    reg r_en_trans : logic;
+    reg r_mbe : logic;
+    reg r_ldst_v : logic;
+    reg r_ld_treq : logic;
+    reg r_ld_vaddr : logic[64];
+    reg r_st_treq : logic;
+    reg r_st_vaddr : logic[64];
+    reg r_trans_valid : logic;
+    reg r_mmu_paddr : logic[56];
+    reg r_mmu_exv : logic;
+    reg r_dtlb_hit : logic;
+    reg r_dtlb_ppn : logic[44];
+    reg r_pop_ld : logic;
+    reg r_pop_st : logic;
+    reg r_ld_valid : logic;
+    reg r_ld_tid : logic[3];
+    reg r_ld_result : logic[64];
+    reg r_ld_exv : logic;
+    reg r_st_valid : logic;
+    reg r_st_tid : logic[3];
+    reg r_st_result : logic[64];
+    reg r_st_exv : logic;
+    reg r_sbuf_empty : logic;
+    reg r_commit_rdy : logic;
+    reg r_no_st_pend : logic;
+    reg r_lsu_rdy : logic;
+
+    /* Recv loop: receive all inputs */
+    loop {
+        let a0 = recv inp.flush >>
+        set r_flush := a0 >>
+        let a1 = recv inp.stall_st_pending >>
+        set r_stall := a1 >>
+        let a2 = recv inp.amo_valid_commit >>
+        set r_avc := a2 >>
+        let a3 = recv inp.tinst >>
+        set r_tinst := a3 >>
+        let a4 = recv inp.fu_imm >>
+        set r_imm := a4 >>
+        let a5 = recv inp.fu_operand_a >>
+        set r_opa := a5 >>
+        let a6 = recv inp.fu_operand_b >>
+        set r_opb := a6 >>
+        let a7 = recv inp.fu_fu >>
+        set r_fu := a7 >>
+        let a8 = recv inp.fu_operation >>
+        set r_op := a8 >>
+        let a9 = recv inp.fu_trans_id >>
+        set r_tid := a9 >>
+        let a10 = recv inp.lsu_valid >>
+        set r_valid := a10 >>
+        let a11 = recv inp.speculative_load >>
+        set r_spec_ld := a11 >>
+        let a12 = recv inp.commit >>
+        set r_commit := a12 >>
+        let a13 = recv inp.commit_tran_id >>
+        set r_commit_tid := a13 >>
+        let a14 = recv inp.en_ld_st_translation >>
+        set r_en_trans := a14 >>
+        let a15 = recv inp.mbe >>
+        set r_mbe := a15 >>
+        let a16 = recv inp.ld_st_v >>
+        set r_ldst_v := a16 >>
+        let a17 = recv inp.ld_translation_req >>
+        set r_ld_treq := a17 >>
+        let a18 = recv inp.ld_vaddr >>
+        set r_ld_vaddr := a18 >>
+        let a19 = recv inp.st_translation_req >>
+        set r_st_treq := a19 >>
+        let a20 = recv inp.st_vaddr >>
+        set r_st_vaddr := a20 >>
+        let a21 = recv inp.translation_valid >>
+        set r_trans_valid := a21 >>
+        let a22 = recv inp.mmu_paddr >>
+        set r_mmu_paddr := a22 >>
+        let a23 = recv inp.mmu_ex_valid >>
+        set r_mmu_exv := a23 >>
+        let a24 = recv inp.dtlb_hit >>
+        set r_dtlb_hit := a24 >>
+        let a25 = recv inp.dtlb_ppn >>
+        set r_dtlb_ppn := a25 >>
+        let a26 = recv inp.pop_ld >>
+        set r_pop_ld := a26 >>
+        let a27 = recv inp.pop_st >>
+        set r_pop_st := a27 >>
+        let a28 = recv inp.ld_valid >>
+        set r_ld_valid := a28 >>
+        let a29 = recv inp.ld_trans_id >>
+        set r_ld_tid := a29 >>
+        let a30 = recv inp.ld_result >>
+        set r_ld_result := a30 >>
+        let a31 = recv inp.ld_ex_valid >>
+        set r_ld_exv := a31 >>
+        let a32 = recv inp.st_valid >>
+        set r_st_valid := a32 >>
+        let a33 = recv inp.st_trans_id >>
+        set r_st_tid := a33 >>
+        let a34 = recv inp.st_result >>
+        set r_st_result := a34 >>
+        let a35 = recv inp.st_ex_valid >>
+        set r_st_exv := a35 >>
+        let a36 = recv inp.store_buffer_empty >>
+        set r_sbuf_empty := a36 >>
+        let a37 = recv inp.commit_rdy >>
+        set r_commit_rdy := a37 >>
+        let a38 = recv inp.no_st_pending_in >>
+        set r_no_st_pend := a38 >>
+        let a39 = recv inp.lsu_rdy_in >>
+        set r_lsu_rdy := a39 >>
+        cycle 1
+    }
+
+    /* Output loop: combinational logic and output sends */
+    loop {
+        /* --- Address Generation Unit (AGU) --- */
+        /* vaddr_xlen = $signed(imm) + $signed(operand_a) */
+        let vaddr_xlen = *r_imm + *r_opa >>
+
+        /* vaddr_i = lower 64 bits (VLEN=64=XLEN) */
+        let vaddr_i = vaddr_xlen >>
+
+        /* Overflow check for SV39: bits [63:38] must be all 0 or all 1 */
+        /* Simplified: check bit 38 vs bit 63 */
+        let bit38 = <(vaddr_xlen >> 6'd38)::logic> >>
+        let bit63 = <(vaddr_xlen >> 6'd63)::logic> >>
+        let overflow = if (bit38 != bit63) { 1'b1 } else { 1'b0 } >>
+
+        /* g_overflow: RVH=0, always 0 */
+        let g_overflow = 1'b0 >>
+
+        /* --- Byte enable generation --- */
+        let addr_low3 = <(vaddr_i)::logic[3]> >>
+        let xfer_sz = call extract_xfer_size(*r_op) >>
+        let be_val = call be_gen_64(addr_low3, xfer_sz) >>
+
+        /* --- Determine load vs store --- */
+        /* fu==LOAD(4'd1): ld_valid, fu==STORE(4'd2): st_valid */
+        let is_load = if (*r_fu == 4'd1) { 1'b1 } else { 1'b0 } >>
+        let is_store = if (*r_fu == 4'd2) { 1'b1 } else { 1'b0 } >>
+
+        /* lsu_ctrl_valid comes from bypass (r_valid proxied) */
+        let ctrl_valid = *r_valid >>
+        let ld_valid_i = is_load & ctrl_valid >>
+        let st_valid_i = is_store & ctrl_valid >>
+
+        send out.ld_valid_out (ld_valid_i) >>
+        send out.st_valid_out (st_valid_i) >>
+
+        /* --- Translation request mux --- */
+        let trans_req = if (is_load == 1'b1) { *r_ld_treq } else {
+            if (is_store == 1'b1) { *r_st_treq } else { 1'b0 }
+        } >>
+        let mmu_vaddr_val = if (is_load == 1'b1) { *r_ld_vaddr } else {
+            if (is_store == 1'b1) { *r_st_vaddr } else { 64'd0 }
+        } >>
+        send out.translation_req (trans_req) >>
+        send out.mmu_vaddr (mmu_vaddr_val) >>
+        send out.st_translation_req_out (*r_st_treq) >>
+
+        /* --- Misaligned Exception Detection --- */
+        /* Check alignment for doubleword (vaddr[2:0]!=0),
+           word (vaddr[1:0]!=0), halfword (vaddr[0]!=0) */
+        let vaddr_low3 = <(vaddr_i)::logic[3]> >>
+        let vaddr_low2 = <(vaddr_i)::logic[2]> >>
+        let vaddr_low1 = <(vaddr_i)::logic> >>
+
+        /* Double-word ops: LD=0x00, SD=0x03, FLD=0x0B, FSD=0x0F,
+           AMO_LRD..AMO_MINDU = 0x40..0x4A */
+        let op4 = <(*r_op)::logic[4]> >>
+        let op_high = <(*r_op >> 8'd4)::logic[4]> >>
+
+        let is_dword = if (op_high == 4'h4) { 1'b1 }
+            else if (*r_op == 8'h00) { 1'b1 }
+            else if (*r_op == 8'h03) { 1'b1 }
+            else if (*r_op == 8'h0B) { 1'b1 }
+            else if (*r_op == 8'h0F) { 1'b1 }
+            else { 1'b0 } >>
+
+        let is_word = if (*r_op == 8'h01) { 1'b1 }
+            else if (*r_op == 8'h04) { 1'b1 }
+            else if (*r_op == 8'h02) { 1'b1 }
+            else if (*r_op == 8'h0A) { 1'b1 }
+            else if (*r_op == 8'h0E) { 1'b1 }
+            else if (op_high == 4'h3) { 1'b1 }
+            else { 1'b0 } >>
+
+        let is_half = if (*r_op == 8'h05) { 1'b1 }
+            else if (*r_op == 8'h06) { 1'b1 }
+            else if (*r_op == 8'h07) { 1'b1 }
+            else if (*r_op == 8'h0C) { 1'b1 }
+            else if (*r_op == 8'h0D) { 1'b1 }
+            else { 1'b0 } >>
+
+        let data_misaligned =
+            if (ctrl_valid == 1'b0) { 1'b0 }
+            else if (is_dword == 1'b1) { if (vaddr_low3 != 3'd0) { 1'b1 } else { 1'b0 } }
+            else if (is_word == 1'b1) { if (vaddr_low2 != 2'd0) { 1'b1 } else { 1'b0 } }
+            else if (is_half == 1'b1) { if (vaddr_low1 != 1'b0) { 1'b1 } else { 1'b0 } }
+            else { 1'b0 } >>
+
+        /* Misaligned exception cause: LD_ADDR_MISALIGNED=4, ST_ADDR_MISALIGNED=6 */
+        let mis_ex_valid = data_misaligned >>
+        let mis_ex_cause = if (data_misaligned == 1'b1) {
+            if (is_load == 1'b1) { 64'd4 } else { 64'd6 }
+        } else { 64'd0 } >>
+        let mis_ex_tval = if (data_misaligned == 1'b1) { vaddr_i } else { 64'd0 } >>
+
+        /* Page fault override (MmuPresent=1, overflow + en_ld_st_translation) */
+        /* LOAD_PAGE_FAULT=13, STORE_PAGE_FAULT=15 */
+        let page_fault = *r_en_trans & overflow & ctrl_valid >>
+        let final_ex_valid = if (page_fault == 1'b1) { 1'b1 } else { mis_ex_valid } >>
+        let final_ex_cause = if (page_fault == 1'b1) {
+            if (is_load == 1'b1) { 64'd13 } else { 64'd15 }
+        } else { mis_ex_cause } >>
+        let final_ex_tval = if (page_fault == 1'b1) { vaddr_i } else { mis_ex_tval } >>
+
+        send out.misaligned_ex_valid (final_ex_valid) >>
+        send out.misaligned_ex_cause (final_ex_cause) >>
+        send out.misaligned_ex_tval (final_ex_tval) >>
+
+        /* --- LSU control output (for RVFI and submodules) --- */
+        send out.lsu_ctrl_fu (*r_fu) >>
+        send out.lsu_ctrl_vaddr (vaddr_i) >>
+        send out.lsu_ctrl_operation (*r_op) >>
+        send out.lsu_ctrl_data (*r_opb) >>
+        send out.lsu_ctrl_be (be_val) >>
+        send out.lsu_ctrl_trans_id (*r_tid) >>
+
+        /* --- Pass-through outputs from submodules --- */
+        send out.load_valid (*r_ld_valid) >>
+        send out.load_trans_id (*r_ld_tid) >>
+        send out.load_result (*r_ld_result) >>
+        send out.load_ex_valid (*r_ld_exv) >>
+        send out.store_valid (*r_st_valid) >>
+        send out.store_trans_id (*r_st_tid) >>
+        send out.store_result (*r_st_result) >>
+        send out.store_ex_valid (*r_st_exv) >>
+        send out.commit_rdy (*r_commit_rdy) >>
+        send out.no_st_pending (*r_no_st_pend) >>
+        send out.lsu_rdy (*r_lsu_rdy) >>
+        send out.rvfi_mem_paddr (*r_mmu_paddr) >>
+
+        /* RVH=0: no hypervisor support */
+        send out.csr_hs_ld_st_inst (1'b0) >>
+
+        /* TLB misses passed through from MMU (placeholder: 0 when no MMU events) */
+        send out.itlb_miss (1'b0) >>
+        send out.dtlb_miss (1'b0) >>
+        cycle 1
+    }
+}

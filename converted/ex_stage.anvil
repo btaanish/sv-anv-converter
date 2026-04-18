@@ -1,0 +1,462 @@
+/* Hand-written Anvil for ex_stage.sv
+   Execute stage: instantiates all functional units (ALU, branch unit,
+   CSR buffer, multiplier, FPU, LSU, CVXIF, AES) and multiplexes results.
+   Concrete params: XLEN=64, VLEN=64, TRANS_ID_BITS=3,
+   NrIssuePorts=1, NrALUs=1, SuperscalarEn=0, FpPresent=1,
+   CvxifEn=0, ZKN=0, RVS=1, RVH=0, ASID_WIDTH=16, VMID_WIDTH=1,
+   GPLEN=41, PPNW=44, SpeculativeSb=0, EnableAccelerator=0.
+   Clock/reset implicit. Sub-module instantiation omitted
+   (alu_wrapper, branch_unit, csr_buffer, mult, fpu_wrap,
+   load_store_unit modeled as external channel interfaces). */
+
+/* fu_t encoding: NONE=0, LOAD=1, STORE=2, ALU=3, CTRL_FLOW=4,
+   MULT=5, CSR=6, FPU=7. operation encoding includes SFENCE_VMA. */
+
+chan ex_in_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left rs1_fwd : (logic[64]@#1) @dyn - @dyn,
+    left rs2_fwd : (logic[64]@#1) @dyn - @dyn,
+    left fu_operand_a : (logic[64]@#1) @dyn - @dyn,
+    left fu_operand_b : (logic[64]@#1) @dyn - @dyn,
+    left fu_imm : (logic[64]@#1) @dyn - @dyn,
+    left fu_fu : (logic[4]@#1) @dyn - @dyn,
+    left fu_operation : (logic[8]@#1) @dyn - @dyn,
+    left fu_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left pc : (logic[64]@#1) @dyn - @dyn,
+    left is_zcmt : (logic@#1) @dyn - @dyn,
+    left is_compressed : (logic@#1) @dyn - @dyn,
+    left tinst : (logic[32]@#1) @dyn - @dyn,
+    left alu_valid : (logic@#1) @dyn - @dyn,
+    left aes_valid : (logic@#1) @dyn - @dyn,
+    left branch_valid : (logic@#1) @dyn - @dyn,
+    left csr_valid : (logic@#1) @dyn - @dyn,
+    left csr_commit : (logic@#1) @dyn - @dyn,
+    left mult_valid : (logic@#1) @dyn - @dyn,
+    left lsu_valid : (logic@#1) @dyn - @dyn,
+    left lsu_commit : (logic@#1) @dyn - @dyn,
+    left commit_tran_id : (logic[3]@#1) @dyn - @dyn,
+    left stall_st_pending : (logic@#1) @dyn - @dyn,
+    left amo_valid_commit : (logic@#1) @dyn - @dyn,
+    left fpu_valid : (logic@#1) @dyn - @dyn,
+    left fpu_fmt : (logic[2]@#1) @dyn - @dyn,
+    left fpu_rm : (logic[3]@#1) @dyn - @dyn,
+    left fpu_frm : (logic[3]@#1) @dyn - @dyn,
+    left fpu_prec : (logic[7]@#1) @dyn - @dyn,
+    left v_i : (logic@#1) @dyn - @dyn,
+    left alu_result_ext : (logic[64]@#1) @dyn - @dyn,
+    left alu_branch_res_ext : (logic@#1) @dyn - @dyn,
+    left branch_result_ext : (logic[64]@#1) @dyn - @dyn,
+    left branch_ex_valid_ext : (logic@#1) @dyn - @dyn,
+    left branch_ex_cause_ext : (logic[64]@#1) @dyn - @dyn,
+    left branch_ex_tval_ext : (logic[64]@#1) @dyn - @dyn,
+    left csr_result_ext : (logic[64]@#1) @dyn - @dyn,
+    left csr_ready_ext : (logic@#1) @dyn - @dyn,
+    left csr_addr_ext : (logic[12]@#1) @dyn - @dyn,
+    left mult_result_ext : (logic[64]@#1) @dyn - @dyn,
+    left mult_valid_ext : (logic@#1) @dyn - @dyn,
+    left mult_ready_ext : (logic@#1) @dyn - @dyn,
+    left mult_trans_id_ext : (logic[3]@#1) @dyn - @dyn,
+    left fpu_result_ext : (logic[64]@#1) @dyn - @dyn,
+    left fpu_valid_ext : (logic@#1) @dyn - @dyn,
+    left fpu_ready_ext : (logic@#1) @dyn - @dyn,
+    left fpu_trans_id_ext : (logic[3]@#1) @dyn - @dyn,
+    left fpu_ex_valid_ext : (logic@#1) @dyn - @dyn,
+    left fpu_early_valid_ext : (logic@#1) @dyn - @dyn,
+    left load_valid_ext : (logic@#1) @dyn - @dyn,
+    left load_result_ext : (logic[64]@#1) @dyn - @dyn,
+    left load_trans_id_ext : (logic[3]@#1) @dyn - @dyn,
+    left load_ex_valid_ext : (logic@#1) @dyn - @dyn,
+    left store_valid_ext : (logic@#1) @dyn - @dyn,
+    left store_result_ext : (logic[64]@#1) @dyn - @dyn,
+    left store_trans_id_ext : (logic[3]@#1) @dyn - @dyn,
+    left store_ex_valid_ext : (logic@#1) @dyn - @dyn,
+    left lsu_ready_ext : (logic@#1) @dyn - @dyn,
+    left lsu_commit_ready_ext : (logic@#1) @dyn - @dyn,
+    left no_st_pending_ext : (logic@#1) @dyn - @dyn,
+    left resolved_branch_valid_ext : (logic@#1) @dyn - @dyn,
+    left resolved_branch_target_ext : (logic[64]@#1) @dyn - @dyn,
+    left resolved_branch_taken_ext : (logic@#1) @dyn - @dyn,
+    left resolved_branch_mispredict_ext : (logic@#1) @dyn - @dyn
+}
+
+chan ex_out_ch {
+    left flu_result : (logic[64]@#1) @dyn - @dyn,
+    left flu_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left flu_ex_valid : (logic@#1) @dyn - @dyn,
+    left flu_ex_cause : (logic[64]@#1) @dyn - @dyn,
+    left flu_ex_tval : (logic[64]@#1) @dyn - @dyn,
+    left flu_ready : (logic@#1) @dyn - @dyn,
+    left flu_valid : (logic@#1) @dyn - @dyn,
+    left resolve_branch : (logic@#1) @dyn - @dyn,
+    left resolved_branch_valid : (logic@#1) @dyn - @dyn,
+    left resolved_branch_target : (logic[64]@#1) @dyn - @dyn,
+    left resolved_branch_taken : (logic@#1) @dyn - @dyn,
+    left resolved_branch_mispredict : (logic@#1) @dyn - @dyn,
+    left csr_addr : (logic[12]@#1) @dyn - @dyn,
+    left lsu_ready : (logic@#1) @dyn - @dyn,
+    left load_valid : (logic@#1) @dyn - @dyn,
+    left load_result : (logic[64]@#1) @dyn - @dyn,
+    left load_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left load_ex_valid : (logic@#1) @dyn - @dyn,
+    left store_valid : (logic@#1) @dyn - @dyn,
+    left store_result : (logic[64]@#1) @dyn - @dyn,
+    left store_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left store_ex_valid : (logic@#1) @dyn - @dyn,
+    left lsu_commit_ready : (logic@#1) @dyn - @dyn,
+    left no_st_pending : (logic@#1) @dyn - @dyn,
+    left fpu_ready : (logic@#1) @dyn - @dyn,
+    left fpu_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left fpu_result : (logic[64]@#1) @dyn - @dyn,
+    left fpu_valid : (logic@#1) @dyn - @dyn,
+    left fpu_ex_valid : (logic@#1) @dyn - @dyn,
+    left fpu_early_valid : (logic@#1) @dyn - @dyn,
+    left x_ready : (logic@#1) @dyn - @dyn,
+    left x_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left x_ex_valid : (logic@#1) @dyn - @dyn,
+    left x_result : (logic[64]@#1) @dyn - @dyn,
+    left x_valid : (logic@#1) @dyn - @dyn,
+    left x_we : (logic@#1) @dyn - @dyn,
+    left x_rd : (logic[5]@#1) @dyn - @dyn,
+    left x_result_ready : (logic@#1) @dyn - @dyn,
+    left csr_hs_ld_st_inst : (logic@#1) @dyn - @dyn,
+    left itlb_miss : (logic@#1) @dyn - @dyn,
+    left dtlb_miss : (logic@#1) @dyn - @dyn,
+    left sfence_vma_o : (logic@#1) @dyn - @dyn,
+    left asid_to_be_flushed : (logic[16]@#1) @dyn - @dyn,
+    left vaddr_to_be_flushed : (logic[64]@#1) @dyn - @dyn,
+    left vmid_to_be_flushed : (logic@#1) @dyn - @dyn,
+    left gpaddr_to_be_flushed : (logic[41]@#1) @dyn - @dyn
+}
+
+proc ex_stage(
+    inp : left ex_in_ch,
+    out : right ex_out_ch
+) {
+    /* Input staging registers */
+    reg r_flush : logic;
+    reg r_debug : logic;
+    reg r_rs1_fwd : logic[64];
+    reg r_rs2_fwd : logic[64];
+    reg r_opa : logic[64];
+    reg r_opb : logic[64];
+    reg r_imm : logic[64];
+    reg r_fu : logic[4];
+    reg r_op : logic[8];
+    reg r_tid : logic[3];
+    reg r_pc : logic[64];
+    reg r_zcmt : logic;
+    reg r_compressed : logic;
+    reg r_tinst : logic[32];
+    reg r_alu_valid : logic;
+    reg r_aes_valid : logic;
+    reg r_branch_valid : logic;
+    reg r_csr_valid : logic;
+    reg r_csr_commit : logic;
+    reg r_mult_valid : logic;
+    reg r_lsu_valid : logic;
+    reg r_lsu_commit : logic;
+    reg r_commit_tid : logic[3];
+    reg r_stall_st : logic;
+    reg r_avc : logic;
+    reg r_fpu_valid : logic;
+    reg r_fpu_fmt : logic[2];
+    reg r_fpu_rm : logic[3];
+    reg r_fpu_frm : logic[3];
+    reg r_fpu_prec : logic[7];
+    reg r_v_i : logic;
+
+    /* External submodule result registers */
+    reg r_alu_result : logic[64];
+    reg r_alu_branch_res : logic;
+    reg r_branch_result : logic[64];
+    reg r_branch_ex_valid : logic;
+    reg r_branch_ex_cause : logic[64];
+    reg r_branch_ex_tval : logic[64];
+    reg r_csr_result : logic[64];
+    reg r_csr_rdy : logic;
+    reg r_csr_addr : logic[12];
+    reg r_mult_result : logic[64];
+    reg r_mult_valid_out : logic;
+    reg r_mult_rdy : logic;
+    reg r_mult_tid : logic[3];
+    reg r_fpu_result : logic[64];
+    reg r_fpu_valid_out : logic;
+    reg r_fpu_rdy : logic;
+    reg r_fpu_tid : logic[3];
+    reg r_fpu_ex_valid : logic;
+    reg r_fpu_early : logic;
+    reg r_load_valid : logic;
+    reg r_load_result : logic[64];
+    reg r_load_tid : logic[3];
+    reg r_load_ex_valid : logic;
+    reg r_store_valid : logic;
+    reg r_store_result : logic[64];
+    reg r_store_tid : logic[3];
+    reg r_store_ex_valid : logic;
+    reg r_lsu_rdy : logic;
+    reg r_lsu_commit_rdy : logic;
+    reg r_no_st_pend : logic;
+    reg r_resolved_valid : logic;
+    reg r_resolved_target : logic[64];
+    reg r_resolved_taken : logic;
+    reg r_resolved_mispredict : logic;
+
+    /* SFENCE.VMA state (RVS=1, RVH=0) */
+    reg sfence_vma_q : logic;
+    reg asid_flush : logic[16];
+    reg vaddr_flush : logic[64];
+
+    /* Recv loop */
+    loop {
+        let a0 = recv inp.flush >>
+        set r_flush := a0 >>
+        let a1 = recv inp.debug_mode >>
+        set r_debug := a1 >>
+        let a2 = recv inp.rs1_fwd >>
+        set r_rs1_fwd := a2 >>
+        let a3 = recv inp.rs2_fwd >>
+        set r_rs2_fwd := a3 >>
+        let a4 = recv inp.fu_operand_a >>
+        set r_opa := a4 >>
+        let a5 = recv inp.fu_operand_b >>
+        set r_opb := a5 >>
+        let a6 = recv inp.fu_imm >>
+        set r_imm := a6 >>
+        let a7 = recv inp.fu_fu >>
+        set r_fu := a7 >>
+        let a8 = recv inp.fu_operation >>
+        set r_op := a8 >>
+        let a9 = recv inp.fu_trans_id >>
+        set r_tid := a9 >>
+        let a10 = recv inp.pc >>
+        set r_pc := a10 >>
+        let a11 = recv inp.is_zcmt >>
+        set r_zcmt := a11 >>
+        let a12 = recv inp.is_compressed >>
+        set r_compressed := a12 >>
+        let a13 = recv inp.tinst >>
+        set r_tinst := a13 >>
+        let a14 = recv inp.alu_valid >>
+        set r_alu_valid := a14 >>
+        let a15 = recv inp.aes_valid >>
+        set r_aes_valid := a15 >>
+        let a16 = recv inp.branch_valid >>
+        set r_branch_valid := a16 >>
+        let a17 = recv inp.csr_valid >>
+        set r_csr_valid := a17 >>
+        let a18 = recv inp.csr_commit >>
+        set r_csr_commit := a18 >>
+        let a19 = recv inp.mult_valid >>
+        set r_mult_valid := a19 >>
+        let a20 = recv inp.lsu_valid >>
+        set r_lsu_valid := a20 >>
+        let a21 = recv inp.lsu_commit >>
+        set r_lsu_commit := a21 >>
+        let a22 = recv inp.commit_tran_id >>
+        set r_commit_tid := a22 >>
+        let a23 = recv inp.stall_st_pending >>
+        set r_stall_st := a23 >>
+        let a24 = recv inp.amo_valid_commit >>
+        set r_avc := a24 >>
+        let a25 = recv inp.fpu_valid >>
+        set r_fpu_valid := a25 >>
+        let a26 = recv inp.fpu_fmt >>
+        set r_fpu_fmt := a26 >>
+        let a27 = recv inp.fpu_rm >>
+        set r_fpu_rm := a27 >>
+        let a28 = recv inp.fpu_frm >>
+        set r_fpu_frm := a28 >>
+        let a29 = recv inp.fpu_prec >>
+        set r_fpu_prec := a29 >>
+        let a30 = recv inp.v_i >>
+        set r_v_i := a30 >>
+        let a31 = recv inp.alu_result_ext >>
+        set r_alu_result := a31 >>
+        let a32 = recv inp.alu_branch_res_ext >>
+        set r_alu_branch_res := a32 >>
+        let a33 = recv inp.branch_result_ext >>
+        set r_branch_result := a33 >>
+        let a34 = recv inp.branch_ex_valid_ext >>
+        set r_branch_ex_valid := a34 >>
+        let a35 = recv inp.branch_ex_cause_ext >>
+        set r_branch_ex_cause := a35 >>
+        let a36 = recv inp.branch_ex_tval_ext >>
+        set r_branch_ex_tval := a36 >>
+        let a37 = recv inp.csr_result_ext >>
+        set r_csr_result := a37 >>
+        let a38 = recv inp.csr_ready_ext >>
+        set r_csr_rdy := a38 >>
+        let a39 = recv inp.csr_addr_ext >>
+        set r_csr_addr := a39 >>
+        let a40 = recv inp.mult_result_ext >>
+        set r_mult_result := a40 >>
+        let a41 = recv inp.mult_valid_ext >>
+        set r_mult_valid_out := a41 >>
+        let a42 = recv inp.mult_ready_ext >>
+        set r_mult_rdy := a42 >>
+        let a43 = recv inp.mult_trans_id_ext >>
+        set r_mult_tid := a43 >>
+        let a44 = recv inp.fpu_result_ext >>
+        set r_fpu_result := a44 >>
+        let a45 = recv inp.fpu_valid_ext >>
+        set r_fpu_valid_out := a45 >>
+        let a46 = recv inp.fpu_ready_ext >>
+        set r_fpu_rdy := a46 >>
+        let a47 = recv inp.fpu_trans_id_ext >>
+        set r_fpu_tid := a47 >>
+        let a48 = recv inp.fpu_ex_valid_ext >>
+        set r_fpu_ex_valid := a48 >>
+        let a49 = recv inp.fpu_early_valid_ext >>
+        set r_fpu_early := a49 >>
+        let a50 = recv inp.load_valid_ext >>
+        set r_load_valid := a50 >>
+        let a51 = recv inp.load_result_ext >>
+        set r_load_result := a51 >>
+        let a52 = recv inp.load_trans_id_ext >>
+        set r_load_tid := a52 >>
+        let a53 = recv inp.load_ex_valid_ext >>
+        set r_load_ex_valid := a53 >>
+        let a54 = recv inp.store_valid_ext >>
+        set r_store_valid := a54 >>
+        let a55 = recv inp.store_result_ext >>
+        set r_store_result := a55 >>
+        let a56 = recv inp.store_trans_id_ext >>
+        set r_store_tid := a56 >>
+        let a57 = recv inp.store_ex_valid_ext >>
+        set r_store_ex_valid := a57 >>
+        let a58 = recv inp.lsu_ready_ext >>
+        set r_lsu_rdy := a58 >>
+        let a59 = recv inp.lsu_commit_ready_ext >>
+        set r_lsu_commit_rdy := a59 >>
+        let a60 = recv inp.no_st_pending_ext >>
+        set r_no_st_pend := a60 >>
+        let a61 = recv inp.resolved_branch_valid_ext >>
+        set r_resolved_valid := a61 >>
+        let a62 = recv inp.resolved_branch_target_ext >>
+        set r_resolved_target := a62 >>
+        let a63 = recv inp.resolved_branch_taken_ext >>
+        set r_resolved_taken := a63 >>
+        let a64 = recv inp.resolved_branch_mispredict_ext >>
+        set r_resolved_mispredict := a64 >>
+        cycle 1
+    }
+
+    /* Output loop: result MUX and combinational outputs */
+    loop {
+        /* one_cycle_select = alu_valid | branch_valid | csr_valid | aes_valid */
+        let one_cycle = *r_alu_valid | *r_branch_valid | *r_csr_valid | *r_aes_valid >>
+
+        /* flu_valid_o = one_cycle_select | mult_valid */
+        let flu_valid = one_cycle | *r_mult_valid_out >>
+        send out.flu_valid (flu_valid) >>
+
+        /* Result MUX: priority ALU > CSR > MULT > AES, default = branch result */
+        let flu_result = if (*r_alu_valid == 1'b1) { *r_alu_result }
+            else if (*r_csr_valid == 1'b1) { *r_csr_result }
+            else if (*r_mult_valid_out == 1'b1) { *r_mult_result }
+            else if (*r_aes_valid == 1'b1) { 64'd0 }
+            else { *r_branch_result } >>
+
+        let flu_tid = if (*r_mult_valid_out == 1'b1) { *r_mult_tid }
+            else { *r_tid } >>
+
+        send out.flu_result (flu_result) >>
+        send out.flu_trans_id (flu_tid) >>
+
+        /* FLU exception from branch unit */
+        send out.flu_ex_valid (*r_branch_ex_valid) >>
+        send out.flu_ex_cause (*r_branch_ex_cause) >>
+        send out.flu_ex_tval (*r_branch_ex_tval) >>
+
+        /* flu_ready = csr_ready & mult_ready */
+        let flu_rdy = *r_csr_rdy & *r_mult_rdy >>
+        send out.flu_ready (flu_rdy) >>
+
+        /* Branch resolution outputs */
+        send out.resolve_branch (*r_branch_valid) >>
+        send out.resolved_branch_valid (*r_resolved_valid) >>
+        send out.resolved_branch_target (*r_resolved_target) >>
+        send out.resolved_branch_taken (*r_resolved_taken) >>
+        send out.resolved_branch_mispredict (*r_resolved_mispredict) >>
+
+        /* CSR address */
+        send out.csr_addr (*r_csr_addr) >>
+
+        /* LSU outputs (pass-through from submodule) */
+        send out.lsu_ready (*r_lsu_rdy) >>
+        send out.load_valid (*r_load_valid) >>
+        send out.load_result (*r_load_result) >>
+        send out.load_trans_id (*r_load_tid) >>
+        send out.load_ex_valid (*r_load_ex_valid) >>
+        send out.store_valid (*r_store_valid) >>
+        send out.store_result (*r_store_result) >>
+        send out.store_trans_id (*r_store_tid) >>
+        send out.store_ex_valid (*r_store_ex_valid) >>
+        send out.lsu_commit_ready (*r_lsu_commit_rdy) >>
+        send out.no_st_pending (*r_no_st_pend) >>
+
+        /* FPU outputs (FpPresent=1, SuperscalarEn=0) */
+        send out.fpu_ready (*r_fpu_rdy) >>
+        send out.fpu_trans_id (*r_fpu_tid) >>
+        send out.fpu_result (*r_fpu_result) >>
+        send out.fpu_valid (*r_fpu_valid_out) >>
+        send out.fpu_ex_valid (*r_fpu_ex_valid) >>
+        send out.fpu_early_valid (*r_fpu_early) >>
+
+        /* CVXIF outputs: CvxifEn=0, all zero */
+        send out.x_ready (1'b0) >>
+        send out.x_trans_id (3'd0) >>
+        send out.x_ex_valid (1'b0) >>
+        send out.x_result (64'd0) >>
+        send out.x_valid (1'b0) >>
+        send out.x_we (1'b0) >>
+        send out.x_rd (5'd0) >>
+        send out.x_result_ready (1'b0) >>
+
+        /* LSU extras */
+        send out.csr_hs_ld_st_inst (1'b0) >>
+        send out.itlb_miss (1'b0) >>
+        send out.dtlb_miss (1'b0) >>
+
+        /* SFENCE.VMA outputs (RVS=1, RVH=0) */
+        send out.sfence_vma_o (*sfence_vma_q) >>
+        send out.asid_to_be_flushed (*asid_flush) >>
+        send out.vaddr_to_be_flushed (*vaddr_flush) >>
+        send out.vmid_to_be_flushed (1'b0) >>
+        send out.gpaddr_to_be_flushed (41'd0) >>
+
+        cycle 1
+    }
+
+    /* SFENCE.VMA state machine (RVS=1, RVH=0) */
+    /* SFENCE_VMA operation encoding: check fu_operation for match */
+    loop {
+        if (*r_flush == 1'b1) {
+            set sfence_vma_q := 1'b0
+        } else if (*r_op == 8'hC0) {
+            /* SFENCE_VMA encoding (placeholder 0xC0) */
+            if (*r_csr_valid == 1'b1) {
+                set sfence_vma_q := 1'b1
+            } else {
+                cycle 1
+            }
+        } else {
+            cycle 1
+        }
+    }
+
+    /* SFENCE.VMA parameter capture (RVS=1, RVH=0):
+       When not currently in SFENCE_VMA and not issuing one,
+       capture rs1/rs2 forwarding values for TLB flush */
+    loop {
+        let is_sfence_op = if (*r_op == 8'hC0) { *r_csr_valid } else { 1'b0 } >>
+        let guard = (~(*sfence_vma_q)) & (~(is_sfence_op)) >>
+        if (guard == 1'b1) {
+            set vaddr_flush := *r_rs1_fwd;
+            set asid_flush := <(*r_rs2_fwd)::logic[16]>
+        } else {
+            cycle 1
+        }
+    }
+}
