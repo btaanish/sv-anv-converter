@@ -1,0 +1,99 @@
+/* Hand-written Anvil for SyncSpRamBeNx64.sv
+   Synchronous Single-Port N x 64bit RAM with Byte-Wise Enable.
+   Concrete params: ADDR_WIDTH=10, DATA_DEPTH=1024, OUT_REGS=0.
+   Xilinx implementation path only.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~85
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] ADDR_WIDTH=10, DATA_DEPTH=1024 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] OUT_REGS=0 path only (no output register)
+       - [MANUAL-CLEANUP-NEEDED] SIM_INIT omitted (simulation-only feature)
+       - [MANUAL-CLEANUP-NEEDED] Byte-enable modeled as 8 conditional masked writes
+*/
+
+chan sram64_in_ch {
+    left csel_i   : (logic@#1) @dyn - @dyn,
+    left wren_i   : (logic@#1) @dyn - @dyn,
+    left ben_i    : (logic[8]@#1) @dyn - @dyn,
+    left wrdata_i : (logic[64]@#1) @dyn - @dyn,
+    left addr_i   : (logic[10]@#1) @dyn - @dyn
+}
+
+chan sram64_out_ch {
+    left rddata_o : (logic[64]@#1) @dyn - @dyn
+}
+
+type sram64_word = (logic[64]);
+
+proc SyncSpRamBeNx64(
+    inp : left sram64_in_ch,
+    out : right sram64_out_ch
+) {
+    // Memory array: 1024 x 64-bit
+    reg mem : sram64_word[1024];
+
+    // Read data register
+    reg rddata : logic[64];
+
+    // Input staging registers
+    reg r_csel   : logic;
+    reg r_wren   : logic;
+    reg r_ben    : logic[8];
+    reg r_wrdata : logic[64];
+    reg r_addr   : logic[10];
+
+    // Receive inputs
+    loop {
+        let v = recv inp.csel_i >>
+        set r_csel := v
+    }
+    loop {
+        let v = recv inp.wren_i >>
+        set r_wren := v
+    }
+    loop {
+        let v = recv inp.ben_i >>
+        set r_ben := v
+    }
+    loop {
+        let v = recv inp.wrdata_i >>
+        set r_wrdata := v
+    }
+    loop {
+        let v = recv inp.addr_i >>
+        set r_addr := v
+    }
+
+    // Main SRAM logic: on CSel, either write with byte-enable or read
+    loop {
+        if (*r_csel == 1'b1) {
+            if (*r_wren == 1'b1) {
+                // Write with byte enable
+                let cur = <(*mem[*r_addr])::logic[64]> >>
+                let b0 = if ((*r_ben & 8'd1) != 8'd0) { *r_wrdata & 64'h00000000000000FF } else { cur & 64'h00000000000000FF } >>
+                let b1 = if ((*r_ben & 8'd2) != 8'd0) { *r_wrdata & 64'h000000000000FF00 } else { cur & 64'h000000000000FF00 } >>
+                let b2 = if ((*r_ben & 8'd4) != 8'd0) { *r_wrdata & 64'h0000000000FF0000 } else { cur & 64'h0000000000FF0000 } >>
+                let b3 = if ((*r_ben & 8'd8) != 8'd0) { *r_wrdata & 64'h00000000FF000000 } else { cur & 64'h00000000FF000000 } >>
+                let b4 = if ((*r_ben & 8'd16) != 8'd0) { *r_wrdata & 64'h000000FF00000000 } else { cur & 64'h000000FF00000000 } >>
+                let b5 = if ((*r_ben & 8'd32) != 8'd0) { *r_wrdata & 64'h0000FF0000000000 } else { cur & 64'h0000FF0000000000 } >>
+                let b6 = if ((*r_ben & 8'd64) != 8'd0) { *r_wrdata & 64'h00FF000000000000 } else { cur & 64'h00FF000000000000 } >>
+                let b7 = if ((*r_ben & 8'd128) != 8'd0) { *r_wrdata & 64'hFF00000000000000 } else { cur & 64'hFF00000000000000 } >>
+                let wval = b0 | b1 | b2 | b3 | b4 | b5 | b6 | b7 >>
+                set mem[*r_addr] := <(wval)::sram64_word>
+            } else {
+                // Read
+                set rddata := <(*mem[*r_addr])::logic[64]>
+            }
+        } else {
+            cycle 1
+        }
+    }
+
+    // Output: rddata
+    loop {
+        send out.rddata_o (*rddata) >>
+        cycle 1
+    }
+}

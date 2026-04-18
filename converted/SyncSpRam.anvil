@@ -1,0 +1,57 @@
+/* Hand-written Anvil for SyncSpRam.sv
+   Inferable synchronous single-port RAM.
+   Concrete params: ADDR_WIDTH=10, DATA_DEPTH=1024, DATA_WIDTH=32, OUT_REGS=0.
+   When CSel_SI asserted: WrEn_SI=1 writes, WrEn_SI=0 reads.
+   OUT_REGS=0 path: read data passes through directly (no output register). */
+
+type sp_word = (logic[32]);
+
+chan syncspram_ch {
+    left csel   : (logic@#1) @dyn - @dyn,
+    left wr_en  : (logic@#1) @dyn - @dyn,
+    left addr   : (logic[10]@#1) @dyn - @dyn,
+    left wdata  : (logic[32]@#1) @dyn - @dyn,
+    right rdata : (logic[32]@#1) @dyn - @dyn
+}
+
+proc SyncSpRam(ep : left syncspram_ch) {
+    reg mem : sp_word[1024];
+    reg r_csel  : logic;
+    reg r_wren  : logic;
+    reg r_addr  : logic[10];
+    reg r_wdata : logic[32];
+    reg r_rdata : logic[32];
+
+    /* Recv inputs */
+    loop {
+        let v_csel = recv ep.csel >>
+        set r_csel := v_csel >>
+        let v_wren = recv ep.wr_en >>
+        set r_wren := v_wren >>
+        let v_addr = recv ep.addr >>
+        set r_addr := v_addr >>
+        let v_wdata = recv ep.wdata >>
+        set r_wdata := v_wdata >>
+        cycle 1
+    }
+
+    /* Memory read/write logic (always_ff) */
+    loop {
+        if (*r_csel == 1'b1) {
+            if (*r_wren == 1'b1) {
+                set mem[*r_addr] := <(*r_wdata)::sp_word>
+            } else {
+                set r_rdata := <(*mem[*r_addr])::logic[32]>
+            }
+        } else {
+            cycle 1
+        } >>
+        cycle 1
+    }
+
+    /* Send read data output */
+    loop {
+        send ep.rdata (*r_rdata) >>
+        cycle 1
+    }
+}

@@ -1,0 +1,156 @@
+/* Hand-written Anvil for BramDwc.sv
+   BRAM data width converter: narrow master to wide slave.
+   Concrete params: ADDR_BITW=32, MST_DATA_BITW=32, SLV_DATA_BITW=64.
+
+   Derived constants:
+     MST_DATA_BYTEW = 4, MST_ADDR_WORD_BITO = 2, MST_ADDR_WORD_BITW = 30
+     SLV_DATA_BYTEW = 8, SLV_ADDR_WORD_BITO = 3, SLV_ADDR_WORD_BITW = 29
+     PAR_IDX_MAX_VAL = 1 (2 partitions), PAR_IDX_BITW = 1
+
+   The module maps a 32-bit master port to a 64-bit slave port.
+   Partition index is bit 0 of master word address.
+   Slave word address is master word address >> 1.
+
+   Master port (slave modport — inputs from master):
+     en, rst, addr, wr_d, wr_en -> module; rd_d <- module
+   Slave port (master modport — outputs to slave):
+     en, rst, addr, wr_d, wr_en <- module; rd_d -> module */
+
+chan bramdwc_mst_ch {
+    left en      : (logic@#1) @dyn - @dyn,
+    left rst     : (logic@#1) @dyn - @dyn,
+    left addr    : (logic[32]@#1) @dyn - @dyn,
+    left wr_d    : (logic[32]@#1) @dyn - @dyn,
+    left wr_en   : (logic[4]@#1) @dyn - @dyn,
+    right rd_d   : (logic[32]@#1) @dyn - @dyn
+}
+
+chan bramdwc_slv_ch {
+    right en     : (logic@#1) @dyn - @dyn,
+    right rst    : (logic@#1) @dyn - @dyn,
+    right addr   : (logic[32]@#1) @dyn - @dyn,
+    right wr_d   : (logic[64]@#1) @dyn - @dyn,
+    right wr_en  : (logic[8]@#1) @dyn - @dyn,
+    left rd_d    : (logic[64]@#1) @dyn - @dyn
+}
+
+proc BramDwc(
+    mst : left bramdwc_mst_ch,
+    slv : left bramdwc_slv_ch
+) {
+    /* Input staging regs */
+    reg r_en     : logic;
+    reg r_rst    : logic;
+    reg r_addr   : logic[32];
+    reg r_wr_d   : logic[32];
+    reg r_wr_en  : logic[4];
+
+    /* Registered address for stable read partition selection */
+    reg r_addr_reg : logic[32];
+
+    /* Slave read data */
+    reg r_slv_rd : logic[64];
+
+    /* Output regs */
+    reg r_mst_rd    : logic[32];
+    reg r_slv_en    : logic;
+    reg r_slv_rst   : logic;
+    reg r_slv_addr  : logic[32];
+    reg r_slv_wr_d  : logic[64];
+    reg r_slv_wr_en : logic[8];
+
+    /* Recv master inputs */
+    loop {
+        let v_en = recv mst.en >>
+        set r_en := v_en >>
+        let v_rst = recv mst.rst >>
+        set r_rst := v_rst >>
+        let v_addr = recv mst.addr >>
+        set r_addr := v_addr >>
+        let v_wr_d = recv mst.wr_d >>
+        set r_wr_d := v_wr_d >>
+        let v_wr_en = recv mst.wr_en >>
+        set r_wr_en := v_wr_en >>
+        cycle 1
+    }
+
+    /* Recv slave read data */
+    loop {
+        let v_rd = recv slv.rd_d >>
+        set r_slv_rd := v_rd >>
+        cycle 1
+    }
+
+    /* Address register: latch master address on enable for stable read selection */
+    loop {
+        if (*r_rst == 1'b1) {
+            set r_addr_reg := 32'd0
+        } else {
+            if (*r_en == 1'b1) {
+                set r_addr_reg := *r_addr
+            } else {
+                cycle 1
+            }
+        } >>
+        cycle 1
+    }
+
+    /* Compute slave signals.
+       Master word addr = addr >> 2 (30-bit).
+       Partition index = mst_waddr[0] (low bit).
+       Slave word addr = mst_waddr >> 1 (29-bit), placed at slave addr[31:3]. */
+    loop {
+        /* Write path: use current address */
+        let mst_waddr = *r_addr >> 32'd2 >>
+        let par_wr = mst_waddr & 32'd1 >>
+        let slv_waddr = mst_waddr >> 32'd1 >>
+
+        /* Read path: use registered address */
+        let mst_waddr_r = *r_addr_reg >> 32'd2 >>
+        let par_rd = mst_waddr_r & 32'd1 >>
+
+        /* Slave address: place slave word addr at bits [31:3] */
+        set r_slv_addr := (slv_waddr << 32'd3) >>
+
+        /* Pass through enable and reset */
+        set r_slv_en := *r_en >>
+        set r_slv_rst := *r_rst >>
+
+        /* Slave write data: replicate 32-bit master data in both halves */
+        let wd = *r_wr_d >>
+        set r_slv_wr_d := ((<(wd)::logic[64]> << 64'd32) | <(wd)::logic[64]>) >>
+
+        /* Slave write enables: route master wr_en to active partition only */
+        let we = *r_wr_en >>
+        let lo_we = if (par_wr == 32'd0) { <(we)::logic[8]> } else { 8'd0 } >>
+        let hi_we = if (par_wr == 32'd1) { <(we)::logic[8]> << 8'd4 } else { 8'd0 } >>
+        set r_slv_wr_en := (lo_we | hi_we) >>
+
+        /* Master read data: select partition from 64-bit slave read data */
+        let rd64 = *r_slv_rd >>
+        let rd_sel =
+            if (par_rd == 32'd0) {
+                <(rd64)::logic[32]>
+            } else {
+                <(rd64 >> 64'd32)::logic[32]>
+            } >>
+        set r_mst_rd := rd_sel >>
+        cycle 1
+    }
+
+    /* Send slave outputs */
+    loop {
+        send slv.en (*r_slv_en) >>
+        send slv.rst (*r_slv_rst) >>
+        send slv.addr (*r_slv_addr) >>
+        send slv.wr_d (*r_slv_wr_d) >>
+        send slv.wr_en (*r_slv_wr_en) >>
+        cycle 1
+    }
+
+    /* Send master read data */
+    loop {
+        send mst.rd_d (*r_mst_rd) >>
+        cycle 1
+    }
+}

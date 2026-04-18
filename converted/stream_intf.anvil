@@ -1,0 +1,50 @@
+/* Hand-written Anvil for stream_intf.sv
+   Stream interface with custom payload — models SV interface as Anvil chan class.
+   AXI-style valid/ready handshake.
+   Concrete params: payload_t = logic[32].
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~30
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] payload_t hardcoded to logic[32]
+       - [MANUAL-CLEANUP-NEEDED] SV modport In/Out/Passive mapped to chan directions
+       - [MANUAL-CLEANUP-NEEDED] Assertion properties omitted
+*/
+
+// [MANUAL] SV interface STREAM_DV modeled as Anvil chan class
+// modport Out sends data+valid, receives ready
+// modport In receives data+valid, sends ready
+chan stream_dv_ch {
+    left data  : (logic[32]@#1) @dyn - @dyn,
+    left valid : (logic@#1) @dyn - @dyn,
+    right rdy : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Stub proc demonstrating usage of the stream interface.
+// A producer (Out modport) uses `right stream_dv_ch`.
+// A consumer (In modport) uses `left stream_dv_ch`.
+proc stream_intf_stub(ep : left stream_dv_ch) {
+    reg r_data : logic[32];
+    reg r_valid : logic;
+
+    // Receive data
+    loop {
+        let d = recv ep.data >>
+        set r_data := d >>
+        cycle 1
+    }
+
+    // Receive valid
+    loop {
+        let v = recv ep.valid >>
+        set r_valid := v >>
+        cycle 1
+    }
+
+    // Send ready when valid
+    loop {
+        send ep.rdy (*r_valid) >>
+        cycle 1
+    }
+}

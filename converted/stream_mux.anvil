@@ -1,0 +1,93 @@
+/* Hand-written Anvil for stream_mux.sv
+   Stream multiplexer: connects output to one of N_INP data streams
+   with valid-ready handshaking.
+   Concrete params: DATA_T=logic[32], N_INP=4, LOG_N_INP=2.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~50
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] DATA_T hardcoded to logic[32], N_INP to 4
+       - [MANUAL-CLEANUP-NEEDED] Dynamic array indexing modeled with match on sel
+*/
+
+// [MANUAL] Channel for mux inputs — 4 input streams + select
+chan smux_in_ch {
+    left inp_data_0 : (logic[32]@#1) @dyn - @dyn,
+    left inp_data_1 : (logic[32]@#1) @dyn - @dyn,
+    left inp_data_2 : (logic[32]@#1) @dyn - @dyn,
+    left inp_data_3 : (logic[32]@#1) @dyn - @dyn,
+    left inp_valid : (logic[4]@#1) @dyn - @dyn,
+    left inp_sel : (logic[2]@#1) @dyn - @dyn,
+    left oup_ready_i : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for mux outputs
+chan smux_out_ch {
+    left inp_ready : (logic[4]@#1) @dyn - @dyn,
+    left oup_data : (logic[32]@#1) @dyn - @dyn,
+    left oup_valid : (logic@#1) @dyn - @dyn
+}
+
+proc stream_mux(
+    inp : left smux_in_ch,    // [MANUAL] input data/valid/sel + downstream ready
+    out : right smux_out_ch   // [MANUAL] input ready + output data/valid
+) {
+    // [MANUAL] Input staging
+    reg r_data0 : logic[32];
+    reg r_data1 : logic[32];
+    reg r_data2 : logic[32];
+    reg r_data3 : logic[32];
+    reg r_valid : logic[4];
+    reg r_sel : logic[2];
+    reg r_oup_ready : logic;
+
+    loop {
+        // [MANUAL] Receive all inputs
+        let d0 = recv inp.inp_data_0 >>
+        set r_data0 := d0 >>
+        let d1 = recv inp.inp_data_1 >>
+        set r_data1 := d1 >>
+        let d2 = recv inp.inp_data_2 >>
+        set r_data2 := d2 >>
+        let d3 = recv inp.inp_data_3 >>
+        set r_data3 := d3 >>
+        let v = recv inp.inp_valid >>
+        set r_valid := v >>
+        let s = recv inp.inp_sel >>
+        set r_sel := s >>
+        let or_val = recv inp.oup_ready_i >>
+        set r_oup_ready := or_val >>
+
+        // [MANUAL] Compute inp_ready_o: all zeros except selected input gets oup_ready_i
+        // [MANUAL-CLEANUP-NEEDED] Dynamic index modeled with match
+        let inp_rdy = match *r_sel {
+            2'd0 => if *r_oup_ready == 1'b1 { 4'b0001 } else { 4'b0000 },
+            2'd1 => if *r_oup_ready == 1'b1 { 4'b0010 } else { 4'b0000 },
+            2'd2 => if *r_oup_ready == 1'b1 { 4'b0100 } else { 4'b0000 },
+            _ =>    if *r_oup_ready == 1'b1 { 4'b1000 } else { 4'b0000 }
+        } >>
+
+        // [MANUAL] Select output data based on sel
+        let oup_data = match *r_sel {
+            2'd0 => *r_data0,
+            2'd1 => *r_data1,
+            2'd2 => *r_data2,
+            _ =>    *r_data3
+        } >>
+
+        // [MANUAL] Select output valid based on sel
+        let oup_vld = match *r_sel {
+            2'd0 => <(*r_valid & 4'b0001)::logic>,
+            2'd1 => <((*r_valid >> 4'd1) & 4'b0001)::logic>,
+            2'd2 => <((*r_valid >> 4'd2) & 4'b0001)::logic>,
+            _ =>    <((*r_valid >> 4'd3) & 4'b0001)::logic>
+        } >>
+
+        // [MANUAL] Send outputs
+        send out.inp_ready (inp_rdy);
+        send out.oup_data (oup_data);
+        send out.oup_valid (oup_vld) >>
+        cycle 1
+    }
+}

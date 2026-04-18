@@ -1,0 +1,58 @@
+/* Hand-written Anvil for shift_reg.sv
+   Simple shift register for arbitrary depth and types.
+   Concrete params: dtype=logic[8], Depth=4.
+   Data shifts through 4 stages on each cycle when enabled.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~40
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] dtype hardcoded to logic[8], Depth to 4
+       - [MANUAL-CLEANUP-NEEDED] Reset value hardcoded to 0
+*/
+
+// [MANUAL] Channel for shift register input
+chan shiftreg_in_ch {
+    left d_in : (logic[8]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for shift register output
+chan shiftreg_out_ch {
+    left d_out : (logic[8]@#1) @dyn - @dyn
+}
+
+proc shift_reg(
+    inp : left shiftreg_in_ch,   // [MANUAL] d_i input
+    out : right shiftreg_out_ch  // [MANUAL] d_o output
+) {
+    // [MANUAL] Shift register stages — 4 deep
+    reg stage0 : logic[8];
+    reg stage1 : logic[8];
+    reg stage2 : logic[8];
+    reg stage3 : logic[8];
+
+    // [MANUAL] Input staging register
+    reg r_din : logic[8];
+
+    // [MANUAL] Recv loop — stage data input
+    loop {
+        let v = recv inp.d_in >>
+        set r_din := v
+    }
+
+    // [MANUAL] Shift logic (models always_ff)
+    // Each cycle: stage0 <= d_i, stage1 <= stage0, etc.
+    // Output is stage3 (Depth-1)
+    loop {
+        set stage3 := *stage2;
+        set stage2 := *stage1;
+        set stage1 := *stage0;
+        set stage0 := *r_din
+    }
+
+    // [MANUAL] Output loop — d_o = stage3
+    loop {
+        send out.d_out (*stage3) >>
+        cycle 1
+    }
+}

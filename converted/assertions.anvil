@@ -1,0 +1,14 @@
+/* Hand-written Anvil for assertions.sv
+   Original is SV macros for testbench assertions (`assert_equal, `assert_equal_msg).
+   No synthesizable logic — this is a minimal valid Anvil placeholder. */
+
+chan assertions_ch {
+    left dummy : (logic@#1) @dyn - @dyn
+}
+
+proc assertions_stub(ep : left assertions_ch) {
+    loop {
+        let _d = recv ep.dummy >>
+        cycle 1
+    }
+}

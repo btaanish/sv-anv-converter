@@ -1,0 +1,346 @@
+/* Hand-written Anvil for AxiToAxiLitePc.sv
+   AXI4 to AXI4-Lite protocol converter with ID reflection.
+   Concrete params: AXI_ADDR_WIDTH=32, AXI_ID_WIDTH=10.
+   Two FSMs: read (RREADY/READ/RERR) and write (WREADY/WRITE/WAITAWREADY/WAITWREADY/WRESP/WERRBEATS/WERRRESP).
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~200
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] AXI_ADDR_WIDTH=32, AXI_ID_WIDTH=10 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] AXI_BUS and AXI_LITE interfaces modeled as flat channels
+       - [MANUAL-CLEANUP-NEEDED] FSM outputs are register-based, not purely combinational
+       - [MANUAL-CLEANUP-NEEDED] b_user and r_user tied to 0 (not exposed)
+*/
+
+// Write FSM states
+enum axi2lite_wr_state {
+    WREADY,
+    WRITE,
+    WAITAWREADY,
+    WAITWREADY,
+    WRESP,
+    WERRBEATS,
+    WERRRESP
+}
+
+// Read FSM states
+enum axi2lite_rd_state {
+    RREADY,
+    READ,
+    RERR
+}
+
+// AXI slave-side inputs (from AXI master)
+chan axi_s_in_ch {
+    left aw_valid_i  : (logic@#1) @dyn - @dyn,
+    left aw_addr_i   : (logic[32]@#1) @dyn - @dyn,
+    left aw_id_i     : (logic[10]@#1) @dyn - @dyn,
+    left aw_len_i    : (logic[8]@#1) @dyn - @dyn,
+    left w_valid_i   : (logic@#1) @dyn - @dyn,
+    left w_data_i    : (logic[32]@#1) @dyn - @dyn,
+    left w_strb_i    : (logic[4]@#1) @dyn - @dyn,
+    left w_last_i    : (logic@#1) @dyn - @dyn,
+    left b_ready_i   : (logic@#1) @dyn - @dyn,
+    left ar_valid_i  : (logic@#1) @dyn - @dyn,
+    left ar_addr_i   : (logic[32]@#1) @dyn - @dyn,
+    left ar_id_i     : (logic[10]@#1) @dyn - @dyn,
+    left ar_len_i    : (logic[8]@#1) @dyn - @dyn,
+    left r_ready_i   : (logic@#1) @dyn - @dyn
+}
+
+// AXI-Lite master-side inputs (from AXI-Lite slave)
+chan axil_m_in_ch {
+    left aw_ready_i : (logic@#1) @dyn - @dyn,
+    left w_ready_i  : (logic@#1) @dyn - @dyn,
+    left b_valid_i  : (logic@#1) @dyn - @dyn,
+    left b_resp_i   : (logic[2]@#1) @dyn - @dyn,
+    left ar_ready_i : (logic@#1) @dyn - @dyn,
+    left r_valid_i  : (logic@#1) @dyn - @dyn,
+    left r_resp_i   : (logic[2]@#1) @dyn - @dyn,
+    left r_data_i   : (logic[32]@#1) @dyn - @dyn
+}
+
+// AXI slave-side outputs (to AXI master)
+chan axi_s_out_ch {
+    left aw_ready_o : (logic@#1) @dyn - @dyn,
+    left w_ready_o  : (logic@#1) @dyn - @dyn,
+    left b_valid_o  : (logic@#1) @dyn - @dyn,
+    left b_resp_o   : (logic[2]@#1) @dyn - @dyn,
+    left b_id_o     : (logic[10]@#1) @dyn - @dyn,
+    left ar_ready_o : (logic@#1) @dyn - @dyn,
+    left r_valid_o  : (logic@#1) @dyn - @dyn,
+    left r_resp_o   : (logic[2]@#1) @dyn - @dyn,
+    left r_data_o   : (logic[32]@#1) @dyn - @dyn,
+    left r_id_o     : (logic[10]@#1) @dyn - @dyn,
+    left r_last_o   : (logic@#1) @dyn - @dyn
+}
+
+// AXI-Lite master-side outputs (to AXI-Lite slave)
+chan axil_m_out_ch {
+    left aw_valid_o : (logic@#1) @dyn - @dyn,
+    left aw_addr_o  : (logic[32]@#1) @dyn - @dyn,
+    left w_valid_o  : (logic@#1) @dyn - @dyn,
+    left w_data_o   : (logic[32]@#1) @dyn - @dyn,
+    left w_strb_o   : (logic[4]@#1) @dyn - @dyn,
+    left b_ready_o  : (logic@#1) @dyn - @dyn,
+    left ar_valid_o : (logic@#1) @dyn - @dyn,
+    left ar_addr_o  : (logic[32]@#1) @dyn - @dyn,
+    left r_ready_o  : (logic@#1) @dyn - @dyn
+}
+
+proc AxiToAxiLitePc(
+    axi_in   : left axi_s_in_ch,
+    axil_in  : left axil_m_in_ch,
+    axi_out  : right axi_s_out_ch,
+    axil_out : right axil_m_out_ch
+) {
+    // FSM state registers
+    reg st_wr : axi2lite_wr_state;
+    reg st_rd : axi2lite_rd_state;
+
+    // Latched ID/address registers
+    reg ar_id   : logic[10];
+    reg aw_addr : logic[32];
+    reg aw_id   : logic[10];
+
+    // Input staging registers — AXI slave side
+    reg r_aw_valid : logic;
+    reg r_aw_addr  : logic[32];
+    reg r_aw_id    : logic[10];
+    reg r_aw_len   : logic[8];
+    reg r_w_valid  : logic;
+    reg r_w_data   : logic[32];
+    reg r_w_strb   : logic[4];
+    reg r_w_last   : logic;
+    reg r_b_ready  : logic;
+    reg r_ar_valid : logic;
+    reg r_ar_addr  : logic[32];
+    reg r_ar_id    : logic[10];
+    reg r_ar_len   : logic[8];
+    reg r_r_ready  : logic;
+
+    // Input staging registers — AXI-Lite master side
+    reg r_l_aw_ready : logic;
+    reg r_l_w_ready  : logic;
+    reg r_l_b_valid  : logic;
+    reg r_l_b_resp   : logic[2];
+    reg r_l_ar_ready : logic;
+    reg r_l_r_valid  : logic;
+    reg r_l_r_resp   : logic[2];
+    reg r_l_r_data   : logic[32];
+
+    // Output staging registers — AXI slave side
+    reg o_aw_ready : logic;
+    reg o_w_ready  : logic;
+    reg o_b_valid  : logic;
+    reg o_b_resp   : logic[2];
+    reg o_ar_ready : logic;
+    reg o_r_valid  : logic;
+    reg o_r_resp   : logic[2];
+    reg o_r_last   : logic;
+
+    // Output staging registers — AXI-Lite master side
+    reg o_l_aw_valid : logic;
+    reg o_l_w_valid  : logic;
+    reg o_l_b_ready  : logic;
+    reg o_l_ar_valid : logic;
+
+    // Receive AXI slave inputs
+    loop { let v = recv axi_in.aw_valid_i >> set r_aw_valid := v }
+    loop { let v = recv axi_in.aw_addr_i >> set r_aw_addr := v }
+    loop { let v = recv axi_in.aw_id_i >> set r_aw_id := v }
+    loop { let v = recv axi_in.aw_len_i >> set r_aw_len := v }
+    loop { let v = recv axi_in.w_valid_i >> set r_w_valid := v }
+    loop { let v = recv axi_in.w_data_i >> set r_w_data := v }
+    loop { let v = recv axi_in.w_strb_i >> set r_w_strb := v }
+    loop { let v = recv axi_in.w_last_i >> set r_w_last := v }
+    loop { let v = recv axi_in.b_ready_i >> set r_b_ready := v }
+    loop { let v = recv axi_in.ar_valid_i >> set r_ar_valid := v }
+    loop { let v = recv axi_in.ar_addr_i >> set r_ar_addr := v }
+    loop { let v = recv axi_in.ar_id_i >> set r_ar_id := v }
+    loop { let v = recv axi_in.ar_len_i >> set r_ar_len := v }
+    loop { let v = recv axi_in.r_ready_i >> set r_r_ready := v }
+
+    // Receive AXI-Lite master inputs
+    loop { let v = recv axil_in.aw_ready_i >> set r_l_aw_ready := v }
+    loop { let v = recv axil_in.w_ready_i >> set r_l_w_ready := v }
+    loop { let v = recv axil_in.b_valid_i >> set r_l_b_valid := v }
+    loop { let v = recv axil_in.b_resp_i >> set r_l_b_resp := v }
+    loop { let v = recv axil_in.ar_ready_i >> set r_l_ar_ready := v }
+    loop { let v = recv axil_in.r_valid_i >> set r_l_r_valid := v }
+    loop { let v = recv axil_in.r_resp_i >> set r_l_r_resp := v }
+    loop { let v = recv axil_in.r_data_i >> set r_l_r_data := v }
+
+    // Write FSM
+    loop {
+        // Default outputs each cycle
+        set o_aw_ready := 1'b0 >>
+        set o_w_ready := 1'b0 >>
+        set o_b_valid := 1'b0 >>
+        set o_b_resp := 2'b00 >>
+        set o_l_aw_valid := 1'b0 >>
+        set o_l_w_valid := 1'b0 >>
+        set o_l_b_ready := 1'b0 >>
+        match (*st_wr) {
+            axi2lite_wr_state::WREADY => {
+                if (*r_aw_valid == 1'b1) {
+                    set o_aw_ready := 1'b1 >>
+                    set aw_id := *r_aw_id >>
+                    if (*r_aw_len != 8'd0) {
+                        set st_wr := axi2lite_wr_state::WERRBEATS
+                    } else {
+                        set aw_addr := *r_aw_addr >>
+                        set st_wr := axi2lite_wr_state::WRITE
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            axi2lite_wr_state::WRITE => {
+                if (*r_w_valid == 1'b1) {
+                    set o_l_aw_valid := 1'b1 >>
+                    set o_l_w_valid := 1'b1 >>
+                    if ((*r_l_w_ready == 1'b1) & (*r_l_aw_ready == 1'b1)) {
+                        set o_w_ready := 1'b1 >>
+                        set st_wr := axi2lite_wr_state::WRESP
+                    } else if (*r_l_w_ready == 1'b1) {
+                        set o_w_ready := 1'b1 >>
+                        set st_wr := axi2lite_wr_state::WAITAWREADY
+                    } else if (*r_l_aw_ready == 1'b1) {
+                        set st_wr := axi2lite_wr_state::WAITWREADY
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            axi2lite_wr_state::WAITAWREADY => {
+                set o_l_aw_valid := 1'b1 >>
+                if (*r_l_aw_ready == 1'b1) {
+                    set st_wr := axi2lite_wr_state::WRESP
+                } else {
+                    cycle 1
+                }
+            },
+            axi2lite_wr_state::WAITWREADY => {
+                set o_l_w_valid := 1'b1 >>
+                if (*r_l_w_ready == 1'b1) {
+                    set st_wr := axi2lite_wr_state::WRESP
+                } else {
+                    cycle 1
+                }
+            },
+            axi2lite_wr_state::WRESP => {
+                set o_l_b_ready := *r_b_ready >>
+                set o_b_valid := *r_l_b_valid >>
+                set o_b_resp := *r_l_b_resp >>
+                if ((*r_b_ready == 1'b1) & (*r_l_b_valid == 1'b1)) {
+                    set st_wr := axi2lite_wr_state::WREADY
+                } else {
+                    cycle 1
+                }
+            },
+            axi2lite_wr_state::WERRBEATS => {
+                set o_w_ready := 1'b1 >>
+                if ((*r_w_valid == 1'b1) & (*r_w_last == 1'b1)) {
+                    set st_wr := axi2lite_wr_state::WERRRESP
+                } else {
+                    cycle 1
+                }
+            },
+            _ => {
+                // WERRRESP
+                set o_b_resp := 2'b10 >>
+                set o_b_valid := 1'b1 >>
+                if (*r_b_ready == 1'b1) {
+                    set st_wr := axi2lite_wr_state::WREADY
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // Read FSM
+    loop {
+        // Default outputs each cycle
+        set o_ar_ready := 1'b0 >>
+        set o_r_valid := 1'b0 >>
+        set o_r_resp := 2'b00 >>
+        set o_r_last := 1'b0 >>
+        set o_l_ar_valid := 1'b0 >>
+        match (*st_rd) {
+            axi2lite_rd_state::RREADY => {
+                if (*r_ar_valid == 1'b1) {
+                    if (*r_ar_len != 8'd0) {
+                        set ar_id := *r_ar_id >>
+                        set o_ar_ready := 1'b1 >>
+                        set st_rd := axi2lite_rd_state::RERR
+                    } else {
+                        set o_l_ar_valid := *r_ar_valid >>
+                        if (*r_l_ar_ready == 1'b1) {
+                            set o_ar_ready := 1'b1 >>
+                            set ar_id := *r_ar_id >>
+                            set st_rd := axi2lite_rd_state::READ
+                        } else {
+                            cycle 1
+                        }
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            axi2lite_rd_state::READ => {
+                if (*r_l_r_valid == 1'b1) {
+                    set o_r_resp := *r_l_r_resp >>
+                    set o_r_last := 1'b1 >>
+                    set o_r_valid := 1'b1 >>
+                    if (*r_r_ready == 1'b1) {
+                        set st_rd := axi2lite_rd_state::RREADY
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            _ => {
+                // RERR
+                set o_r_resp := 2'b10 >>
+                set o_r_last := 1'b1 >>
+                set o_r_valid := 1'b1 >>
+                if (*r_r_ready == 1'b1) {
+                    set st_rd := axi2lite_rd_state::RREADY
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // Send AXI slave outputs
+    loop { send axi_out.aw_ready_o (*o_aw_ready) >> cycle 1 }
+    loop { send axi_out.w_ready_o (*o_w_ready) >> cycle 1 }
+    loop { send axi_out.b_valid_o (*o_b_valid) >> cycle 1 }
+    loop { send axi_out.b_resp_o (*o_b_resp) >> cycle 1 }
+    loop { send axi_out.b_id_o (*aw_id) >> cycle 1 }
+    loop { send axi_out.ar_ready_o (*o_ar_ready) >> cycle 1 }
+    loop { send axi_out.r_valid_o (*o_r_valid) >> cycle 1 }
+    loop { send axi_out.r_resp_o (*o_r_resp) >> cycle 1 }
+    loop { send axi_out.r_data_o (*r_l_r_data) >> cycle 1 }
+    loop { send axi_out.r_id_o (*ar_id) >> cycle 1 }
+    loop { send axi_out.r_last_o (*o_r_last) >> cycle 1 }
+
+    // Send AXI-Lite master outputs
+    loop { send axil_out.aw_valid_o (*o_l_aw_valid) >> cycle 1 }
+    loop { send axil_out.aw_addr_o (*aw_addr) >> cycle 1 }
+    loop { send axil_out.w_valid_o (*o_l_w_valid) >> cycle 1 }
+    loop { send axil_out.w_data_o (*r_w_data) >> cycle 1 }
+    loop { send axil_out.w_strb_o (*r_w_strb) >> cycle 1 }
+    loop { send axil_out.b_ready_o (*o_l_b_ready) >> cycle 1 }
+    loop { send axil_out.ar_valid_o (*o_l_ar_valid) >> cycle 1 }
+    loop { send axil_out.ar_addr_o (*r_ar_addr) >> cycle 1 }
+    loop { send axil_out.r_ready_o (*r_r_ready) >> cycle 1 }
+}

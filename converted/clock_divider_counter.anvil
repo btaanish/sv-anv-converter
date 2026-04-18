@@ -1,0 +1,166 @@
+/* Hand-written Anvil for clock_divider_counter.sv
+   Clock divider with programmable division ratio. Supports odd and even
+   dividers using two half-rate dividers XORed together.
+   Concrete params: BYPASS_INIT=1, DIV_INIT=0xFF.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~130
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] Submodules (pulp_clock_inverter, pulp_clock_xor2,
+         pulp_clock_mux2) modeled inline
+       - [MANUAL-CLEANUP-NEEDED] Negative-edge clock domain (div2) modeled as
+         separate loop with 1-cycle delay approximation
+       - [MANUAL-CLEANUP-NEEDED] test_mode bypass simplified
+*/
+
+chan cdc_in_ch {
+    left test_mode     : (logic@#1) @dyn - @dyn,
+    left clk_div       : (logic[8]@#1) @dyn - @dyn,
+    left clk_div_valid : (logic@#1) @dyn - @dyn
+}
+
+chan cdc_out_ch {
+    left clk_out : (logic@#1) @dyn - @dyn
+}
+
+proc clock_divider_counter(
+    inp : left cdc_in_ch,
+    out : right cdc_out_ch
+) {
+    // Main state registers
+    reg counter    : logic[8];
+    reg clk_cnt    : logic[8];
+    reg is_odd     : logic;
+    reg bypass     : logic;
+    reg div1       : logic;
+    reg div2       : logic;
+    reg clk_div_valid_reg : logic;
+
+    // Input staging
+    reg r_test_mode : logic;
+    reg r_clk_div   : logic[8];
+    reg r_clk_div_valid : logic;
+
+    // Precomputed values
+    reg r_en1 : logic;
+    reg r_en2 : logic;
+
+    // Receive test_mode
+    loop {
+        let tm = recv inp.test_mode >>
+        set r_test_mode := tm >>
+        cycle 1
+    }
+
+    // Receive clk_div
+    loop {
+        let cd = recv inp.clk_div >>
+        set r_clk_div := cd >>
+        cycle 1
+    }
+
+    // Receive clk_div_valid
+    loop {
+        let cv = recv inp.clk_div_valid >>
+        set r_clk_div_valid := cv >>
+        cycle 1
+    }
+
+    // Combinational: compute en1, en2, counter_next
+    // en1 = (counter == 0)
+    // counter_next = clk_div_valid ? 0 : (counter == clk_cnt ? 0 : counter + 1)
+    // en2 = clk_div_valid ? 0 : (counter == clk_cnt_en2 ? 1 : 0)
+    // clk_cnt_en2 = clk_cnt[7:1] + 1
+    loop {
+        let cnt = *counter >>
+        let ccnt = *clk_cnt >>
+        let valid = *r_clk_div_valid >>
+
+        let en1_val = if cnt == 8'd0 { 1'b1 } else { 1'b0 } >>
+        set r_en1 := en1_val >>
+
+        // clk_cnt_en2 = {1'b0, clk_cnt[7:1]} + 1
+        let ccnt_half = ccnt >> 8'd1 >>
+        let ccnt_en2 = ccnt_half + 8'd1 >>
+        let en2_val = if valid == 1'b1 {
+            1'b0
+        } else {
+            if cnt == ccnt_en2 { 1'b1 } else { 1'b0 }
+        } >>
+        set r_en2 := en2_val >>
+
+        // counter_next
+        let cnt_next = if valid == 1'b1 {
+            8'd0
+        } else {
+            if cnt == ccnt { 8'd0 } else { cnt + 8'd1 }
+        } >>
+
+        // Main sequential logic
+        if (*bypass == 1'b0) {
+            set counter := cnt_next
+        } else {
+            cycle 1
+        }
+    }
+
+    // Posedge clk logic: update div1, bypass, clk_cnt, is_odd
+    loop {
+        let valid = *r_clk_div_valid >>
+        set clk_div_valid_reg := valid >>
+
+        if valid == 1'b1 {
+            let cd = *r_clk_div >>
+            if (cd == 8'd0) | (cd == 8'd1) {
+                set bypass := 1'b1 >>
+                set clk_cnt := 8'd0 >>
+                set is_odd := 1'b0 >>
+                set div1 := 1'b0
+            } else {
+                set bypass := 1'b0 >>
+                if cd[0] == 1'b1 {
+                    // Odd divider: clk_cnt = clk_div - 1
+                    set is_odd := 1'b1 >>
+                    set clk_cnt := cd - 8'd1 >>
+                    set div1 := 1'b0
+                } else {
+                    // Even divider: clk_cnt = clk_div/2 - 1 (special case for /2)
+                    set is_odd := 1'b0 >>
+                    let half = cd >> 8'd1 >>
+                    let even_cnt = if cd == 8'd2 { 8'd0 } else { half - 8'd1 } >>
+                    set clk_cnt := even_cnt >>
+                    set div1 := 1'b0
+                }
+            }
+        } else {
+            if (*r_en1 == 1'b1) & (*bypass == 1'b0) {
+                set div1 := ~(*div1)
+            } else {
+                cycle 1
+            }
+        }
+    }
+
+    // Negedge clk domain: div2 toggle on en2 & is_odd & !bypass
+    loop {
+        if (*clk_div_valid_reg == 1'b1) {
+            set div2 := 1'b0
+        } else {
+            if (*r_en2 == 1'b1) & (*is_odd == 1'b1) & (*bypass == 1'b0) {
+                set div2 := ~(*div2)
+            } else {
+                cycle 1
+            }
+        }
+    }
+
+    // Output: clk_out = bypass|test_mode ? clk(=1'b1) : div1 ^ div2
+    loop {
+        let bp_or_tm = *bypass | *r_test_mode >>
+        let clk_gen = *div1 ^ *div2 >>
+        let clk_val = if bp_or_tm == 1'b1 { 1'b1 } else { clk_gen } >>
+        send out.clk_out (clk_val) >>
+        cycle 1
+    }
+}

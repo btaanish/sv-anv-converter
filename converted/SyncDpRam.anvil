@@ -1,0 +1,110 @@
+/* Hand-written Anvil for SyncDpRam.sv
+   Inferable synchronous dual-port RAM.
+   Port A and Port B each support independent read/write.
+   When CSel asserted: WrEn=1 writes, WrEn=0 reads.
+   Concrete params: ADDR_WIDTH=10, DATA_DEPTH=1024, DATA_WIDTH=32, OUT_REGS=0. */
+
+type dp_word = (logic[32]);
+
+chan syncdpram_port_a_ch {
+    left csel_a   : (logic@#1) @dyn - @dyn,
+    left wren_a   : (logic@#1) @dyn - @dyn,
+    left wdata_a  : (logic[32]@#1) @dyn - @dyn,
+    left addr_a   : (logic[10]@#1) @dyn - @dyn,
+    right rdata_a : (logic[32]@#1) @dyn - @dyn
+}
+
+chan syncdpram_port_b_ch {
+    left csel_b   : (logic@#1) @dyn - @dyn,
+    left wren_b   : (logic@#1) @dyn - @dyn,
+    left wdata_b  : (logic[32]@#1) @dyn - @dyn,
+    left addr_b   : (logic[10]@#1) @dyn - @dyn,
+    right rdata_b : (logic[32]@#1) @dyn - @dyn
+}
+
+proc SyncDpRam(
+    pa : left syncdpram_port_a_ch,
+    pb : left syncdpram_port_b_ch
+) {
+    reg mem : dp_word[1024];
+
+    /* Port A input regs */
+    reg r_csel_a  : logic;
+    reg r_wren_a  : logic;
+    reg r_wdata_a : logic[32];
+    reg r_addr_a  : logic[10];
+    reg r_rdata_a : logic[32];
+
+    /* Port B input regs */
+    reg r_csel_b  : logic;
+    reg r_wren_b  : logic;
+    reg r_wdata_b : logic[32];
+    reg r_addr_b  : logic[10];
+    reg r_rdata_b : logic[32];
+
+    /* Recv port A inputs */
+    loop {
+        let v = recv pa.csel_a >>
+        set r_csel_a := v >>
+        let w = recv pa.wren_a >>
+        set r_wren_a := w >>
+        let d = recv pa.wdata_a >>
+        set r_wdata_a := d >>
+        let a = recv pa.addr_a >>
+        set r_addr_a := a >>
+        cycle 1
+    }
+
+    /* Recv port B inputs */
+    loop {
+        let v = recv pb.csel_b >>
+        set r_csel_b := v >>
+        let w = recv pb.wren_b >>
+        set r_wren_b := w >>
+        let d = recv pb.wdata_b >>
+        set r_wdata_b := d >>
+        let a = recv pb.addr_b >>
+        set r_addr_b := a >>
+        cycle 1
+    }
+
+    /* Port A read/write logic */
+    loop {
+        if (*r_csel_a == 1'b1) {
+            if (*r_wren_a == 1'b1) {
+                set mem[*r_addr_a] := <(*r_wdata_a)::dp_word>
+            } else {
+                set r_rdata_a := <(*mem[*r_addr_a])::logic[32]>
+            }
+        } else {
+            cycle 1
+        } >>
+        cycle 1
+    }
+
+    /* Port B read/write logic */
+    loop {
+        if (*r_csel_b == 1'b1) {
+            if (*r_wren_b == 1'b1) {
+                set mem[*r_addr_b] := <(*r_wdata_b)::dp_word>
+            } else {
+                set r_rdata_b := <(*mem[*r_addr_b])::logic[32]>
+            }
+        } else {
+            cycle 1
+        } >>
+        cycle 1
+    }
+
+    /* Send port A read data */
+    loop {
+        send pa.rdata_a (*r_rdata_a) >>
+        cycle 1
+    }
+
+    /* Send port B read data */
+    loop {
+        send pb.rdata_b (*r_rdata_b) >>
+        cycle 1
+    }
+}

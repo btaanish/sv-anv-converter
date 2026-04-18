@@ -1,0 +1,64 @@
+/* Hand-written Anvil for lfsr_8bit.sv
+   8-bit Linear Feedback Shift Register.
+   Concrete params: SEED=8'b0, WIDTH=8.
+   XNOR taps at bits 7, 3, 2, 1.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~60
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] WIDTH=8 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] SEED=8'b0 hardcoded (regs init to 0)
+       - [MANUAL-CLEANUP-NEEDED] $clog2(8)=3 precomputed
+       - [MANUAL-CLEANUP-NEEDED] refill_way_oh one-hot decode modeled as conditional tree
+*/
+
+chan lfsr_8bit_in_ch {
+    left en_i : (logic@#1) @dyn - @dyn
+}
+
+chan lfsr_8bit_out_ch {
+    left refill_way_oh  : (logic[8]@#1) @dyn - @dyn,
+    left refill_way_bin : (logic[3]@#1) @dyn - @dyn
+}
+
+proc lfsr_8bit(
+    inp : left lfsr_8bit_in_ch,
+    out : right lfsr_8bit_out_ch
+) {
+    // 8-bit shift register state
+    reg shift_q : logic[8];
+
+    // Input staging
+    reg r_en : logic;
+
+    // Receive enable input
+    loop {
+        let v = recv inp.en_i >>
+        set r_en := v
+    }
+
+    // LFSR shift logic (always_ff)
+    // shift_in = ~(shift_q[7] ^ shift_q[3] ^ shift_q[2] ^ shift_q[1])
+    // if en: shift_q = {shift_q[6:0], shift_in}
+    loop {
+        if (*r_en == 1'b1) {
+            let tap = ((*shift_q >> 8'd7) & 8'd1) ^ ((*shift_q >> 8'd3) & 8'd1) ^ ((*shift_q >> 8'd2) & 8'd1) ^ ((*shift_q >> 8'd1) & 8'd1) >>
+            let shift_in = ~tap & 8'd1 >>
+            let shifted = <((*shift_q << 8'd1) | shift_in)::logic[8]> >>
+            set shift_q := shifted
+        } else {
+            cycle 1
+        }
+    }
+
+    // Output: refill_way_oh = one-hot of shift_q[2:0], refill_way_bin = shift_q[2:0]
+    loop {
+        let idx = *shift_q & 8'd7 >>
+        let oh = <(8'd1 << idx)::logic[8]> >>
+        let bin = <(idx)::logic[3]> >>
+        send out.refill_way_oh (oh) >>
+        send out.refill_way_bin (bin) >>
+        cycle 1
+    }
+}

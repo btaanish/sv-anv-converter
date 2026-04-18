@@ -1,0 +1,158 @@
+/* Hand-written Anvil for stream_to_mem.sv
+   Allows memories with flow control (valid/ready) for requests but without
+   flow control for output data to be used in streams.
+   Concrete params: mem_req_t=logic[32], mem_resp_t=logic[32], BufDepth=1.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~80
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] mem_req_t hardcoded to logic[32]
+       - [MANUAL-CLEANUP-NEEDED] mem_resp_t hardcoded to logic[32]
+       - [MANUAL-CLEANUP-NEEDED] BufDepth=1 path only (gen_buf)
+       - [MANUAL-CLEANUP-NEEDED] stream_fifo sub-module modeled as single-entry buffer
+       - [MANUAL-CLEANUP-NEEDED] Counter width is 2 bits for BufDepth=1
+*/
+
+// [MANUAL] Channel for request stream interface
+chan stm_req_ch {
+    left req_data : (logic[32]@#1) @dyn - @dyn,
+    left req_valid : (logic@#1) @dyn - @dyn,
+    left resp_ready_i : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for request stream outputs
+chan stm_req_out_ch {
+    left req_ready : (logic@#1) @dyn - @dyn,
+    left resp_data : (logic[32]@#1) @dyn - @dyn,
+    left resp_valid : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for memory interface inputs
+chan stm_mem_in_ch {
+    left mem_req_ready : (logic@#1) @dyn - @dyn,
+    left mem_resp_data : (logic[32]@#1) @dyn - @dyn,
+    left mem_resp_valid : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for memory interface outputs
+chan stm_mem_out_ch {
+    left mem_req_data : (logic[32]@#1) @dyn - @dyn,
+    left mem_req_valid : (logic@#1) @dyn - @dyn
+}
+
+proc stream_to_mem(
+    req_in  : left stm_req_ch,      // [MANUAL] request stream input
+    req_out : right stm_req_out_ch,  // [MANUAL] request stream output
+    mem_in  : left stm_mem_in_ch,    // [MANUAL] memory interface input
+    mem_out : right stm_mem_out_ch   // [MANUAL] memory interface output
+) {
+    // [MANUAL] Outstanding request counter (2 bits for BufDepth=1)
+    reg cnt_q : logic[2];
+
+    // [MANUAL] Response buffer (single-entry FIFO, fall-through)
+    reg buf_data : logic[32];
+    reg buf_full : logic;
+
+    // [MANUAL] Input staging registers
+    reg r_req_data : logic[32];
+    reg r_req_valid : logic;
+    reg r_resp_ready : logic;
+    reg r_mem_req_ready : logic;
+    reg r_mem_resp_data : logic[32];
+    reg r_mem_resp_valid : logic;
+
+    // [MANUAL] Snapshots
+    reg snap_cnt : logic[2];
+    reg snap_buf_data : logic[32];
+    reg snap_buf_full : logic;
+
+    // [MANUAL] Recv loop — stage all inputs
+    loop {
+        let rd = recv req_in.req_data >>
+        set r_req_data := rd >>
+        let rv = recv req_in.req_valid >>
+        set r_req_valid := rv >>
+        let rr = recv req_in.resp_ready_i >>
+        set r_resp_ready := rr >>
+        let mrr = recv mem_in.mem_req_ready >>
+        set r_mem_req_ready := mrr >>
+        let mrd = recv mem_in.mem_resp_data >>
+        set r_mem_resp_data := mrd >>
+        let mrv = recv mem_in.mem_resp_valid >>
+        set r_mem_resp_valid := mrv
+    }
+
+    // [MANUAL] Main logic loop
+    loop {
+        // Snapshot state
+        set snap_cnt := *cnt_q;
+        set snap_buf_data := *buf_data;
+        set snap_buf_full := *buf_full >>
+
+        // [MANUAL] Response buffer output (fall-through FIFO)
+        // If buffer has data, output it; if new response arrives and buffer empty, pass through
+        let resp_out_valid = if *snap_buf_full == 1'b1 { 1'b1 }
+                             else if *r_mem_resp_valid == 1'b1 { 1'b1 }
+                             else { 1'b0 } >>
+        let resp_out_data = if *snap_buf_full == 1'b1 { *snap_buf_data }
+                            else { *r_mem_resp_data } >>
+
+        // [MANUAL] req_ready = (cnt_q < BufDepth) | (resp_valid_o & resp_ready_i)
+        // BufDepth=1, so cnt_q < 1 means cnt_q == 0
+        let cnt_ok = if *snap_cnt == 2'd0 { 1'b1 } else { 1'b0 } >>
+        let drain_ok = resp_out_valid & *r_resp_ready >>
+        let req_ready = cnt_ok | drain_ok >>
+
+        // [MANUAL] Handshake signals
+        let req_ready_o = *r_mem_req_ready & req_ready >>
+        let mem_req_valid_o = *r_req_valid & req_ready >>
+
+        // [MANUAL] Forward request data
+        send mem_out.mem_req_data (*r_req_data);
+        send mem_out.mem_req_valid (mem_req_valid_o) >>
+
+        // [MANUAL] Send response outputs
+        send req_out.req_ready (req_ready_o);
+        send req_out.resp_data (resp_out_data);
+        send req_out.resp_valid (resp_out_valid) >>
+
+        // [MANUAL] Update counter
+        let handshake_in = *r_req_valid & req_ready_o >>
+        let handshake_out = resp_out_valid & *r_resp_ready >>
+        let cnt_next = if (handshake_in == 1'b1) & (handshake_out == 1'b1) {
+            *snap_cnt
+        } else if handshake_in == 1'b1 {
+            <(*snap_cnt + 2'd1)::logic[2]>
+        } else if handshake_out == 1'b1 {
+            <(*snap_cnt - 2'd1)::logic[2]>
+        } else {
+            *snap_cnt
+        } >>
+
+        // [MANUAL] Update buffer state
+        // Buffer: if full and consumed, pop; if not full and new resp, push
+        if (handshake_out == 1'b1) & (*snap_buf_full == 1'b1) {
+            // Pop from buffer; if new response also arriving, refill
+            if *r_mem_resp_valid == 1'b1 {
+                set buf_data := *r_mem_resp_data;
+                set buf_full := 1'b1;
+                set cnt_q := cnt_next
+            } else {
+                set buf_full := 1'b0;
+                set cnt_q := cnt_next
+            }
+        } else if (*r_mem_resp_valid == 1'b1) & (*snap_buf_full == 1'b0) {
+            // New response, buffer was empty — store if not immediately consumed
+            if handshake_out == 1'b0 {
+                set buf_data := *r_mem_resp_data;
+                set buf_full := 1'b1;
+                set cnt_q := cnt_next
+            } else {
+                set cnt_q := cnt_next
+            }
+        } else {
+            set cnt_q := cnt_next
+        }
+    }
+}
