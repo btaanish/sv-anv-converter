@@ -1,0 +1,72 @@
+/* Hand-written Anvil for tc_sram_fpga_wrapper.sv
+   SRAM wrapper for FPGA with byte enables.
+   Concrete params: NumWords=16, DataWidth=32, ByteWidth=8,
+   NumPorts=1, AddrWidth=4, BeWidth=4.
+   Single-port interface only (NumPorts=1). */
+
+chan sram_fpga_ctrl_ch {
+    left req : (logic@#1) @dyn - @dyn,
+    left we : (logic@#1) @dyn - @dyn,
+    left addr : (logic[4]@#1) @dyn - @dyn,
+    left wdata : (logic[32]@#1) @dyn - @dyn,
+    left be : (logic[4]@#1) @dyn - @dyn
+}
+
+chan sram_fpga_rdata_ch {
+    left rdata : (logic[32]@#1) @dyn - @dyn
+}
+
+proc tc_sram_fpga_wrapper(
+    ctrl : left sram_fpga_ctrl_ch,
+    rd : right sram_fpga_rdata_ch
+) {
+    reg mem : logic[16][32];
+    reg r_req : logic;
+    reg r_we : logic;
+    reg r_addr : logic[4];
+    reg r_wdata : logic[32];
+    reg r_be : logic[4];
+
+    /* Receive control signals */
+    loop {
+        let v = recv ctrl.req >>
+        set r_req := v
+    }
+    loop {
+        let v = recv ctrl.we >>
+        set r_we := v
+    }
+    loop {
+        let v = recv ctrl.addr >>
+        set r_addr := v
+    }
+    loop {
+        let v = recv ctrl.wdata >>
+        set r_wdata := v
+    }
+    loop {
+        let v = recv ctrl.be >>
+        set r_be := v
+    }
+
+    /* SRAM write logic with byte enables */
+    loop {
+        if (*r_req == 1'b1 & *r_we == 1'b1) {
+            /* Apply byte enables: each be bit controls 8 data bits */
+            let cur = *mem[*r_addr];
+            let b0 = if (*r_be[0] == 1'b1) { *r_wdata & 32'h000000ff } else { cur & 32'h000000ff };
+            let b1 = if (*r_be[1] == 1'b1) { *r_wdata & 32'h0000ff00 } else { cur & 32'h0000ff00 };
+            let b2 = if (*r_be[2] == 1'b1) { *r_wdata & 32'h00ff0000 } else { cur & 32'h00ff0000 };
+            let b3 = if (*r_be[3] == 1'b1) { *r_wdata & 32'hff000000 } else { cur & 32'hff000000 } >>
+            set mem[*r_addr] := b0 | b1 | b2 | b3
+        } else {
+            cycle 1
+        }
+    }
+
+    /* Send read data */
+    loop {
+        send rd.rdata (*mem[*r_addr]) >>
+        cycle 1
+    }
+}

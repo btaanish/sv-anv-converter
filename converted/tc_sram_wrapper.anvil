@@ -1,0 +1,118 @@
+/* Hand-written Anvil for tc_sram_wrapper.sv
+   SRAM wrapper using tc_sram underneath.
+   Concrete params: NumWords=16, DataWidth=32, ByteWidth=8,
+   NumPorts=2, AddrWidth=4, BeWidth=4.
+   Modeled as dual-port SRAM with byte enables. */
+
+chan sram_ctrl_ch {
+    left req : (logic@#1) @dyn - @dyn,
+    left we : (logic@#1) @dyn - @dyn,
+    left addr : (logic[4]@#1) @dyn - @dyn,
+    left wdata : (logic[32]@#1) @dyn - @dyn,
+    left be : (logic[4]@#1) @dyn - @dyn
+}
+
+chan sram_rdata_ch {
+    left rdata : (logic[32]@#1) @dyn - @dyn
+}
+
+proc tc_sram_wrapper(
+    ctrl0 : left sram_ctrl_ch,
+    rd0 : right sram_rdata_ch,
+    ctrl1 : left sram_ctrl_ch,
+    rd1 : right sram_rdata_ch
+) {
+    reg mem : logic[16][32];
+    reg r_req0 : logic;
+    reg r_we0 : logic;
+    reg r_addr0 : logic[4];
+    reg r_wdata0 : logic[32];
+    reg r_be0 : logic[4];
+    reg r_req1 : logic;
+    reg r_we1 : logic;
+    reg r_addr1 : logic[4];
+    reg r_wdata1 : logic[32];
+    reg r_be1 : logic[4];
+
+    /* Port 0 receive */
+    loop {
+        let v = recv ctrl0.req >>
+        set r_req0 := v
+    }
+    loop {
+        let v = recv ctrl0.we >>
+        set r_we0 := v
+    }
+    loop {
+        let v = recv ctrl0.addr >>
+        set r_addr0 := v
+    }
+    loop {
+        let v = recv ctrl0.wdata >>
+        set r_wdata0 := v
+    }
+    loop {
+        let v = recv ctrl0.be >>
+        set r_be0 := v
+    }
+
+    /* Port 1 receive */
+    loop {
+        let v = recv ctrl1.req >>
+        set r_req1 := v
+    }
+    loop {
+        let v = recv ctrl1.we >>
+        set r_we1 := v
+    }
+    loop {
+        let v = recv ctrl1.addr >>
+        set r_addr1 := v
+    }
+    loop {
+        let v = recv ctrl1.wdata >>
+        set r_wdata1 := v
+    }
+    loop {
+        let v = recv ctrl1.be >>
+        set r_be1 := v
+    }
+
+    /* Port 0 write logic */
+    loop {
+        if (*r_req0 == 1'b1 & *r_we0 == 1'b1) {
+            let cur = *mem[*r_addr0];
+            let b0 = if (*r_be0[0] == 1'b1) { *r_wdata0 & 32'h000000ff } else { cur & 32'h000000ff };
+            let b1 = if (*r_be0[1] == 1'b1) { *r_wdata0 & 32'h0000ff00 } else { cur & 32'h0000ff00 };
+            let b2 = if (*r_be0[2] == 1'b1) { *r_wdata0 & 32'h00ff0000 } else { cur & 32'h00ff0000 };
+            let b3 = if (*r_be0[3] == 1'b1) { *r_wdata0 & 32'hff000000 } else { cur & 32'hff000000 } >>
+            set mem[*r_addr0] := b0 | b1 | b2 | b3
+        } else {
+            cycle 1
+        }
+    }
+
+    /* Port 1 write logic */
+    loop {
+        if (*r_req1 == 1'b1 & *r_we1 == 1'b1) {
+            let cur = *mem[*r_addr1];
+            let b0 = if (*r_be1[0] == 1'b1) { *r_wdata1 & 32'h000000ff } else { cur & 32'h000000ff };
+            let b1 = if (*r_be1[1] == 1'b1) { *r_wdata1 & 32'h0000ff00 } else { cur & 32'h0000ff00 };
+            let b2 = if (*r_be1[2] == 1'b1) { *r_wdata1 & 32'h00ff0000 } else { cur & 32'h00ff0000 };
+            let b3 = if (*r_be1[3] == 1'b1) { *r_wdata1 & 32'hff000000 } else { cur & 32'hff000000 } >>
+            set mem[*r_addr1] := b0 | b1 | b2 | b3
+        } else {
+            cycle 1
+        }
+    }
+
+    /* Send read data */
+    loop {
+        send rd0.rdata (*mem[*r_addr0]) >>
+        cycle 1
+    }
+    loop {
+        send rd1.rdata (*mem[*r_addr1]) >>
+        cycle 1
+    }
+}

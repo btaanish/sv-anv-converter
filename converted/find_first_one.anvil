@@ -1,0 +1,63 @@
+/* Hand-written Anvil for find_first_one.sv
+   Leading-one finder / leading zero counter.
+   Concrete params: WIDTH=8, FLIP=0 (find first one from LSB).
+   Output first_one_o is 3-bit index of the first set bit.
+   no_ones_o is high when no bits are set. */
+
+chan ffo_in_ch {
+    left data : (logic[8]@#1) @dyn - @dyn
+}
+
+chan ffo_out_ch {
+    left first_one : (logic[3]@#1) @dyn - @dyn,
+    left no_ones : (logic@#1) @dyn - @dyn
+}
+
+proc find_first_one(
+    in_ep : left ffo_in_ch,
+    out_ep : right ffo_out_ch
+) {
+    reg r_in : logic[8];
+    reg r_first_one : logic[3];
+    reg r_no_ones : logic;
+
+    /* Receive input and store */
+    loop {
+        let d = recv in_ep.data >>
+        set r_in := d
+    }
+
+    /* Priority encode: find first one from LSB (FLIP=0)
+       Tree reduction with 3 levels for 8-bit input. */
+    loop {
+        /* Leaf level (level 2): 4 nodes, each covers 2 bits */
+        let sel3 = *r_in[0] | *r_in[1] >>
+        let idx3 = if (*r_in[0] == 1'b1) { 3'd0 } else { 3'd1 } >>
+        let sel4 = *r_in[2] | *r_in[3] >>
+        let idx4 = if (*r_in[2] == 1'b1) { 3'd2 } else { 3'd3 } >>
+        let sel5 = *r_in[4] | *r_in[5] >>
+        let idx5 = if (*r_in[4] == 1'b1) { 3'd4 } else { 3'd5 } >>
+        let sel6 = *r_in[6] | *r_in[7] >>
+        let idx6 = if (*r_in[6] == 1'b1) { 3'd6 } else { 3'd7 } >>
+
+        /* Level 1: 2 nodes */
+        let sel1 = sel3 | sel4 >>
+        let idx1 = if (sel3 == 1'b1) { idx3 } else { idx4 } >>
+        let sel2 = sel5 | sel6 >>
+        let idx2 = if (sel5 == 1'b1) { idx5 } else { idx6 } >>
+
+        /* Level 0: root */
+        let sel0 = sel1 | sel2 >>
+        let idx0 = if (sel1 == 1'b1) { idx1 } else { idx2 } >>
+
+        set r_first_one := idx0 >>
+        set r_no_ones := ~sel0
+    }
+
+    /* Send outputs */
+    loop {
+        send out_ep.first_one (*r_first_one) >>
+        send out_ep.no_ones (*r_no_ones) >>
+        cycle 1
+    }
+}
