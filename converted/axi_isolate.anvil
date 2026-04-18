@@ -1,0 +1,323 @@
+/* Hand-written Anvil for axi_isolate.sv
+   AXI4+ATOPs bus isolator. When isolation is active, drains open transactions
+   then silences outputs. Tracks pending AW/W/AR transactions with counters.
+
+   Concrete params: NumPending=16, CounterWidth=6 (clog2(17)+1).
+   State encoding: 0=Isolate(reset), 1=Normal, 2=Hold, 3=Drain.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~230
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] req_t/resp_t structs replaced with individual signals
+       - [MANUAL-CLEANUP-NEEDED] Only first (main) module converted, not _intf wrapper
+       - [MANUAL-CLEANUP-NEEDED] AXI data paths not modeled, only handshake control
+*/
+
+chan axi_isolate_ctrl_ch {
+    left isolate : (logic@#1) @dyn - @dyn
+}
+
+chan axi_isolate_status_ch {
+    left isolated : (logic@#1) @dyn - @dyn
+}
+
+chan axi_isolate_slv_req_ch {
+    left aw_valid   : (logic@#1) @dyn - @dyn,
+    left ar_valid   : (logic@#1) @dyn - @dyn,
+    left w_valid    : (logic@#1) @dyn - @dyn,
+    left w_last     : (logic@#1) @dyn - @dyn,
+    left b_ready    : (logic@#1) @dyn - @dyn,
+    left r_ready    : (logic@#1) @dyn - @dyn,
+    left aw_atop_r  : (logic@#1) @dyn - @dyn
+}
+
+chan axi_isolate_mst_resp_ch {
+    left aw_ready   : (logic@#1) @dyn - @dyn,
+    left ar_ready   : (logic@#1) @dyn - @dyn,
+    left w_ready    : (logic@#1) @dyn - @dyn,
+    left b_valid    : (logic@#1) @dyn - @dyn,
+    left r_valid    : (logic@#1) @dyn - @dyn,
+    left r_last     : (logic@#1) @dyn - @dyn
+}
+
+chan axi_isolate_out_ch {
+    left mst_aw_valid   : (logic@#1) @dyn - @dyn,
+    left mst_ar_valid   : (logic@#1) @dyn - @dyn,
+    left mst_w_valid    : (logic@#1) @dyn - @dyn,
+    left mst_b_ready    : (logic@#1) @dyn - @dyn,
+    left mst_r_ready    : (logic@#1) @dyn - @dyn,
+    left slv_aw_ready   : (logic@#1) @dyn - @dyn,
+    left slv_ar_ready   : (logic@#1) @dyn - @dyn,
+    left slv_w_ready    : (logic@#1) @dyn - @dyn,
+    left slv_b_valid    : (logic@#1) @dyn - @dyn,
+    left slv_r_valid    : (logic@#1) @dyn - @dyn
+}
+
+proc axi_isolate(
+    ctrl     : left axi_isolate_ctrl_ch,
+    slv_req  : left axi_isolate_slv_req_ch,
+    mst_resp : left axi_isolate_mst_resp_ch,
+    status   : right axi_isolate_status_ch,
+    out      : right axi_isolate_out_ch
+) {
+    // State: 0=Isolate(reset default), 1=Normal, 2=Hold, 3=Drain
+    reg state_aw : logic[2];
+    reg state_ar : logic[2];
+
+    // Pending counters (6-bit)
+    reg pending_aw : logic[6];
+    reg pending_w  : logic[6];
+    reg pending_ar : logic[6];
+
+    // Staging regs for inputs
+    reg r_isolate    : logic;
+    reg r_aw_valid   : logic;
+    reg r_ar_valid   : logic;
+    reg r_w_valid    : logic;
+    reg r_w_last     : logic;
+    reg r_b_ready    : logic;
+    reg r_r_ready    : logic;
+    reg r_aw_atop_r  : logic;
+    reg r_mst_aw_rdy : logic;
+    reg r_mst_ar_rdy : logic;
+    reg r_mst_w_rdy  : logic;
+    reg r_mst_b_val  : logic;
+    reg r_mst_r_val  : logic;
+    reg r_mst_r_last : logic;
+
+    // Output staging
+    reg o_mst_aw_valid : logic;
+    reg o_mst_ar_valid : logic;
+    reg o_mst_w_valid  : logic;
+    reg o_mst_b_ready  : logic;
+    reg o_mst_r_ready  : logic;
+    reg o_slv_aw_ready : logic;
+    reg o_slv_ar_ready : logic;
+    reg o_slv_w_ready  : logic;
+    reg o_slv_b_valid  : logic;
+    reg o_slv_r_valid  : logic;
+    reg o_isolated     : logic;
+
+    // Receive all inputs
+    loop { let v = recv ctrl.isolate >> set r_isolate := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_valid >> set r_aw_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.ar_valid >> set r_ar_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.w_valid >> set r_w_valid := v >> cycle 1 }
+    loop { let v = recv slv_req.w_last >> set r_w_last := v >> cycle 1 }
+    loop { let v = recv slv_req.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv slv_req.r_ready >> set r_r_ready := v >> cycle 1 }
+    loop { let v = recv slv_req.aw_atop_r >> set r_aw_atop_r := v >> cycle 1 }
+    loop { let v = recv mst_resp.aw_ready >> set r_mst_aw_rdy := v >> cycle 1 }
+    loop { let v = recv mst_resp.ar_ready >> set r_mst_ar_rdy := v >> cycle 1 }
+    loop { let v = recv mst_resp.w_ready >> set r_mst_w_rdy := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_valid >> set r_mst_b_val := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_valid >> set r_mst_r_val := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_last >> set r_mst_r_last := v >> cycle 1 }
+
+    // Isolated flag
+    loop {
+        let is_iso = if (*state_aw == 2'd0 && *state_ar == 2'd0) { 1'b1 } else { 1'b0 };
+        set o_isolated := is_iso >>
+        cycle 1
+    }
+
+    // AW FSM
+    loop {
+        match (*state_aw) {
+            // Isolate=0
+            2'd0 => {
+                set o_mst_aw_valid := 1'b0 >>
+                set o_slv_aw_ready := 1'b0 >>
+                set o_mst_b_ready := 1'b0 >>
+                set o_slv_b_valid := 1'b0 >>
+                if (*r_isolate == 1'b0) {
+                    set state_aw := 2'd1
+                } else {
+                    cycle 1
+                }
+            },
+            // Normal=1
+            2'd1 => {
+                if (*pending_aw >= 6'd16) {
+                    set o_mst_aw_valid := 1'b0 >>
+                    set o_slv_aw_ready := 1'b0 >>
+                    if (*r_isolate == 1'b1) {
+                        set state_aw := 2'd3
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    set o_mst_aw_valid := *r_aw_valid >>
+                    set o_slv_aw_ready := *r_mst_aw_rdy >>
+                    if (*r_aw_valid == 1'b1 && *r_mst_aw_rdy == 1'b0) {
+                        set state_aw := 2'd2
+                    } else {
+                        if (*r_isolate == 1'b1) {
+                            set state_aw := 2'd3
+                        } else {
+                            cycle 1
+                        }
+                    }
+                }
+            },
+            // Hold=2
+            2'd2 => {
+                set o_mst_aw_valid := 1'b1 >>
+                set o_slv_aw_ready := *r_mst_aw_rdy >>
+                if (*r_mst_aw_rdy == 1'b1) {
+                    if (*r_isolate == 1'b1) {
+                        set state_aw := 2'd3
+                    } else {
+                        set state_aw := 2'd1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // Drain=3
+            _ => {
+                set o_mst_aw_valid := 1'b0 >>
+                set o_slv_aw_ready := 1'b0 >>
+                if (*pending_aw == 6'd0) {
+                    set state_aw := 2'd0
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // AR FSM
+    loop {
+        match (*state_ar) {
+            // Isolate=0
+            2'd0 => {
+                set o_mst_ar_valid := 1'b0 >>
+                set o_slv_ar_ready := 1'b0 >>
+                set o_mst_r_ready := 1'b0 >>
+                set o_slv_r_valid := 1'b0 >>
+                if (*r_isolate == 1'b0) {
+                    set state_ar := 2'd1
+                } else {
+                    cycle 1
+                }
+            },
+            // Normal=1
+            2'd1 => {
+                if (*pending_ar >= 6'd16) {
+                    set o_mst_ar_valid := 1'b0 >>
+                    set o_slv_ar_ready := 1'b0 >>
+                    if (*r_isolate == 1'b1) {
+                        set state_ar := 2'd3
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    set o_mst_ar_valid := *r_ar_valid >>
+                    set o_slv_ar_ready := *r_mst_ar_rdy >>
+                    if (*r_ar_valid == 1'b1 && *r_mst_ar_rdy == 1'b0) {
+                        set state_ar := 2'd2
+                    } else {
+                        if (*r_isolate == 1'b1) {
+                            set state_ar := 2'd3
+                        } else {
+                            cycle 1
+                        }
+                    }
+                }
+            },
+            // Hold=2
+            2'd2 => {
+                set o_mst_ar_valid := 1'b1 >>
+                set o_slv_ar_ready := *r_mst_ar_rdy >>
+                if (*r_mst_ar_rdy == 1'b1) {
+                    if (*r_isolate == 1'b1) {
+                        set state_ar := 2'd3
+                    } else {
+                        set state_ar := 2'd1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // Drain=3
+            _ => {
+                set o_mst_ar_valid := 1'b0 >>
+                set o_slv_ar_ready := 1'b0 >>
+                if (*pending_ar == 6'd0) {
+                    set state_ar := 2'd0
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // Counter update loop for pending_aw
+    loop {
+        let aw_inc = if (*o_mst_aw_valid == 1'b1 && *state_aw == 2'd1) { 1'b1 } else { 1'b0 };
+        let aw_dec = if (*r_mst_b_val == 1'b1 && *o_mst_b_ready == 1'b1) { 1'b1 } else { 1'b0 };
+        if (aw_inc == 1'b1 && aw_dec == 1'b0) {
+            set pending_aw := *pending_aw + 6'd1
+        } else if (aw_inc == 1'b0 && aw_dec == 1'b1) {
+            set pending_aw := *pending_aw - 6'd1
+        } else {
+            cycle 1
+        }
+    }
+
+    // Counter update loop for pending_w
+    loop {
+        let w_inc = if (*o_mst_aw_valid == 1'b1 && *state_aw == 2'd1) { 1'b1 } else { 1'b0 };
+        let w_dec = if (*o_mst_w_valid == 1'b1 && *r_mst_w_rdy == 1'b1 && *r_w_last == 1'b1) { 1'b1 } else { 1'b0 };
+        if (w_inc == 1'b1 && w_dec == 1'b0) {
+            set pending_w := *pending_w + 6'd1
+        } else if (w_inc == 1'b0 && w_dec == 1'b1) {
+            set pending_w := *pending_w - 6'd1
+        } else {
+            cycle 1
+        }
+    }
+
+    // Counter update loop for pending_ar
+    loop {
+        let ar_inc_norm = if (*o_mst_ar_valid == 1'b1 && *state_ar == 2'd1) { 1'b1 } else { 1'b0 };
+        let ar_inc_atop = if (*o_mst_aw_valid == 1'b1 && *state_aw == 2'd1 && *r_aw_atop_r == 1'b1) { 1'b1 } else { 1'b0 };
+        let ar_dec = if (*r_mst_r_val == 1'b1 && *o_mst_r_ready == 1'b1 && *r_mst_r_last == 1'b1) { 1'b1 } else { 1'b0 };
+        let inc = if (ar_inc_norm == 1'b1 || ar_inc_atop == 1'b1) { 1'b1 } else { 1'b0 };
+        if (inc == 1'b1 && ar_dec == 1'b0) {
+            set pending_ar := *pending_ar + 6'd1
+        } else if (inc == 1'b0 && ar_dec == 1'b1) {
+            set pending_ar := *pending_ar - 6'd1
+        } else {
+            cycle 1
+        }
+    }
+
+    // W channel cut when pending_w==0
+    loop {
+        if (*pending_w == 6'd0) {
+            set o_mst_w_valid := 1'b0 >>
+            set o_slv_w_ready := 1'b0 >>
+            cycle 1
+        } else {
+            set o_mst_w_valid := *r_w_valid >>
+            set o_slv_w_ready := *r_mst_w_rdy >>
+            cycle 1
+        }
+    }
+
+    // Send outputs
+    loop { send out.mst_aw_valid (*o_mst_aw_valid) >> cycle 1 }
+    loop { send out.mst_ar_valid (*o_mst_ar_valid) >> cycle 1 }
+    loop { send out.mst_w_valid (*o_mst_w_valid) >> cycle 1 }
+    loop { send out.mst_b_ready (*o_mst_b_ready) >> cycle 1 }
+    loop { send out.mst_r_ready (*o_mst_r_ready) >> cycle 1 }
+    loop { send out.slv_aw_ready (*o_slv_aw_ready) >> cycle 1 }
+    loop { send out.slv_ar_ready (*o_slv_ar_ready) >> cycle 1 }
+    loop { send out.slv_w_ready (*o_slv_w_ready) >> cycle 1 }
+    loop { send out.slv_b_valid (*o_slv_b_valid) >> cycle 1 }
+    loop { send out.slv_r_valid (*o_slv_r_valid) >> cycle 1 }
+    loop { send status.isolated (*o_isolated) >> cycle 1 }
+}
