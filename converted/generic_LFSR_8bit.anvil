@@ -1,0 +1,61 @@
+/* Hand-written Anvil for generic_LFSR_8bit.sv
+   8-bit Linear Feedback Shift Register with one-hot and binary output.
+   LFSR taps: out[7] ^ out[3] ^ out[2] ^ out[1], inverted for feedback.
+   Concrete params: OH_WIDTH=4, BIN_WIDTH=2, SEED=8'd0.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~45
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] OH_WIDTH=4 hardcoded (BIN_WIDTH=clog2(4)=2)
+       - [MANUAL-CLEANUP-NEEDED] One-hot encoder via dynamic indexing
+*/
+
+chan lfsr_in_ch {
+    left enable_i : (logic@#1) @dyn - @dyn
+}
+
+chan lfsr_out_ch {
+    left data_oh : (logic[4]@#1) @dyn - @dyn,
+    left data_bin : (logic[2]@#1) @dyn - @dyn
+}
+
+proc generic_lfsr_8bit(
+    inp : left lfsr_in_ch,
+    out : right lfsr_out_ch
+) {
+    // 8-bit LFSR register, initialized to SEED=0
+    reg lfsr : logic[8];
+    // Output registers
+    reg r_data_oh : logic[4];
+    reg r_data_bin : logic[2];
+
+    // Receive enable and shift LFSR
+    loop {
+        let en = recv inp.enable_i >>
+        if en {
+            // linear_feedback = !(out[7] ^ out[3] ^ out[2] ^ out[1])
+            let cur = *lfsr >>
+            let fb = ~((cur >> 8'd7) ^ (cur >> 8'd3) ^ (cur >> 8'd2) ^ (cur >> 8'd1)) >>
+            // Shift: {out[6:0], linear_feedback}
+            let new_val = ((cur << 8'd1) | (fb & 8'd1)) >>
+            set lfsr := new_val
+        } else { () } >>
+        cycle 1
+    }
+
+    // Compute binary and one-hot outputs
+    loop {
+        // temp_ref_way = out[BIN_WIDTH:1] = out[2:1] (for OH_WIDTH>2)
+        let cur = *lfsr >>
+        let bin_val = <((cur >> 8'd1) & 8'd3)::logic[2]> >>
+        set r_data_bin := bin_val >>
+        // One-hot: data_OH_o = 0; data_OH_o[temp_ref_way] = 1
+        // Model as shift: 1 << bin_val
+        let oh_val = <(4'd1 << <(bin_val)::logic[4]>)::logic[4]> >>
+        set r_data_oh := oh_val >>
+        send out.data_oh (*r_data_oh) >>
+        send out.data_bin (*r_data_bin) >>
+        cycle 1
+    }
+}
