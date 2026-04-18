@@ -1,0 +1,148 @@
+/* Hand-written Anvil for instr_tracer.sv
+   Instruction Tracer — simulation-only module (gated by VERILATOR ifdef).
+   Concrete params: NrIssuePorts=1, NrCommitPorts=2, XLEN=64, PLEN=56, VLEN=39.
+   scoreboard_entry_t flattened to logic[304].
+   bp_resolve_t flattened to logic[64].
+   exception_t flattened to logic[129].
+   File I/O ($fopen, $fwrite, $fclose) stubbed — Anvil has no file I/O.
+   The tracer receives instruction pipeline events and maintains shadow
+   register files. In Anvil we model the interface and data capture,
+   but printing/file output is omitted.
+   Clock/reset implicit. */
+
+chan tracer_in_ch {
+    left flush_unissued : (logic@#1) @dyn - @dyn,
+    left flush_all : (logic@#1) @dyn - @dyn,
+    left instruction : (logic[32]@#1) @dyn - @dyn,
+    left fetch_valid : (logic@#1) @dyn - @dyn,
+    left fetch_ack : (logic@#1) @dyn - @dyn,
+    left issue_ack : (logic@#1) @dyn - @dyn,
+    left issue_sbe : (logic[304]@#1) @dyn - @dyn,
+    left waddr0 : (logic[5]@#1) @dyn - @dyn,
+    left wdata0 : (logic[64]@#1) @dyn - @dyn,
+    left we_gpr0 : (logic@#1) @dyn - @dyn,
+    left we_fpr0 : (logic@#1) @dyn - @dyn,
+    left waddr1 : (logic[5]@#1) @dyn - @dyn,
+    left wdata1 : (logic[64]@#1) @dyn - @dyn,
+    left we_gpr1 : (logic@#1) @dyn - @dyn,
+    left we_fpr1 : (logic@#1) @dyn - @dyn,
+    left commit_instr0 : (logic[304]@#1) @dyn - @dyn,
+    left commit_instr1 : (logic[304]@#1) @dyn - @dyn,
+    left commit_ack : (logic[2]@#1) @dyn - @dyn,
+    left commit_drop : (logic[2]@#1) @dyn - @dyn,
+    left st_valid : (logic@#1) @dyn - @dyn,
+    left st_paddr : (logic[56]@#1) @dyn - @dyn,
+    left ld_valid : (logic@#1) @dyn - @dyn,
+    left ld_kill : (logic@#1) @dyn - @dyn,
+    left ld_paddr : (logic[56]@#1) @dyn - @dyn,
+    left resolve_branch : (logic[64]@#1) @dyn - @dyn,
+    left commit_exception : (logic[129]@#1) @dyn - @dyn,
+    left priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left hart_id : (logic[64]@#1) @dyn - @dyn
+}
+
+type word64 = (logic[64]);
+
+proc instr_tracer(
+    inp : left tracer_in_ch
+) {
+    /* Shadow register files — 32 entries of 64-bit */
+    reg gp_reg : word64[32];
+    reg fp_reg : word64[32];
+
+    /* Clock tick counter */
+    reg clk_ticks : logic[64];
+
+    /* Input staging registers */
+    reg r_flush_unissued : logic;
+    reg r_flush_all : logic;
+    reg r_instr : logic[32];
+    reg r_fetch_valid : logic;
+    reg r_fetch_ack : logic;
+    reg r_issue_ack : logic;
+    reg r_issue_sbe : logic[304];
+    reg r_waddr0 : logic[5];
+    reg r_wdata0 : logic[64];
+    reg r_we_gpr0 : logic;
+    reg r_we_fpr0 : logic;
+    reg r_waddr1 : logic[5];
+    reg r_wdata1 : logic[64];
+    reg r_we_gpr1 : logic;
+    reg r_we_fpr1 : logic;
+    reg r_commit_instr0 : logic[304];
+    reg r_commit_instr1 : logic[304];
+    reg r_commit_ack : logic[2];
+    reg r_commit_drop : logic[2];
+    reg r_st_valid : logic;
+    reg r_st_paddr : logic[56];
+    reg r_ld_valid : logic;
+    reg r_ld_kill : logic;
+    reg r_ld_paddr : logic[56];
+    reg r_resolve_branch : logic[64];
+    reg r_commit_exception : logic[129];
+    reg r_priv_lvl : logic[2];
+    reg r_debug_mode : logic;
+    reg r_hart_id : logic[64];
+
+    /* Receive all inputs */
+    loop { let x = recv inp.flush_unissued >> set r_flush_unissued := x }
+    loop { let x = recv inp.flush_all >> set r_flush_all := x }
+    loop { let x = recv inp.instruction >> set r_instr := x }
+    loop { let x = recv inp.fetch_valid >> set r_fetch_valid := x }
+    loop { let x = recv inp.fetch_ack >> set r_fetch_ack := x }
+    loop { let x = recv inp.issue_ack >> set r_issue_ack := x }
+    loop { let x = recv inp.issue_sbe >> set r_issue_sbe := x }
+    loop { let x = recv inp.waddr0 >> set r_waddr0 := x }
+    loop { let x = recv inp.wdata0 >> set r_wdata0 := x }
+    loop { let x = recv inp.we_gpr0 >> set r_we_gpr0 := x }
+    loop { let x = recv inp.we_fpr0 >> set r_we_fpr0 := x }
+    loop { let x = recv inp.waddr1 >> set r_waddr1 := x }
+    loop { let x = recv inp.wdata1 >> set r_wdata1 := x }
+    loop { let x = recv inp.we_gpr1 >> set r_we_gpr1 := x }
+    loop { let x = recv inp.we_fpr1 >> set r_we_fpr1 := x }
+    loop { let x = recv inp.commit_instr0 >> set r_commit_instr0 := x }
+    loop { let x = recv inp.commit_instr1 >> set r_commit_instr1 := x }
+    loop { let x = recv inp.commit_ack >> set r_commit_ack := x }
+    loop { let x = recv inp.commit_drop >> set r_commit_drop := x }
+    loop { let x = recv inp.st_valid >> set r_st_valid := x }
+    loop { let x = recv inp.st_paddr >> set r_st_paddr := x }
+    loop { let x = recv inp.ld_valid >> set r_ld_valid := x }
+    loop { let x = recv inp.ld_kill >> set r_ld_kill := x }
+    loop { let x = recv inp.ld_paddr >> set r_ld_paddr := x }
+    loop { let x = recv inp.resolve_branch >> set r_resolve_branch := x }
+    loop { let x = recv inp.commit_exception >> set r_commit_exception := x }
+    loop { let x = recv inp.priv_lvl >> set r_priv_lvl := x }
+    loop { let x = recv inp.debug_mode >> set r_debug_mode := x }
+    loop { let x = recv inp.hart_id >> set r_hart_id := x }
+
+    /* Clock tick counter */
+    loop {
+        set clk_ticks := *clk_ticks + 64'd1
+    }
+
+    /* Commit register file updates (both ports)
+       Cast data to word64 for type compatibility */
+    loop {
+        if (*r_we_gpr0 == 1'b1) & (*r_waddr0 != 5'd0) {
+            set gp_reg[*r_waddr0] := <(*r_wdata0)::word64>
+        } else {
+            cycle 1
+        } >>
+        if (*r_we_fpr0 == 1'b1) {
+            set fp_reg[*r_waddr0] := <(*r_wdata0)::word64>
+        } else {
+            cycle 1
+        } >>
+        if (*r_we_gpr1 == 1'b1) & (*r_waddr1 != 5'd0) {
+            set gp_reg[*r_waddr1] := <(*r_wdata1)::word64>
+        } else {
+            cycle 1
+        } >>
+        if (*r_we_fpr1 == 1'b1) {
+            set fp_reg[*r_waddr1] := <(*r_wdata1)::word64>
+        } else {
+            cycle 1
+        }
+    }
+}
