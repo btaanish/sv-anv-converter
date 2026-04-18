@@ -1,0 +1,24 @@
+/* Anvil conversion of cb_filter_pkg.sv — Counting Bloom filter package.
+   Struct definition for CB filter seeds and example seed constants. */
+
+struct cb_seed_t {
+    permute_seed : (logic[32]),
+    xor_seed : (logic[32])
+}
+
+proc Top() {
+    reg seed0_permute : logic[32];
+    reg seed0_xor : logic[32];
+    reg seed1_permute : logic[32];
+    reg seed1_xor : logic[32];
+    reg seed2_permute : logic[32];
+    reg seed2_xor : logic[32];
+    loop {
+        set seed0_permute := 32'd299034753 >>
+        set seed0_xor := 32'd4094834 >>
+        set seed1_permute := 32'd19921030 >>
+        set seed1_xor := 32'd995713 >>
+        set seed2_permute := 32'd294388 >>
+        set seed2_xor := 32'd65146511
+    }
+}

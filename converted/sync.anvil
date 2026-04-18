@@ -1,0 +1,29 @@
+/* Anvil conversion of sync.sv — 2-stage synchronizer.
+   Concrete: STAGES=2, ResetValue=0.
+   Shifts serial_i through two flip-flop stages. */
+
+chan sync_in_ch {
+    left serial : (logic@#1) @#1 - @#1
+}
+
+chan sync_out_ch {
+    left serial : (logic@#1) @#1 - @#1
+}
+
+proc Sync(
+    in_ep : left sync_in_ch,
+    out_ep : right sync_out_ch
+) {
+    reg stage0 : logic;
+    reg stage1 : logic;
+    reg input_buf : logic;
+    loop {
+        let s = recv in_ep.serial;
+        let out_val = *stage1;
+        let s0_snap = *stage0;
+        send out_ep.serial (out_val) >>
+        set input_buf := s >>
+        set stage1 := s0_snap >>
+        set stage0 := *input_buf
+    }
+}

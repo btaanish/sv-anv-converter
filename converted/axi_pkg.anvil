@@ -1,0 +1,120 @@
+/* Anvil conversion of axi_pkg.sv — AXI package.
+   Type aliases, constants, enums, structs for the AXI protocol. */
+
+type burst_t = (logic[2]);
+type resp_t = (logic[2]);
+type cache_t = (logic[4]);
+type prot_t = (logic[3]);
+type qos_t = (logic[4]);
+type region_t = (logic[4]);
+type len_t = (logic[8]);
+type size_t = (logic[3]);
+type atop_t = (logic[6]);
+type nsaid_t = (logic[4]);
+
+enum mem_type_t {
+    DEVICE_NONBUFFERABLE,
+    DEVICE_BUFFERABLE,
+    NORMAL_NONCACHEABLE_NONBUFFERABLE,
+    NORMAL_NONCACHEABLE_BUFFERABLE,
+    WTHRU_NOALLOCATE,
+    WTHRU_RALLOCATE,
+    WTHRU_WALLOCATE,
+    WTHRU_RWALLOCATE,
+    WBACK_NOALLOCATE,
+    WBACK_RALLOCATE,
+    WBACK_WALLOCATE,
+    WBACK_RWALLOCATE
+}
+
+struct xbar_cfg_t {
+    no_slv_ports : (logic[32]),
+    no_mst_ports : (logic[32]),
+    max_mst_trans : (logic[32]),
+    max_slv_trans : (logic[32]),
+    fall_through : (logic),
+    latency_mode : (logic[10]),
+    axi_id_width_slv_ports : (logic[32]),
+    axi_id_used_slv_ports : (logic[32]),
+    unique_ids : (logic),
+    axi_addr_width : (logic[32]),
+    axi_data_width : (logic[32]),
+    no_addr_rules : (logic[32])
+}
+
+struct xbar_rule_64_t {
+    idx : (logic[32]),
+    start_addr : (logic[64]),
+    end_addr : (logic[64])
+}
+
+struct xbar_rule_32_t {
+    idx : (logic[32]),
+    start_addr : (logic[32]),
+    end_addr : (logic[32])
+}
+
+func get_arcache(mtype) {
+    match (mtype) {
+        mem_type_t::DEVICE_NONBUFFERABLE => 4'd0,
+        mem_type_t::DEVICE_BUFFERABLE => 4'd1,
+        mem_type_t::NORMAL_NONCACHEABLE_NONBUFFERABLE => 4'd2,
+        mem_type_t::NORMAL_NONCACHEABLE_BUFFERABLE => 4'd3,
+        mem_type_t::WTHRU_NOALLOCATE => 4'd10,
+        mem_type_t::WTHRU_RALLOCATE => 4'd14,
+        mem_type_t::WTHRU_WALLOCATE => 4'd10,
+        mem_type_t::WTHRU_RWALLOCATE => 4'd14,
+        mem_type_t::WBACK_NOALLOCATE => 4'd11,
+        mem_type_t::WBACK_RALLOCATE => 4'd15,
+        mem_type_t::WBACK_WALLOCATE => 4'd11,
+        _ => 4'd15
+    }
+}
+
+func get_awcache(mtype) {
+    match (mtype) {
+        mem_type_t::DEVICE_NONBUFFERABLE => 4'd0,
+        mem_type_t::DEVICE_BUFFERABLE => 4'd1,
+        mem_type_t::NORMAL_NONCACHEABLE_NONBUFFERABLE => 4'd2,
+        mem_type_t::NORMAL_NONCACHEABLE_BUFFERABLE => 4'd3,
+        mem_type_t::WTHRU_NOALLOCATE => 4'd6,
+        mem_type_t::WTHRU_RALLOCATE => 4'd6,
+        mem_type_t::WTHRU_WALLOCATE => 4'd14,
+        mem_type_t::WTHRU_RWALLOCATE => 4'd14,
+        mem_type_t::WBACK_NOALLOCATE => 4'd7,
+        mem_type_t::WBACK_RALLOCATE => 4'd7,
+        mem_type_t::WBACK_WALLOCATE => 4'd15,
+        _ => 4'd15
+    }
+}
+
+proc Top() {
+    reg burst_fixed : logic[2];
+    reg burst_incr : logic[2];
+    reg burst_wrap : logic[2];
+    reg resp_okay : logic[2];
+    reg resp_exokay : logic[2];
+    reg resp_slverr : logic[2];
+    reg resp_decerr : logic[2];
+    reg cache_bufferable : logic[4];
+    reg cache_modifiable : logic[4];
+    reg cache_rd_alloc : logic[4];
+    reg cache_wr_alloc : logic[4];
+    reg atop_atomicswap : logic[6];
+    reg atop_atomiccmp : logic[6];
+    loop {
+        set burst_fixed := 2'd0 >>
+        set burst_incr := 2'd1 >>
+        set burst_wrap := 2'd2 >>
+        set resp_okay := 2'd0 >>
+        set resp_exokay := 2'd1 >>
+        set resp_slverr := 2'd2 >>
+        set resp_decerr := 2'd3 >>
+        set cache_bufferable := 4'd1 >>
+        set cache_modifiable := 4'd2 >>
+        set cache_rd_alloc := 4'd4 >>
+        set cache_wr_alloc := 4'd8 >>
+        set atop_atomicswap := 6'd48 >>
+        set atop_atomiccmp := 6'd49
+    }
+}
