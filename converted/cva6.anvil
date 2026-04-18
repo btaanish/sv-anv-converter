@@ -1,0 +1,800 @@
+/* Hand-written Anvil for cva6.sv
+   CVA6 top-level module (1892 lines) — structural wiring of pipeline stages.
+   Instantiates: frontend, id_stage, issue_stage, ex_stage, commit_stage,
+   csr_regfile, perf_counters, controller, cache_subsystem, cva6_rvfi_probes.
+   Concrete: XLEN=64, VLEN=64, NrIssuePorts=1, NrCommitPorts=2,
+   TRANS_ID_BITS=5, NrWbPorts=5, FpPresent=1, CvxifEn=0,
+   EnableAccelerator=0, PerfCounterEn=1, DCacheType=WB,
+   NumPorts=4, PLEN=56, ASID_WIDTH=16, VMID_WIDTH=14. */
+
+/* ================================================================
+   Top-level I/O channels
+   ================================================================ */
+
+/* Inputs to CVA6 core */
+chan cva6_in_ch {
+    left boot_addr : (logic[64]@#1) @dyn - @dyn,
+    left hart_id : (logic[64]@#1) @dyn - @dyn,
+    left irq : (logic[2]@#1) @dyn - @dyn,
+    left ipi : (logic@#1) @dyn - @dyn,
+    left time_irq : (logic@#1) @dyn - @dyn,
+    left debug_req : (logic@#1) @dyn - @dyn,
+    left noc_resp : (logic[128]@#1) @dyn - @dyn
+}
+
+/* Outputs from CVA6 core */
+chan cva6_out_ch {
+    left rvfi_probes : (logic[128]@#1) @dyn - @dyn,
+    left noc_req : (logic[128]@#1) @dyn - @dyn
+}
+
+/* ================================================================
+   Internal sub-module channels — request/response pattern
+   Each sub-module communicates via a dedicated channel class.
+   Message direction: left = received by left endpoint.
+   ================================================================ */
+
+/* Frontend: receives control, produces fetch entries */
+chan frontend_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left halt : (logic@#1) @dyn - @dyn,
+    left halt_frontend : (logic@#1) @dyn - @dyn,
+    left set_pc_commit : (logic@#1) @dyn - @dyn,
+    left pc_commit : (logic[64]@#1) @dyn - @dyn,
+    left ex_valid : (logic@#1) @dyn - @dyn,
+    left resolved_branch : (logic[128]@#1) @dyn - @dyn,
+    left eret : (logic@#1) @dyn - @dyn,
+    left epc : (logic[64]@#1) @dyn - @dyn,
+    left trap_vector_base : (logic[64]@#1) @dyn - @dyn,
+    left set_debug_pc : (logic@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left boot_addr : (logic[64]@#1) @dyn - @dyn,
+    right fetch_entry : (logic[128]@#1) @dyn - @dyn,
+    right fetch_valid : (logic@#1) @dyn - @dyn
+}
+
+/* ID stage: decodes fetch entries, produces issue entries */
+chan id_stage_ch {
+    left fetch_entry : (logic[128]@#1) @dyn - @dyn,
+    left fetch_valid : (logic@#1) @dyn - @dyn,
+    left flush : (logic@#1) @dyn - @dyn,
+    left debug_req : (logic@#1) @dyn - @dyn,
+    left priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left hart_id : (logic[64]@#1) @dyn - @dyn,
+    right issue_entry : (logic[128]@#1) @dyn - @dyn,
+    right issue_valid : (logic@#1) @dyn - @dyn,
+    right is_ctrl_flow : (logic@#1) @dyn - @dyn,
+    right orig_instr : (logic[32]@#1) @dyn - @dyn,
+    right rvfi_is_compressed : (logic@#1) @dyn - @dyn
+}
+
+/* Issue stage: reads operands, dispatches to FUs */
+chan issue_stage_ch {
+    left issue_entry : (logic[128]@#1) @dyn - @dyn,
+    left issue_valid : (logic@#1) @dyn - @dyn,
+    left is_ctrl_flow : (logic@#1) @dyn - @dyn,
+    left flush_unissued : (logic@#1) @dyn - @dyn,
+    left flush : (logic@#1) @dyn - @dyn,
+    left flu_ready : (logic@#1) @dyn - @dyn,
+    left lsu_ready : (logic@#1) @dyn - @dyn,
+    left fpu_ready : (logic@#1) @dyn - @dyn,
+    right fu_data : (logic[256]@#1) @dyn - @dyn,
+    right pc : (logic[64]@#1) @dyn - @dyn,
+    right alu_valid : (logic@#1) @dyn - @dyn,
+    right branch_valid : (logic@#1) @dyn - @dyn,
+    right lsu_valid : (logic@#1) @dyn - @dyn,
+    right mult_valid : (logic@#1) @dyn - @dyn,
+    right csr_valid : (logic@#1) @dyn - @dyn,
+    right fpu_valid : (logic@#1) @dyn - @dyn,
+    right sb_full : (logic@#1) @dyn - @dyn,
+    right stall_issue : (logic@#1) @dyn - @dyn
+}
+
+/* EX stage: executes, produces writeback results */
+chan ex_stage_ch {
+    left fu_data : (logic[256]@#1) @dyn - @dyn,
+    left alu_valid : (logic@#1) @dyn - @dyn,
+    left branch_valid : (logic@#1) @dyn - @dyn,
+    left lsu_valid : (logic@#1) @dyn - @dyn,
+    left mult_valid : (logic@#1) @dyn - @dyn,
+    left csr_valid : (logic@#1) @dyn - @dyn,
+    left flush : (logic@#1) @dyn - @dyn,
+    left csr_commit : (logic@#1) @dyn - @dyn,
+    left lsu_commit : (logic@#1) @dyn - @dyn,
+    right flu_result : (logic[64]@#1) @dyn - @dyn,
+    right flu_valid : (logic@#1) @dyn - @dyn,
+    right flu_ready : (logic@#1) @dyn - @dyn,
+    right resolved_branch : (logic[128]@#1) @dyn - @dyn,
+    right lsu_ready : (logic@#1) @dyn - @dyn,
+    right no_st_pending : (logic@#1) @dyn - @dyn,
+    right lsu_commit_ready : (logic@#1) @dyn - @dyn,
+    right csr_addr : (logic[12]@#1) @dyn - @dyn,
+    right itlb_miss : (logic@#1) @dyn - @dyn,
+    right dtlb_miss : (logic@#1) @dyn - @dyn,
+    right fpu_ready : (logic@#1) @dyn - @dyn
+}
+
+/* Commit stage */
+chan commit_stage_ch {
+    left halt : (logic@#1) @dyn - @dyn,
+    left flush_dcache : (logic@#1) @dyn - @dyn,
+    left single_step : (logic@#1) @dyn - @dyn,
+    left no_st_pending : (logic@#1) @dyn - @dyn,
+    left lsu_commit_ready : (logic@#1) @dyn - @dyn,
+    left break_from_trigger : (logic@#1) @dyn - @dyn,
+    right exception : (logic[128]@#1) @dyn - @dyn,
+    right dirty_fp : (logic@#1) @dyn - @dyn,
+    right commit_ack : (logic[2]@#1) @dyn - @dyn,
+    right pc_commit : (logic[64]@#1) @dyn - @dyn,
+    right csr_op : (logic[7]@#1) @dyn - @dyn,
+    right csr_wdata : (logic[64]@#1) @dyn - @dyn,
+    right commit_lsu : (logic@#1) @dyn - @dyn,
+    right commit_csr : (logic@#1) @dyn - @dyn,
+    right fence_i : (logic@#1) @dyn - @dyn,
+    right fence : (logic@#1) @dyn - @dyn,
+    right sfence_vma : (logic@#1) @dyn - @dyn,
+    right flush_commit : (logic@#1) @dyn - @dyn,
+    right amo_valid : (logic@#1) @dyn - @dyn,
+    right eret_out : (logic@#1) @dyn - @dyn
+}
+
+/* CSR regfile */
+chan csr_ch {
+    left exception : (logic[128]@#1) @dyn - @dyn,
+    left commit_ack : (logic[2]@#1) @dyn - @dyn,
+    left csr_op : (logic[7]@#1) @dyn - @dyn,
+    left csr_addr : (logic[12]@#1) @dyn - @dyn,
+    left csr_wdata : (logic[64]@#1) @dyn - @dyn,
+    left dirty_fp : (logic@#1) @dyn - @dyn,
+    left pc : (logic[64]@#1) @dyn - @dyn,
+    left time_irq : (logic@#1) @dyn - @dyn,
+    left irq : (logic[2]@#1) @dyn - @dyn,
+    left ipi : (logic@#1) @dyn - @dyn,
+    left debug_req : (logic@#1) @dyn - @dyn,
+    right priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    right debug_mode : (logic@#1) @dyn - @dyn,
+    right flush_csr : (logic@#1) @dyn - @dyn,
+    right halt_csr : (logic@#1) @dyn - @dyn,
+    right epc : (logic[64]@#1) @dyn - @dyn,
+    right eret : (logic@#1) @dyn - @dyn,
+    right trap_vector_base : (logic[64]@#1) @dyn - @dyn,
+    right set_debug_pc : (logic@#1) @dyn - @dyn,
+    right single_step : (logic@#1) @dyn - @dyn,
+    right icache_en : (logic@#1) @dyn - @dyn,
+    right dcache_en : (logic@#1) @dyn - @dyn,
+    right csr_rdata : (logic[64]@#1) @dyn - @dyn,
+    right csr_exception : (logic[128]@#1) @dyn - @dyn,
+    right irq_ctrl : (logic[128]@#1) @dyn - @dyn,
+    right break_from_trigger : (logic@#1) @dyn - @dyn,
+    right mcountinhibit : (logic[32]@#1) @dyn - @dyn
+}
+
+/* Controller */
+chan controller_ch {
+    left eret : (logic@#1) @dyn - @dyn,
+    left ex_valid : (logic@#1) @dyn - @dyn,
+    left set_debug_pc : (logic@#1) @dyn - @dyn,
+    left resolved_branch : (logic[128]@#1) @dyn - @dyn,
+    left flush_csr : (logic@#1) @dyn - @dyn,
+    left halt_csr : (logic@#1) @dyn - @dyn,
+    left fence_i : (logic@#1) @dyn - @dyn,
+    left fence : (logic@#1) @dyn - @dyn,
+    left sfence_vma : (logic@#1) @dyn - @dyn,
+    left flush_commit : (logic@#1) @dyn - @dyn,
+    left dcache_flush_ack : (logic@#1) @dyn - @dyn,
+    right set_pc_commit : (logic@#1) @dyn - @dyn,
+    right flush_if : (logic@#1) @dyn - @dyn,
+    right flush_unissued : (logic@#1) @dyn - @dyn,
+    right flush_id : (logic@#1) @dyn - @dyn,
+    right flush_ex : (logic@#1) @dyn - @dyn,
+    right flush_icache : (logic@#1) @dyn - @dyn,
+    right flush_dcache : (logic@#1) @dyn - @dyn,
+    right flush_tlb : (logic@#1) @dyn - @dyn,
+    right halt : (logic@#1) @dyn - @dyn,
+    right halt_frontend : (logic@#1) @dyn - @dyn
+}
+
+/* Cache subsystem */
+chan cache_ch {
+    left icache_en : (logic@#1) @dyn - @dyn,
+    left icache_flush : (logic@#1) @dyn - @dyn,
+    left dcache_en : (logic@#1) @dyn - @dyn,
+    left dcache_flush : (logic@#1) @dyn - @dyn,
+    left noc_resp : (logic[128]@#1) @dyn - @dyn,
+    right dcache_flush_ack : (logic@#1) @dyn - @dyn,
+    right icache_miss : (logic@#1) @dyn - @dyn,
+    right dcache_miss : (logic@#1) @dyn - @dyn,
+    right wbuffer_empty : (logic@#1) @dyn - @dyn,
+    right noc_req : (logic[128]@#1) @dyn - @dyn
+}
+
+/* Perf counters */
+chan perf_ch {
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left addr : (logic[12]@#1) @dyn - @dyn,
+    left we : (logic@#1) @dyn - @dyn,
+    left data_in : (logic[64]@#1) @dyn - @dyn,
+    left mcountinhibit : (logic[32]@#1) @dyn - @dyn,
+    left icache_miss : (logic@#1) @dyn - @dyn,
+    left dcache_miss : (logic@#1) @dyn - @dyn,
+    left itlb_miss : (logic@#1) @dyn - @dyn,
+    left dtlb_miss : (logic@#1) @dyn - @dyn,
+    left sb_full : (logic@#1) @dyn - @dyn,
+    left stall_issue : (logic@#1) @dyn - @dyn,
+    right data_out : (logic[64]@#1) @dyn - @dyn
+}
+
+/* RVFI probes */
+chan rvfi_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left commit_ack : (logic[2]@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left irq : (logic[2]@#1) @dyn - @dyn,
+    right probes : (logic[128]@#1) @dyn - @dyn
+}
+
+/* ================================================================
+   Sub-module stub procs
+   Each models the interface of a CVA6 pipeline stage.
+   Left endpoint: recv left messages, send right messages
+   Right endpoint: send left messages, recv right messages
+   ================================================================ */
+
+proc frontend_stub(ep : left frontend_ch) {
+    reg r_fetch : logic[128];
+    loop {
+        let fl = recv ep.flush >>
+        let ba = recv ep.boot_addr >>
+        send ep.fetch_entry (*r_fetch) >>
+        send ep.fetch_valid (1'b0) >>
+        cycle 1
+    }
+}
+
+proc id_stage_stub(ep : left id_stage_ch) {
+    reg r_entry : logic[128];
+    loop {
+        let fe = recv ep.fetch_entry >>
+        set r_entry := fe >>
+        send ep.issue_entry (*r_entry) >>
+        send ep.issue_valid (1'b0) >>
+        send ep.is_ctrl_flow (1'b0) >>
+        send ep.orig_instr (32'd0) >>
+        send ep.rvfi_is_compressed (1'b0) >>
+        cycle 1
+    }
+}
+
+proc issue_stage_stub(ep : left issue_stage_ch) {
+    loop {
+        let ie = recv ep.issue_entry >>
+        send ep.fu_data (256'd0) >>
+        send ep.pc (64'd0) >>
+        send ep.alu_valid (1'b0) >>
+        send ep.branch_valid (1'b0) >>
+        send ep.lsu_valid (1'b0) >>
+        send ep.mult_valid (1'b0) >>
+        send ep.csr_valid (1'b0) >>
+        send ep.fpu_valid (1'b0) >>
+        send ep.sb_full (1'b0) >>
+        send ep.stall_issue (1'b0) >>
+        cycle 1
+    }
+}
+
+proc ex_stage_stub(ep : left ex_stage_ch) {
+    loop {
+        let fd = recv ep.fu_data >>
+        send ep.flu_result (64'd0) >>
+        send ep.flu_valid (1'b0) >>
+        send ep.flu_ready (1'b1) >>
+        send ep.resolved_branch (128'd0) >>
+        send ep.lsu_ready (1'b1) >>
+        send ep.no_st_pending (1'b1) >>
+        send ep.lsu_commit_ready (1'b1) >>
+        send ep.csr_addr (12'd0) >>
+        send ep.itlb_miss (1'b0) >>
+        send ep.dtlb_miss (1'b0) >>
+        send ep.fpu_ready (1'b1) >>
+        cycle 1
+    }
+}
+
+proc commit_stage_stub(ep : left commit_stage_ch) {
+    loop {
+        let h = recv ep.halt >>
+        send ep.exception (128'd0) >>
+        send ep.dirty_fp (1'b0) >>
+        send ep.commit_ack (2'd0) >>
+        send ep.pc_commit (64'd0) >>
+        send ep.csr_op (7'd0) >>
+        send ep.csr_wdata (64'd0) >>
+        send ep.commit_lsu (1'b0) >>
+        send ep.commit_csr (1'b0) >>
+        send ep.fence_i (1'b0) >>
+        send ep.fence (1'b0) >>
+        send ep.sfence_vma (1'b0) >>
+        send ep.flush_commit (1'b0) >>
+        send ep.amo_valid (1'b0) >>
+        send ep.eret_out (1'b0) >>
+        cycle 1
+    }
+}
+
+proc csr_regfile_stub(ep : left csr_ch) {
+    reg r_priv : logic[2];
+    loop {
+        let exc = recv ep.exception >>
+        send ep.priv_lvl (*r_priv) >>
+        send ep.debug_mode (1'b0) >>
+        send ep.flush_csr (1'b0) >>
+        send ep.halt_csr (1'b0) >>
+        send ep.epc (64'd0) >>
+        send ep.eret (1'b0) >>
+        send ep.trap_vector_base (64'd0) >>
+        send ep.set_debug_pc (1'b0) >>
+        send ep.single_step (1'b0) >>
+        send ep.icache_en (1'b1) >>
+        send ep.dcache_en (1'b1) >>
+        send ep.csr_rdata (64'd0) >>
+        send ep.csr_exception (128'd0) >>
+        send ep.irq_ctrl (128'd0) >>
+        send ep.break_from_trigger (1'b0) >>
+        send ep.mcountinhibit (32'd0) >>
+        cycle 1
+    }
+}
+
+proc controller_stub(ep : left controller_ch) {
+    loop {
+        let er = recv ep.eret >>
+        send ep.set_pc_commit (1'b0) >>
+        send ep.flush_if (1'b0) >>
+        send ep.flush_unissued (1'b0) >>
+        send ep.flush_id (1'b0) >>
+        send ep.flush_ex (1'b0) >>
+        send ep.flush_icache (1'b0) >>
+        send ep.flush_dcache (1'b0) >>
+        send ep.flush_tlb (1'b0) >>
+        send ep.halt (1'b0) >>
+        send ep.halt_frontend (1'b0) >>
+        cycle 1
+    }
+}
+
+proc perf_counters_stub(ep : left perf_ch) {
+    reg r_data : logic[64];
+    loop {
+        let dm = recv ep.debug_mode >>
+        send ep.data_out (*r_data) >>
+        cycle 1
+    }
+}
+
+proc cache_subsystem_stub(ep : left cache_ch) {
+    loop {
+        let ie = recv ep.icache_en >>
+        send ep.dcache_flush_ack (1'b0) >>
+        send ep.icache_miss (1'b0) >>
+        send ep.dcache_miss (1'b0) >>
+        send ep.wbuffer_empty (1'b1) >>
+        send ep.noc_req (128'd0) >>
+        cycle 1
+    }
+}
+
+proc rvfi_probes_stub(ep : left rvfi_ch) {
+    loop {
+        let fl = recv ep.flush >>
+        send ep.probes (128'd0) >>
+        cycle 1
+    }
+}
+
+/* ================================================================
+   Top-level CVA6 proc
+   Spawns all pipeline stages and wires them together.
+   The top-level holds the right endpoint of each sub-module channel,
+   allowing it to send inputs (left messages) and recv outputs (right messages).
+   ================================================================ */
+proc cva6(
+    top_in : left cva6_in_ch,
+    top_out : right cva6_out_ch
+) {
+    /* Instantiate channels for each sub-module */
+    chan fe_le -- fe_ri : frontend_ch;
+    chan id_le -- id_ri : id_stage_ch;
+    chan is_le -- is_ri : issue_stage_ch;
+    chan ex_le -- ex_ri : ex_stage_ch;
+    chan cm_le -- cm_ri : commit_stage_ch;
+    chan csr_le -- csr_ri : csr_ch;
+    chan ctrl_le -- ctrl_ri : controller_ch;
+    chan perf_le -- perf_ri : perf_ch;
+    chan cache_le -- cache_ri : cache_ch;
+    chan rvfi_le -- rvfi_ri : rvfi_ch;
+
+    /* Spawn all sub-module stubs (left endpoint = sub-module) */
+    spawn frontend_stub(fe_le);
+    spawn id_stage_stub(id_le);
+    spawn issue_stage_stub(is_le);
+    spawn ex_stage_stub(ex_le);
+    spawn commit_stage_stub(cm_le);
+    spawn csr_regfile_stub(csr_le);
+    spawn controller_stub(ctrl_le);
+    spawn perf_counters_stub(perf_le);
+    spawn cache_subsystem_stub(cache_le);
+    spawn rvfi_probes_stub(rvfi_le);
+
+    /* Wiring registers — hold inter-module signals */
+    reg r_boot_addr : logic[64];
+    reg r_hart_id : logic[64];
+    reg r_irq : logic[2];
+    reg r_ipi : logic;
+    reg r_time_irq : logic;
+    reg r_debug_req : logic;
+    reg r_noc_resp : logic[128];
+
+    /* Pipeline state registers */
+    reg r_fetch_entry : logic[128];
+    reg r_fetch_valid : logic;
+    reg r_issue_entry : logic[128];
+    reg r_issue_valid : logic;
+    reg r_fu_data : logic[256];
+    reg r_alu_valid : logic;
+    reg r_resolved_branch : logic[128];
+    reg r_pc_commit : logic[64];
+    reg r_commit_ack : logic[2];
+    reg r_exception : logic[128];
+    reg r_priv_lvl : logic[2];
+    reg r_debug_mode : logic;
+    reg r_eret : logic;
+    reg r_epc : logic[64];
+    reg r_trap_vector_base : logic[64];
+    reg r_set_debug_pc : logic;
+    reg r_flush_csr : logic;
+    reg r_halt_csr : logic;
+    reg r_single_step : logic;
+    reg r_flush_if : logic;
+    reg r_flush_unissued : logic;
+    reg r_flush_id : logic;
+    reg r_flush_ex : logic;
+    reg r_halt : logic;
+    reg r_halt_frontend : logic;
+    reg r_set_pc_commit : logic;
+    reg r_flush_icache : logic;
+    reg r_flush_dcache : logic;
+    reg r_flush_tlb : logic;
+    reg r_dcache_flush_ack : logic;
+    reg r_icache_en : logic;
+    reg r_dcache_en : logic;
+    reg r_no_st_pending : logic;
+    reg r_lsu_ready : logic;
+    reg r_flu_ready : logic;
+    reg r_fpu_ready : logic;
+    reg r_sb_full : logic;
+    reg r_stall_issue : logic;
+    reg r_dirty_fp : logic;
+    reg r_csr_op : logic[7];
+    reg r_csr_wdata : logic[64];
+    reg r_csr_addr : logic[12];
+    reg r_csr_rdata : logic[64];
+    reg r_csr_exception : logic[128];
+    reg r_commit_lsu : logic;
+    reg r_commit_csr : logic;
+    reg r_fence_i : logic;
+    reg r_fence : logic;
+    reg r_sfence_vma : logic;
+    reg r_flush_commit : logic;
+    reg r_amo_valid : logic;
+    reg r_lsu_commit_ready : logic;
+    reg r_break_from_trigger : logic;
+    reg r_irq_ctrl : logic[128];
+    reg r_icache_miss : logic;
+    reg r_dcache_miss : logic;
+    reg r_itlb_miss : logic;
+    reg r_dtlb_miss : logic;
+    reg r_mcountinhibit : logic[32];
+    reg r_wbuffer_empty : logic;
+    reg r_noc_req : logic[128];
+    reg r_rvfi_probes : logic[128];
+
+    /* ---- Recv top-level inputs ---- */
+    loop {
+        let ba = recv top_in.boot_addr >>
+        set r_boot_addr := ba >>
+        let hi = recv top_in.hart_id >>
+        set r_hart_id := hi >>
+        let ir = recv top_in.irq >>
+        set r_irq := ir >>
+        let ip = recv top_in.ipi >>
+        set r_ipi := ip >>
+        let ti = recv top_in.time_irq >>
+        set r_time_irq := ti >>
+        let dr = recv top_in.debug_req >>
+        set r_debug_req := dr >>
+        let nr = recv top_in.noc_resp >>
+        set r_noc_resp := nr
+    }
+
+    /* ---- Drive frontend inputs (right endpoint sends left messages) ---- */
+    loop {
+        send fe_ri.flush (*r_flush_if) >>
+        send fe_ri.halt (*r_halt) >>
+        send fe_ri.halt_frontend (*r_halt_frontend) >>
+        send fe_ri.set_pc_commit (*r_set_pc_commit) >>
+        send fe_ri.pc_commit (*r_pc_commit) >>
+        send fe_ri.ex_valid (1'b0) >>
+        send fe_ri.resolved_branch (*r_resolved_branch) >>
+        send fe_ri.eret (*r_eret) >>
+        send fe_ri.epc (*r_epc) >>
+        send fe_ri.trap_vector_base (*r_trap_vector_base) >>
+        send fe_ri.set_debug_pc (*r_set_debug_pc) >>
+        send fe_ri.debug_mode (*r_debug_mode) >>
+        send fe_ri.boot_addr (*r_boot_addr) >>
+        cycle 1
+    }
+
+    /* ---- Recv frontend outputs, drive ID stage ---- */
+    loop {
+        let fe = recv fe_ri.fetch_entry >>
+        set r_fetch_entry := fe >>
+        let fv = recv fe_ri.fetch_valid >>
+        set r_fetch_valid := fv >>
+        send id_ri.fetch_entry (*r_fetch_entry) >>
+        send id_ri.fetch_valid (*r_fetch_valid) >>
+        send id_ri.flush (*r_flush_if) >>
+        send id_ri.debug_req (*r_debug_req) >>
+        send id_ri.priv_lvl (*r_priv_lvl) >>
+        send id_ri.debug_mode (*r_debug_mode) >>
+        send id_ri.hart_id (*r_hart_id) >>
+        cycle 1
+    }
+
+    /* ---- Recv ID outputs, drive Issue stage ---- */
+    loop {
+        let ie = recv id_ri.issue_entry >>
+        set r_issue_entry := ie >>
+        let iv = recv id_ri.issue_valid >>
+        set r_issue_valid := iv >>
+        send is_ri.issue_entry (*r_issue_entry) >>
+        send is_ri.issue_valid (*r_issue_valid) >>
+        send is_ri.is_ctrl_flow (1'b0) >>
+        send is_ri.flush_unissued (*r_flush_unissued) >>
+        send is_ri.flush (*r_flush_id) >>
+        send is_ri.flu_ready (*r_flu_ready) >>
+        send is_ri.lsu_ready (*r_lsu_ready) >>
+        send is_ri.fpu_ready (*r_fpu_ready) >>
+        cycle 1
+    }
+
+    /* ---- Recv Issue outputs, drive EX stage ---- */
+    loop {
+        let fd = recv is_ri.fu_data >>
+        set r_fu_data := fd >>
+        let av = recv is_ri.alu_valid >>
+        set r_alu_valid := av >>
+        let sf = recv is_ri.sb_full >>
+        set r_sb_full := sf >>
+        let si = recv is_ri.stall_issue >>
+        set r_stall_issue := si >>
+        send ex_ri.fu_data (*r_fu_data) >>
+        send ex_ri.alu_valid (*r_alu_valid) >>
+        send ex_ri.branch_valid (1'b0) >>
+        send ex_ri.lsu_valid (1'b0) >>
+        send ex_ri.mult_valid (1'b0) >>
+        send ex_ri.csr_valid (1'b0) >>
+        send ex_ri.flush (*r_flush_ex) >>
+        send ex_ri.csr_commit (*r_commit_csr) >>
+        send ex_ri.lsu_commit (*r_commit_lsu) >>
+        cycle 1
+    }
+
+    /* ---- Recv EX outputs, drive Commit stage ---- */
+    loop {
+        let rb = recv ex_ri.resolved_branch >>
+        set r_resolved_branch := rb >>
+        let fr = recv ex_ri.flu_ready >>
+        set r_flu_ready := fr >>
+        let lr = recv ex_ri.lsu_ready >>
+        set r_lsu_ready := lr >>
+        let ns = recv ex_ri.no_st_pending >>
+        set r_no_st_pending := ns >>
+        let lcr = recv ex_ri.lsu_commit_ready >>
+        set r_lsu_commit_ready := lcr >>
+        let ca = recv ex_ri.csr_addr >>
+        set r_csr_addr := ca >>
+        let im = recv ex_ri.itlb_miss >>
+        set r_itlb_miss := im >>
+        let dm = recv ex_ri.dtlb_miss >>
+        set r_dtlb_miss := dm >>
+        let fpr = recv ex_ri.fpu_ready >>
+        set r_fpu_ready := fpr >>
+        let nsp_wb = *r_no_st_pending & *r_wbuffer_empty >>
+        send cm_ri.halt (*r_halt) >>
+        send cm_ri.flush_dcache (*r_flush_dcache) >>
+        send cm_ri.single_step (*r_single_step) >>
+        send cm_ri.no_st_pending (nsp_wb) >>
+        send cm_ri.lsu_commit_ready (*r_lsu_commit_ready) >>
+        send cm_ri.break_from_trigger (*r_break_from_trigger) >>
+        cycle 1
+    }
+
+    /* ---- Recv Commit outputs, drive CSR ---- */
+    loop {
+        let exc = recv cm_ri.exception >>
+        set r_exception := exc >>
+        let dfp = recv cm_ri.dirty_fp >>
+        set r_dirty_fp := dfp >>
+        let cak = recv cm_ri.commit_ack >>
+        set r_commit_ack := cak >>
+        let pcc = recv cm_ri.pc_commit >>
+        set r_pc_commit := pcc >>
+        let cop = recv cm_ri.csr_op >>
+        set r_csr_op := cop >>
+        let cwd = recv cm_ri.csr_wdata >>
+        set r_csr_wdata := cwd >>
+        let clsu = recv cm_ri.commit_lsu >>
+        set r_commit_lsu := clsu >>
+        let ccsr = recv cm_ri.commit_csr >>
+        set r_commit_csr := ccsr >>
+        let cfi = recv cm_ri.fence_i >>
+        set r_fence_i := cfi >>
+        let cfn = recv cm_ri.fence >>
+        set r_fence := cfn >>
+        let csv = recv cm_ri.sfence_vma >>
+        set r_sfence_vma := csv >>
+        let cfc = recv cm_ri.flush_commit >>
+        set r_flush_commit := cfc >>
+        let cav = recv cm_ri.amo_valid >>
+        set r_amo_valid := cav >>
+        let cet = recv cm_ri.eret_out >>
+        set r_eret := cet >>
+        send csr_ri.exception (*r_exception) >>
+        send csr_ri.commit_ack (*r_commit_ack) >>
+        send csr_ri.csr_op (*r_csr_op) >>
+        send csr_ri.csr_addr (*r_csr_addr) >>
+        send csr_ri.csr_wdata (*r_csr_wdata) >>
+        send csr_ri.dirty_fp (*r_dirty_fp) >>
+        send csr_ri.pc (*r_pc_commit) >>
+        send csr_ri.time_irq (*r_time_irq) >>
+        send csr_ri.irq (*r_irq) >>
+        send csr_ri.ipi (*r_ipi) >>
+        send csr_ri.debug_req (*r_debug_req) >>
+        cycle 1
+    }
+
+    /* ---- Recv CSR outputs, feed controller & others ---- */
+    loop {
+        let pl = recv csr_ri.priv_lvl >>
+        set r_priv_lvl := pl >>
+        let dmo = recv csr_ri.debug_mode >>
+        set r_debug_mode := dmo >>
+        let fcsr = recv csr_ri.flush_csr >>
+        set r_flush_csr := fcsr >>
+        let hcsr = recv csr_ri.halt_csr >>
+        set r_halt_csr := hcsr >>
+        let ep = recv csr_ri.epc >>
+        set r_epc := ep >>
+        let er = recv csr_ri.eret >>
+        set r_eret := er >>
+        let tvb = recv csr_ri.trap_vector_base >>
+        set r_trap_vector_base := tvb >>
+        let sdp = recv csr_ri.set_debug_pc >>
+        set r_set_debug_pc := sdp >>
+        let ss = recv csr_ri.single_step >>
+        set r_single_step := ss >>
+        let ice = recv csr_ri.icache_en >>
+        set r_icache_en := ice >>
+        let dce = recv csr_ri.dcache_en >>
+        set r_dcache_en := dce >>
+        let crd = recv csr_ri.csr_rdata >>
+        set r_csr_rdata := crd >>
+        let cex = recv csr_ri.csr_exception >>
+        set r_csr_exception := cex >>
+        let ic = recv csr_ri.irq_ctrl >>
+        set r_irq_ctrl := ic >>
+        let bt = recv csr_ri.break_from_trigger >>
+        set r_break_from_trigger := bt >>
+        let mci = recv csr_ri.mcountinhibit >>
+        set r_mcountinhibit := mci >>
+        send ctrl_ri.eret (*r_eret) >>
+        send ctrl_ri.ex_valid (1'b0) >>
+        send ctrl_ri.set_debug_pc (*r_set_debug_pc) >>
+        send ctrl_ri.resolved_branch (*r_resolved_branch) >>
+        send ctrl_ri.flush_csr (*r_flush_csr) >>
+        send ctrl_ri.halt_csr (*r_halt_csr) >>
+        send ctrl_ri.fence_i (*r_fence_i) >>
+        send ctrl_ri.fence (*r_fence) >>
+        send ctrl_ri.sfence_vma (*r_sfence_vma) >>
+        send ctrl_ri.flush_commit (*r_flush_commit) >>
+        send ctrl_ri.dcache_flush_ack (*r_dcache_flush_ack) >>
+        cycle 1
+    }
+
+    /* ---- Recv Controller outputs ---- */
+    loop {
+        let spc = recv ctrl_ri.set_pc_commit >>
+        set r_set_pc_commit := spc >>
+        let fi = recv ctrl_ri.flush_if >>
+        set r_flush_if := fi >>
+        let fu = recv ctrl_ri.flush_unissued >>
+        set r_flush_unissued := fu >>
+        let fid = recv ctrl_ri.flush_id >>
+        set r_flush_id := fid >>
+        let fex = recv ctrl_ri.flush_ex >>
+        set r_flush_ex := fex >>
+        let fic = recv ctrl_ri.flush_icache >>
+        set r_flush_icache := fic >>
+        let fdc = recv ctrl_ri.flush_dcache >>
+        set r_flush_dcache := fdc >>
+        let ftlb = recv ctrl_ri.flush_tlb >>
+        set r_flush_tlb := ftlb >>
+        let hl = recv ctrl_ri.halt >>
+        set r_halt := hl >>
+        let hf = recv ctrl_ri.halt_frontend >>
+        set r_halt_frontend := hf >>
+        cycle 1
+    }
+
+    /* ---- Drive cache subsystem ---- */
+    loop {
+        send cache_ri.icache_en (*r_icache_en) >>
+        send cache_ri.icache_flush (*r_flush_icache) >>
+        send cache_ri.dcache_en (*r_dcache_en) >>
+        send cache_ri.dcache_flush (*r_flush_dcache) >>
+        send cache_ri.noc_resp (*r_noc_resp) >>
+        cycle 1
+    }
+
+    /* ---- Recv cache outputs ---- */
+    loop {
+        let dfa = recv cache_ri.dcache_flush_ack >>
+        set r_dcache_flush_ack := dfa >>
+        let icm = recv cache_ri.icache_miss >>
+        set r_icache_miss := icm >>
+        let dcm = recv cache_ri.dcache_miss >>
+        set r_dcache_miss := dcm >>
+        let wbe = recv cache_ri.wbuffer_empty >>
+        set r_wbuffer_empty := wbe >>
+        let nrq = recv cache_ri.noc_req >>
+        set r_noc_req := nrq >>
+        cycle 1
+    }
+
+    /* ---- Drive perf counters ---- */
+    loop {
+        send perf_ri.debug_mode (*r_debug_mode) >>
+        send perf_ri.addr (12'd0) >>
+        send perf_ri.we (1'b0) >>
+        send perf_ri.data_in (64'd0) >>
+        send perf_ri.mcountinhibit (*r_mcountinhibit) >>
+        send perf_ri.icache_miss (*r_icache_miss) >>
+        send perf_ri.dcache_miss (*r_dcache_miss) >>
+        send perf_ri.itlb_miss (*r_itlb_miss) >>
+        send perf_ri.dtlb_miss (*r_dtlb_miss) >>
+        send perf_ri.sb_full (*r_sb_full) >>
+        send perf_ri.stall_issue (*r_stall_issue) >>
+        cycle 1
+    }
+
+    /* ---- Drive RVFI probes ---- */
+    loop {
+        send rvfi_ri.flush (*r_flush_if) >>
+        send rvfi_ri.commit_ack (*r_commit_ack) >>
+        send rvfi_ri.debug_mode (*r_debug_mode) >>
+        send rvfi_ri.priv_lvl (*r_priv_lvl) >>
+        send rvfi_ri.irq (*r_irq) >>
+        cycle 1
+    }
+
+    /* ---- Recv RVFI output and drive top-level output ---- */
+    loop {
+        let rp = recv rvfi_ri.probes >>
+        set r_rvfi_probes := rp >>
+        send top_out.rvfi_probes (*r_rvfi_probes) >>
+        send top_out.noc_req (*r_noc_req) >>
+        cycle 1
+    }
+}
