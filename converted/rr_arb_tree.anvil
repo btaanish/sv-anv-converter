@@ -1,0 +1,136 @@
+/* Hand-written Anvil for rr_arb_tree.sv
+   Round-robin arbiter tree with rotating priorities.
+   Concrete params: NumIn=4, DataWidth=32.
+
+   Architecture:
+     - NumIn=4 inputs compete for arbitration
+     - 2-level tree: leaf level selects among pairs, root selects winner
+     - rr_q register tracks current priority
+     - Grant propagates back from root to winning input
+     - Data/index propagate up from winning input to root
+
+   Conversion notes:
+     - Tree structure modeled as flat registers for each level
+     - Submodule instantiations (lzc) modeled as opaque logic
+     - genvar loops flattened for concrete NumIn=4
+*/
+
+// Input signals: requests and data from 4 requestors
+chan rr_arb_tree_in_ch {
+    left flush  : (logic@#1) @dyn - @dyn,
+    left rr_i   : (logic[2]@#1) @dyn - @dyn,
+    left req_i  : (logic[4]@#1) @dyn - @dyn,
+    left data_i : (logic[128]@#1) @dyn - @dyn,
+    left gnt_i  : (logic@#1) @dyn - @dyn
+}
+
+// Output signals: winning request, data, index, and per-input grants
+chan rr_arb_tree_out_ch {
+    left gnt_o  : (logic[4]@#1) @dyn - @dyn,
+    left req_o  : (logic@#1) @dyn - @dyn,
+    left data_o : (logic[32]@#1) @dyn - @dyn,
+    left idx_o  : (logic[2]@#1) @dyn - @dyn
+}
+
+proc rr_arb_tree(
+    inp  : left rr_arb_tree_in_ch,
+    outp : right rr_arb_tree_out_ch
+) {
+    // Input staging registers
+    reg r_flush  : logic;
+    reg r_rr_i   : logic[2];
+    reg r_req_i  : logic[4];
+    reg r_data_i : logic[128];
+    reg r_gnt_i  : logic;
+
+    // Round-robin priority register (internal, when ExtPrio=0)
+    reg rr_q : logic[2];
+
+    // Output staging registers
+    reg o_gnt_o  : logic[4];
+    reg o_req_o  : logic;
+    reg o_data_o : logic[32];
+    reg o_idx_o  : logic[2];
+
+    // Recv inputs
+    loop { let v = recv inp.flush >> set r_flush := v >> cycle 1 }
+    loop { let v = recv inp.rr_i >> set r_rr_i := v >> cycle 1 }
+    loop { let v = recv inp.req_i >> set r_req_i := v >> cycle 1 }
+    loop { let v = recv inp.data_i >> set r_data_i := v >> cycle 1 }
+    loop { let v = recv inp.gnt_i >> set r_gnt_i := v >> cycle 1 }
+
+    // Send outputs
+    loop { send outp.gnt_o (*o_gnt_o) >> cycle 1 }
+    loop { send outp.req_o (*o_req_o) >> cycle 1 }
+    loop { send outp.data_o (*o_data_o) >> cycle 1 }
+    loop { send outp.idx_o (*o_idx_o) >> cycle 1 }
+
+    // Arbitration tree logic (NumLevels=2 for NumIn=4)
+    // Level 1 (leaf): node0 selects between req[0],req[1]; node1 selects between req[2],req[3]
+    // Level 0 (root): selects between node0 and node1
+    loop {
+        // Leaf node 0: inputs 0 and 1
+        let req0 = <(*r_req_i)::logic[4]> >>
+        let sel0 = if (req0 & 4'd1 == 4'd0) { 1'b1 } else {
+            if (req0 & 4'd2 == 4'd2 && *rr_q & 2'd1 == 2'd1) { 1'b1 } else { 1'b0 }
+        } >>
+        let n0_req = if (req0 & 4'd3 == 4'd0) { 1'b0 } else { 1'b1 } >>
+
+        // Leaf node 1: inputs 2 and 3
+        let sel1 = if (req0 & 4'd4 == 4'd0) { 1'b1 } else {
+            if (req0 & 4'd8 == 4'd8 && *rr_q & 2'd1 == 2'd1) { 1'b1 } else { 1'b0 }
+        } >>
+        let n1_req = if (req0 & 4'd12 == 4'd0) { 1'b0 } else { 1'b1 } >>
+
+        // Root node: selects between node 0 and node 1
+        let root_sel = if (n0_req == 1'b0) { 1'b1 } else {
+            if (n1_req == 1'b1 && *rr_q & 2'd2 == 2'd2) { 1'b1 } else { 1'b0 }
+        } >>
+
+        // Output request: any input has a request
+        set o_req_o := if (n0_req == 1'b1) { 1'b1 } else { n1_req } >>
+
+        // Output index
+        set o_idx_o := if (root_sel == 1'b1) {
+            if (sel1 == 1'b1) { 2'd3 } else { 2'd2 }
+        } else {
+            if (sel0 == 1'b1) { 2'd1 } else { 2'd0 }
+        } >>
+
+        // Output data (select 32-bit slice from 128-bit packed data)
+        set o_data_o := if (root_sel == 1'b1) {
+            if (sel1 == 1'b1) { <(*r_data_i >> 96)::logic[32]> } else { <(*r_data_i >> 64)::logic[32]> }
+        } else {
+            if (sel0 == 1'b1) { <(*r_data_i >> 32)::logic[32]> } else { <(*r_data_i)::logic[32]> }
+        } >>
+
+        // Output grants (one-hot)
+        set o_gnt_o := if (*r_gnt_i == 1'b1) {
+            if (root_sel == 1'b1) {
+                if (sel1 == 1'b1) { 4'd8 } else { 4'd4 }
+            } else {
+                if (sel0 == 1'b1) { 4'd2 } else { 4'd1 }
+            }
+        } else {
+            4'd0
+        }
+    }
+
+    // RR priority update (FairArb=1: jump to next unserved request)
+    loop {
+        if (*r_flush == 1'b1) {
+            set rr_q := 2'd0
+        } else {
+            if (*r_gnt_i == 1'b1 && *o_req_o == 1'b1) {
+                // Advance to next index (simplified: just increment mod 4)
+                if (*o_idx_o == 2'd3) {
+                    set rr_q := 2'd0
+                } else {
+                    set rr_q := *o_idx_o + 2'd1
+                }
+            } else {
+                cycle 1
+            }
+        }
+    }
+}

@@ -1,0 +1,252 @@
+/* Hand-written Anvil for axi_test.sv
+   AXI testbench utilities package: contains SV classes for AXI4-Lite and
+   AXI4+ATOP drivers, monitors, and random traffic generators.
+
+   Original is 2280 lines of SystemVerilog classes (axi_lite_driver,
+   axi_driver, axi_rand_master, axi_rand_slave, etc.) inside a package.
+
+   Anvil does not support classes, packages, tasks, or simulation constructs.
+   This file models a minimal structural stub of the testbench:
+   - AXI master driver proc: drives AW/W/AR channels, receives B/R
+   - AXI slave responder proc: receives AW/W/AR, drives B/R
+   Both use channel-based I/O as required by Anvil.
+
+   Concrete params: AddrWidth=64, DataWidth=64, IdWidth=4.
+*/
+
+// AXI master driver channels
+chan axi_test_mst_out_ch {
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left aw_len    : (logic[8]@#1)  @dyn - @dyn,
+    left aw_size   : (logic[3]@#1)  @dyn - @dyn,
+    left aw_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_strb    : (logic[8]@#1)  @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left ar_size   : (logic[3]@#1)  @dyn - @dyn,
+    left ar_burst  : (logic[2]@#1)  @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+chan axi_test_mst_in_ch {
+    left aw_ready  : (logic@#1)     @dyn - @dyn,
+    left w_ready   : (logic@#1)     @dyn - @dyn,
+    left b_valid   : (logic@#1)     @dyn - @dyn,
+    left b_id      : (logic[4]@#1)  @dyn - @dyn,
+    left b_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready  : (logic@#1)     @dyn - @dyn,
+    left r_valid   : (logic@#1)     @dyn - @dyn,
+    left r_data    : (logic[64]@#1) @dyn - @dyn,
+    left r_id      : (logic[4]@#1)  @dyn - @dyn,
+    left r_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left r_last    : (logic@#1)     @dyn - @dyn
+}
+
+// AXI slave responder channels
+chan axi_test_slv_in_ch {
+    left aw_valid  : (logic@#1)     @dyn - @dyn,
+    left aw_addr   : (logic[64]@#1) @dyn - @dyn,
+    left aw_id     : (logic[4]@#1)  @dyn - @dyn,
+    left w_valid   : (logic@#1)     @dyn - @dyn,
+    left w_data    : (logic[64]@#1) @dyn - @dyn,
+    left w_last    : (logic@#1)     @dyn - @dyn,
+    left b_ready   : (logic@#1)     @dyn - @dyn,
+    left ar_valid  : (logic@#1)     @dyn - @dyn,
+    left ar_addr   : (logic[64]@#1) @dyn - @dyn,
+    left ar_id     : (logic[4]@#1)  @dyn - @dyn,
+    left ar_len    : (logic[8]@#1)  @dyn - @dyn,
+    left r_ready   : (logic@#1)     @dyn - @dyn
+}
+
+chan axi_test_slv_out_ch {
+    left aw_ready  : (logic@#1)     @dyn - @dyn,
+    left w_ready   : (logic@#1)     @dyn - @dyn,
+    left b_valid   : (logic@#1)     @dyn - @dyn,
+    left b_id      : (logic[4]@#1)  @dyn - @dyn,
+    left b_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready  : (logic@#1)     @dyn - @dyn,
+    left r_valid   : (logic@#1)     @dyn - @dyn,
+    left r_data    : (logic[64]@#1) @dyn - @dyn,
+    left r_id      : (logic[4]@#1)  @dyn - @dyn,
+    left r_resp    : (logic[2]@#1)  @dyn - @dyn,
+    left r_last    : (logic@#1)     @dyn - @dyn
+}
+
+// AXI random master: drives random AXI transactions
+// Models axi_rand_master class from axi_test package
+proc axi_rand_master(
+    mst_out : right axi_test_mst_out_ch,
+    mst_in  : left axi_test_mst_in_ch
+) {
+    // Input staging: responses from slave
+    reg r_aw_ready : logic;
+    reg r_w_ready  : logic;
+    reg r_b_valid  : logic;
+    reg r_b_id     : logic[4];
+    reg r_b_resp   : logic[2];
+    reg r_ar_ready : logic;
+    reg r_r_valid  : logic;
+    reg r_r_data   : logic[64];
+    reg r_r_id     : logic[4];
+    reg r_r_resp   : logic[2];
+    reg r_r_last   : logic;
+
+    // Transaction counter
+    reg txn_cnt : logic[8];
+
+    // Recv responses
+    loop { let v = recv mst_in.aw_ready >> set r_aw_ready := v >> cycle 1 }
+    loop { let v = recv mst_in.w_ready >> set r_w_ready := v >> cycle 1 }
+    loop { let v = recv mst_in.b_valid >> set r_b_valid := v >> cycle 1 }
+    loop { let v = recv mst_in.b_id >> set r_b_id := v >> cycle 1 }
+    loop { let v = recv mst_in.b_resp >> set r_b_resp := v >> cycle 1 }
+    loop { let v = recv mst_in.ar_ready >> set r_ar_ready := v >> cycle 1 }
+    loop { let v = recv mst_in.r_valid >> set r_r_valid := v >> cycle 1 }
+    loop { let v = recv mst_in.r_data >> set r_r_data := v >> cycle 1 }
+    loop { let v = recv mst_in.r_id >> set r_r_id := v >> cycle 1 }
+    loop { let v = recv mst_in.r_resp >> set r_r_resp := v >> cycle 1 }
+    loop { let v = recv mst_in.r_last >> set r_r_last := v >> cycle 1 }
+
+    // Drive default idle outputs (reset_master equivalent)
+    loop {
+        send mst_out.aw_valid (1'b0) >>
+        send mst_out.aw_addr (64'd0) >>
+        send mst_out.aw_id (4'd0) >>
+        send mst_out.aw_len (8'd0) >>
+        send mst_out.aw_size (3'd3) >>
+        send mst_out.aw_burst (2'd1) >>
+        send mst_out.w_valid (1'b0) >>
+        send mst_out.w_data (64'd0) >>
+        send mst_out.w_strb (8'd0) >>
+        send mst_out.w_last (1'b0) >>
+        send mst_out.b_ready (1'b1) >>
+        send mst_out.ar_valid (1'b0) >>
+        send mst_out.ar_addr (64'd0) >>
+        send mst_out.ar_id (4'd0) >>
+        send mst_out.ar_len (8'd0) >>
+        send mst_out.ar_size (3'd3) >>
+        send mst_out.ar_burst (2'd1) >>
+        send mst_out.r_ready (1'b1) >>
+        cycle 1
+    }
+}
+
+// AXI random slave: responds to AXI transactions with OKAY
+// Models axi_rand_slave class from axi_test package
+proc axi_rand_slave(
+    slv_in  : left axi_test_slv_in_ch,
+    slv_out : right axi_test_slv_out_ch
+) {
+    // Input staging: requests from master
+    reg r_aw_valid : logic;
+    reg r_aw_addr  : logic[64];
+    reg r_aw_id    : logic[4];
+    reg r_w_valid  : logic;
+    reg r_w_data   : logic[64];
+    reg r_w_last   : logic;
+    reg r_b_ready  : logic;
+    reg r_ar_valid : logic;
+    reg r_ar_addr  : logic[64];
+    reg r_ar_id    : logic[4];
+    reg r_ar_len   : logic[8];
+    reg r_r_ready  : logic;
+
+    // State for generating R beats
+    reg r_beats_remaining : logic[8];
+    reg r_current_id      : logic[4];
+    reg r_active          : logic;
+
+    // Recv requests
+    loop { let v = recv slv_in.aw_valid >> set r_aw_valid := v >> cycle 1 }
+    loop { let v = recv slv_in.aw_addr >> set r_aw_addr := v >> cycle 1 }
+    loop { let v = recv slv_in.aw_id >> set r_aw_id := v >> cycle 1 }
+    loop { let v = recv slv_in.w_valid >> set r_w_valid := v >> cycle 1 }
+    loop { let v = recv slv_in.w_data >> set r_w_data := v >> cycle 1 }
+    loop { let v = recv slv_in.w_last >> set r_w_last := v >> cycle 1 }
+    loop { let v = recv slv_in.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv slv_in.ar_valid >> set r_ar_valid := v >> cycle 1 }
+    loop { let v = recv slv_in.ar_addr >> set r_ar_addr := v >> cycle 1 }
+    loop { let v = recv slv_in.ar_id >> set r_ar_id := v >> cycle 1 }
+    loop { let v = recv slv_in.ar_len >> set r_ar_len := v >> cycle 1 }
+    loop { let v = recv slv_in.r_ready >> set r_r_ready := v >> cycle 1 }
+
+    // Always ready to accept AW, W, AR
+    loop {
+        send slv_out.aw_ready (1'b1) >>
+        send slv_out.w_ready (1'b1) >>
+        send slv_out.ar_ready (1'b1) >>
+        cycle 1
+    }
+
+    // B channel: respond with OKAY when write completes
+    loop {
+        if (*r_w_valid == 1'b1) {
+            if (*r_w_last == 1'b1) {
+                send slv_out.b_valid (1'b1) >>
+                send slv_out.b_id (*r_aw_id) >>
+                send slv_out.b_resp (2'b00) >>
+                cycle 1
+            } else {
+                send slv_out.b_valid (1'b0) >>
+                send slv_out.b_id (4'd0) >>
+                send slv_out.b_resp (2'd0) >>
+                cycle 1
+            }
+        } else {
+            send slv_out.b_valid (1'b0) >>
+            send slv_out.b_id (4'd0) >>
+            send slv_out.b_resp (2'd0) >>
+            cycle 1
+        }
+    }
+
+    // R channel: respond to AR with data beats
+    loop {
+        if (*r_active == 1'b0) {
+            if (*r_ar_valid == 1'b1) {
+                set r_beats_remaining := *r_ar_len >>
+                set r_current_id := *r_ar_id >>
+                set r_active := 1'b1 >>
+                send slv_out.r_valid (1'b0) >>
+                send slv_out.r_data (64'd0) >>
+                send slv_out.r_id (4'd0) >>
+                send slv_out.r_resp (2'd0) >>
+                send slv_out.r_last (1'b0) >>
+                cycle 1
+            } else {
+                send slv_out.r_valid (1'b0) >>
+                send slv_out.r_data (64'd0) >>
+                send slv_out.r_id (4'd0) >>
+                send slv_out.r_resp (2'd0) >>
+                send slv_out.r_last (1'b0) >>
+                cycle 1
+            }
+        } else {
+            // Send R beat
+            send slv_out.r_valid (1'b1) >>
+            send slv_out.r_data (64'd0) >>
+            send slv_out.r_id (*r_current_id) >>
+            send slv_out.r_resp (2'b00) >>
+            send slv_out.r_last (if (*r_beats_remaining == 8'd0) { 1'b1 } else { 1'b0 }) >>
+            if (*r_r_ready == 1'b1) {
+                if (*r_beats_remaining == 8'd0) {
+                    set r_active := 1'b0 >>
+                    cycle 1
+                } else {
+                    set r_beats_remaining := *r_beats_remaining - 8'd1 >>
+                    cycle 1
+                }
+            } else {
+                cycle 1
+            }
+        }
+    }
+}

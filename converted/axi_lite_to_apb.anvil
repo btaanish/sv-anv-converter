@@ -1,0 +1,286 @@
+/* Hand-written Anvil for axi_lite_to_apb.sv
+   AXI4-Lite to APB4 bridge: converts AXI-Lite read/write transactions
+   to APB4 protocol for multiple APB slaves.
+   Concrete params:
+     NoApbSlaves=4, NoRules=4, AddrWidth=32, DataWidth=32,
+     PipelineRequest=0, PipelineResponse=0.
+
+   Architecture:
+     - AXI-Lite read (AR) and write (AW+W) requests arbitrated by rr_arb_tree
+     - Winning request goes through fall-through register to APB FSM
+     - APB FSM: Setup (idle+setup phase) -> Access (penable=1, wait pready)
+     - addr_decode selects which APB slave gets psel
+     - Responses routed back via fall-through registers to B/R channels
+
+   Conversion notes:
+     - Submodule instantiations (rr_arb_tree, addr_decode, fall_through_register)
+       modeled as opaque register stubs
+     - APB FSM (Setup/Access) modeled with enum+match
+     - 4 APB slave ports flattened into single wide register
+*/
+
+// AXI-Lite request input
+chan lite_apb_req_ch {
+    left aw_valid : (logic@#1)     @dyn - @dyn,
+    left aw_addr  : (logic[32]@#1) @dyn - @dyn,
+    left aw_prot  : (logic[3]@#1)  @dyn - @dyn,
+    left w_valid  : (logic@#1)     @dyn - @dyn,
+    left w_data   : (logic[32]@#1) @dyn - @dyn,
+    left w_strb   : (logic[4]@#1)  @dyn - @dyn,
+    left b_ready  : (logic@#1)     @dyn - @dyn,
+    left ar_valid : (logic@#1)     @dyn - @dyn,
+    left ar_addr  : (logic[32]@#1) @dyn - @dyn,
+    left ar_prot  : (logic[3]@#1)  @dyn - @dyn,
+    left r_ready  : (logic@#1)     @dyn - @dyn
+}
+
+// AXI-Lite response output
+chan lite_apb_resp_ch {
+    left aw_ready : (logic@#1)     @dyn - @dyn,
+    left w_ready  : (logic@#1)     @dyn - @dyn,
+    left b_valid  : (logic@#1)     @dyn - @dyn,
+    left b_resp   : (logic[2]@#1)  @dyn - @dyn,
+    left ar_ready : (logic@#1)     @dyn - @dyn,
+    left r_valid  : (logic@#1)     @dyn - @dyn,
+    left r_data   : (logic[32]@#1) @dyn - @dyn,
+    left r_resp   : (logic[2]@#1)  @dyn - @dyn
+}
+
+// APB master output (flattened for 4 slaves)
+chan lite_apb_mst_ch {
+    left paddr   : (logic[32]@#1) @dyn - @dyn,
+    left pprot   : (logic[3]@#1)  @dyn - @dyn,
+    left psel    : (logic[4]@#1)  @dyn - @dyn,
+    left penable : (logic@#1)     @dyn - @dyn,
+    left pwrite  : (logic@#1)     @dyn - @dyn,
+    left pwdata  : (logic[32]@#1) @dyn - @dyn,
+    left pstrb   : (logic[4]@#1)  @dyn - @dyn
+}
+
+// APB slave response input (flattened for 4 slaves, selected by psel)
+chan lite_apb_slv_ch {
+    left pready  : (logic[4]@#1)  @dyn - @dyn,
+    left prdata  : (logic[32]@#1) @dyn - @dyn,
+    left pslverr : (logic[4]@#1)  @dyn - @dyn
+}
+
+// Address map input (4 rules, each: base(32)+mask(32)+idx(2) = 66 bits, packed)
+chan lite_apb_map_ch {
+    left addr_map : (logic[64]@#1) @dyn - @dyn
+}
+
+// APB FSM states
+enum apb_fsm_state {
+    SETUP,
+    ACCESS
+}
+
+proc axi_lite_to_apb(
+    axi_req  : left lite_apb_req_ch,
+    axi_resp : right lite_apb_resp_ch,
+    apb_out  : right lite_apb_mst_ch,
+    apb_in   : left lite_apb_slv_ch,
+    map_in   : left lite_apb_map_ch
+) {
+    // Input staging: AXI-Lite request
+    reg r_aw_valid : logic;
+    reg r_aw_addr  : logic[32];
+    reg r_aw_prot  : logic[3];
+    reg r_w_valid  : logic;
+    reg r_w_data   : logic[32];
+    reg r_w_strb   : logic[4];
+    reg r_b_ready  : logic;
+    reg r_ar_valid : logic;
+    reg r_ar_addr  : logic[32];
+    reg r_ar_prot  : logic[3];
+    reg r_r_ready  : logic;
+
+    // Input staging: APB slave response
+    reg r_pready  : logic[4];
+    reg r_prdata  : logic[32];
+    reg r_pslverr : logic[4];
+
+    // APB FSM state
+    reg apb_state : apb_fsm_state;
+
+    // Arbitration result: which request won (0=read, 1=write)
+    reg arb_write : logic;
+    reg arb_addr  : logic[32];
+    reg arb_prot  : logic[3];
+    reg arb_data  : logic[32];
+    reg arb_strb  : logic[4];
+    reg arb_valid : logic;
+
+    // Selected APB slave index (from address decode, opaque)
+    reg apb_sel_idx  : logic[2];
+    reg apb_dec_valid : logic;
+
+    // Output staging
+    reg o_aw_ready : logic;
+    reg o_w_ready  : logic;
+    reg o_b_valid  : logic;
+    reg o_b_resp   : logic[2];
+    reg o_ar_ready : logic;
+    reg o_r_valid  : logic;
+    reg o_r_data   : logic[32];
+    reg o_r_resp   : logic[2];
+
+    reg o_paddr   : logic[32];
+    reg o_pprot   : logic[3];
+    reg o_psel    : logic[4];
+    reg o_penable : logic;
+    reg o_pwrite  : logic;
+    reg o_pwdata  : logic[32];
+    reg o_pstrb   : logic[4];
+
+    // Recv AXI-Lite request
+    loop { let v = recv axi_req.aw_valid >> set r_aw_valid := v >> cycle 1 }
+    loop { let v = recv axi_req.aw_addr >> set r_aw_addr := v >> cycle 1 }
+    loop { let v = recv axi_req.aw_prot >> set r_aw_prot := v >> cycle 1 }
+    loop { let v = recv axi_req.w_valid >> set r_w_valid := v >> cycle 1 }
+    loop { let v = recv axi_req.w_data >> set r_w_data := v >> cycle 1 }
+    loop { let v = recv axi_req.w_strb >> set r_w_strb := v >> cycle 1 }
+    loop { let v = recv axi_req.b_ready >> set r_b_ready := v >> cycle 1 }
+    loop { let v = recv axi_req.ar_valid >> set r_ar_valid := v >> cycle 1 }
+    loop { let v = recv axi_req.ar_addr >> set r_ar_addr := v >> cycle 1 }
+    loop { let v = recv axi_req.ar_prot >> set r_ar_prot := v >> cycle 1 }
+    loop { let v = recv axi_req.r_ready >> set r_r_ready := v >> cycle 1 }
+
+    // Recv APB slave responses
+    loop { let v = recv apb_in.pready >> set r_pready := v >> cycle 1 }
+    loop { let v = recv apb_in.prdata >> set r_prdata := v >> cycle 1 }
+    loop { let v = recv apb_in.pslverr >> set r_pslverr := v >> cycle 1 }
+
+    // Recv address map (opaque, just consume)
+    loop { let v = recv map_in.addr_map >> cycle 1 }
+
+    // Send AXI-Lite response
+    loop { send axi_resp.aw_ready (*o_aw_ready) >> cycle 1 }
+    loop { send axi_resp.w_ready (*o_w_ready) >> cycle 1 }
+    loop { send axi_resp.b_valid (*o_b_valid) >> cycle 1 }
+    loop { send axi_resp.b_resp (*o_b_resp) >> cycle 1 }
+    loop { send axi_resp.ar_ready (*o_ar_ready) >> cycle 1 }
+    loop { send axi_resp.r_valid (*o_r_valid) >> cycle 1 }
+    loop { send axi_resp.r_data (*o_r_data) >> cycle 1 }
+    loop { send axi_resp.r_resp (*o_r_resp) >> cycle 1 }
+
+    // Send APB master output
+    loop { send apb_out.paddr (*o_paddr) >> cycle 1 }
+    loop { send apb_out.pprot (*o_pprot) >> cycle 1 }
+    loop { send apb_out.psel (*o_psel) >> cycle 1 }
+    loop { send apb_out.penable (*o_penable) >> cycle 1 }
+    loop { send apb_out.pwrite (*o_pwrite) >> cycle 1 }
+    loop { send apb_out.pwdata (*o_pwdata) >> cycle 1 }
+    loop { send apb_out.pstrb (*o_pstrb) >> cycle 1 }
+
+    // ==============================
+    // Arbitration: write has priority check (RR with aw+w both valid)
+    // ==============================
+    loop {
+        // Write request valid when both AW and W are valid
+        let wr_valid = if (*r_aw_valid == 1'b1) {
+            if (*r_w_valid == 1'b1) { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        if (wr_valid == 1'b1) {
+            set arb_valid := 1'b1 >>
+            set arb_write := 1'b1 >>
+            set arb_addr := *r_aw_addr >>
+            set arb_prot := *r_aw_prot >>
+            set arb_data := *r_w_data >>
+            set arb_strb := *r_w_strb >>
+            set o_aw_ready := 1'b1 >>
+            set o_w_ready := 1'b1
+        } else if (*r_ar_valid == 1'b1) {
+            set arb_valid := 1'b1 >>
+            set arb_write := 1'b0 >>
+            set arb_addr := *r_ar_addr >>
+            set arb_prot := *r_ar_prot >>
+            set arb_data := 32'd0 >>
+            set arb_strb := 4'd0 >>
+            set o_ar_ready := 1'b1
+        } else {
+            set arb_valid := 1'b0 >>
+            set o_aw_ready := 1'b0 >>
+            set o_w_ready := 1'b0 >>
+            set o_ar_ready := 1'b0 >>
+            cycle 1
+        }
+    }
+
+    // ==============================
+    // APB FSM: Setup -> Access
+    // ==============================
+    loop {
+        match (*apb_state) {
+            apb_fsm_state::SETUP => {
+                if (*arb_valid == 1'b1) {
+                    // Setup phase: assert psel, deassert penable
+                    set o_paddr := *arb_addr >>
+                    set o_pprot := *arb_prot >>
+                    set o_psel := 4'd1 >>
+                    set o_penable := 1'b0 >>
+                    set o_pwrite := *arb_write >>
+                    set o_pwdata := *arb_data >>
+                    set o_pstrb := *arb_strb >>
+                    set apb_dec_valid := 1'b1 >>
+                    set apb_state := apb_fsm_state::ACCESS
+                } else {
+                    set o_psel := 4'd0 >>
+                    set o_penable := 1'b0 >>
+                    cycle 1
+                }
+            },
+            _ => {
+                // Access phase: assert penable, wait for pready
+                set o_penable := 1'b1 >>
+                // Check pready for selected slave (simplified: check bit 0)
+                if (*r_pready & 4'd1 == 4'd1) {
+                    // Transfer complete
+                    if (*arb_write == 1'b1) {
+                        // Write response
+                        set o_b_valid := 1'b1 >>
+                        // Check pslverr
+                        set o_b_resp := if (*r_pslverr & 4'd1 == 4'd1) { 2'b10 } else { 2'b00 } >>
+                        set o_r_valid := 1'b0
+                    } else {
+                        // Read response
+                        set o_r_valid := 1'b1 >>
+                        set o_r_data := *r_prdata >>
+                        set o_r_resp := if (*r_pslverr & 4'd1 == 4'd1) { 2'b10 } else { 2'b00 } >>
+                        set o_b_valid := 1'b0
+                    } >>
+                    set o_psel := 4'd0 >>
+                    set apb_state := apb_fsm_state::SETUP
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // Clear response valids after handshake
+    loop {
+        if (*o_b_valid == 1'b1) {
+            if (*r_b_ready == 1'b1) {
+                set o_b_valid := 1'b0
+            } else {
+                cycle 1
+            }
+        } else {
+            cycle 1
+        }
+    }
+
+    loop {
+        if (*o_r_valid == 1'b1) {
+            if (*r_r_ready == 1'b1) {
+                set o_r_valid := 1'b0
+            } else {
+                cycle 1
+            }
+        } else {
+            cycle 1
+        }
+    }
+}
