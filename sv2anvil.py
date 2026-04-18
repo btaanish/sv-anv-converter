@@ -1960,39 +1960,49 @@ def _convert_comb_stmts(stmts: list, output: list, params: Dict[str, str],
     """Convert always_comb statements to Anvil IR.
 
     Handles if/case blocks by extracting all assigned variable names
-    and emitting them as let bindings.
+    and emitting them as let bindings (skipping already-emitted names).
     """
+    # Track which variable names we've already emitted
+    emitted = {s.name for s in output if isinstance(s, AnvilLetBinding)}
+
     for stmt in stmts:
         if isinstance(stmt, SVAssign):
             lhs_name = re.match(r"(\w+)", stmt.lhs)
             if skip_outputs and lhs_name and lhs_name.group(1) in skip_outputs:
                 continue
-            output.append(AnvilLetBinding(
-                name=_sanitize_lhs(stmt.lhs),
-                expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
-            ))
+            name = _sanitize_lhs(stmt.lhs)
+            if name not in emitted:
+                output.append(AnvilLetBinding(
+                    name=name,
+                    expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
+                ))
+                emitted.add(name)
         elif isinstance(stmt, SVIfBlock):
             # Extract all assigned variable names from the if/case tree
-            # and emit them as placeholder let bindings
+            # and emit them as placeholder let bindings (skip already-emitted)
             assigned = set()
             _collect_blocking_targets([stmt], assigned)
             if skip_outputs:
                 assigned -= skip_outputs
+            assigned -= emitted
             for var_name in sorted(assigned):
                 output.append(AnvilLetBinding(
                     name=var_name,
                     expr="0 /* comb if/case */",
                 ))
+                emitted.add(var_name)
         elif isinstance(stmt, SVCaseBlock):
             assigned = set()
             _collect_blocking_targets([stmt], assigned)
             if skip_outputs:
                 assigned -= skip_outputs
+            assigned -= emitted
             for var_name in sorted(assigned):
                 output.append(AnvilLetBinding(
                     name=var_name,
                     expr="0 /* comb case */",
                 ))
+                emitted.add(var_name)
 
 
 def _convert_ff_stmts(stmts: list, output: list, params: Dict[str, str],
@@ -2528,6 +2538,24 @@ def convert_sv_to_anvil(sv_source: str) -> str:
     result_text = '\n'.join(cleaned_lines)
     # Remove trailing >> before a closing brace
     result_text = re.sub(r'\s*>>\s*\n(\s*\})', r'\n\1', result_text)
+
+    # Fix empty if/else blocks: insert cycle 1 into empty blocks
+    # Pattern: { \n } (possibly with whitespace)
+    def _fix_empty_blocks(text):
+        lines_list = text.split('\n')
+        result = []
+        for i, line in enumerate(lines_list):
+            result.append(line)
+            # Check if this line opens a block and next line closes it
+            if i + 1 < len(lines_list):
+                this_stripped = line.rstrip()
+                next_stripped = lines_list[i + 1].strip()
+                if this_stripped.endswith('{') and (next_stripped == '}' or next_stripped.startswith('} else')):
+                    # Get indentation of the opening brace
+                    indent = len(line) - len(line.lstrip()) + 4
+                    result.append(' ' * indent + 'cycle 1')
+        return '\n'.join(result)
+    result_text = _fix_empty_blocks(result_text)
 
     return result_text
 
