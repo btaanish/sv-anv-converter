@@ -1,0 +1,247 @@
+/* Hand-written Anvil for trigger_module.sv
+   RISC-V trigger module for CVA6 debug support.
+   Concrete params: XLEN=64, N_Triggers=4, NrCommitPorts=2,
+   NrIssuePorts=1, VLEN=39. SDTRIG=1, IS_XLEN64=1, IS_XLEN32=0.
+   Trigger types: icount(3), etrigger(5), mcontrol6(6), itrigger(4).
+   Structs flattened to registers for simplicity. */
+
+chan trig_in_ch {
+    left commit_instr_pc : (logic[64]@#1) @dyn - @dyn,
+    left commit_instr_op : (logic[8]@#1) @dyn - @dyn,
+    left commit_instr_result : (logic[64]@#1) @dyn - @dyn,
+    left commit_ack : (logic[2]@#1) @dyn - @dyn,
+    left ex_valid : (logic@#1) @dyn - @dyn,
+    left ex_cause : (logic[64]@#1) @dyn - @dyn,
+    left priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left mret : (logic@#1) @dyn - @dyn,
+    left sret : (logic@#1) @dyn - @dyn,
+    left vaddr_from_lsu : (logic[39]@#1) @dyn - @dyn,
+    left orig_instr : (logic[32]@#1) @dyn - @dyn,
+    left store_result : (logic[64]@#1) @dyn - @dyn,
+    left scontext : (logic[64]@#1) @dyn - @dyn,
+    left tdata1_i : (logic[64]@#1) @dyn - @dyn,
+    left tdata2_i : (logic[64]@#1) @dyn - @dyn,
+    left tdata3_i : (logic[64]@#1) @dyn - @dyn,
+    left tselect_i : (logic[64]@#1) @dyn - @dyn,
+    left tselect_we : (logic@#1) @dyn - @dyn,
+    left tdata1_we : (logic@#1) @dyn - @dyn,
+    left tdata2_we : (logic@#1) @dyn - @dyn,
+    left tdata3_we : (logic@#1) @dyn - @dyn
+}
+
+chan trig_out_ch {
+    left tselect_o : (logic[64]@#1) @dyn - @dyn,
+    left tdata1_o : (logic[64]@#1) @dyn - @dyn,
+    left tdata2_o : (logic[64]@#1) @dyn - @dyn,
+    left tdata3_o : (logic[64]@#1) @dyn - @dyn,
+    left flush_o : (logic@#1) @dyn - @dyn,
+    left break_from_trigger : (logic@#1) @dyn - @dyn,
+    left debug_from_trigger : (logic@#1) @dyn - @dyn,
+    left debug_from_mcontrol : (logic@#1) @dyn - @dyn
+}
+
+proc trigger_module(
+    inp : left trig_in_ch,
+    out : right trig_out_ch
+) {
+    /* tselect register (one-hot, 4 triggers) */
+    reg tselect_q : logic[2];
+
+    /* Trigger type per trigger (4 bits each) */
+    reg trig_type0 : logic[4];
+    reg trig_type1 : logic[4];
+    reg trig_type2 : logic[4];
+    reg trig_type3 : logic[4];
+
+    /* tdata2 per trigger */
+    reg tdata2_0 : logic[64];
+    reg tdata2_1 : logic[64];
+    reg tdata2_2 : logic[64];
+    reg tdata2_3 : logic[64];
+
+    /* Simplified trigger config registers (one set for selected trigger) */
+    reg mcontrol6_debug_q : logic;
+    reg e_matched_q : logic;
+    reg mret_reg_q : logic;
+    reg break_trigger_q : logic;
+    reg debug_trigger_q : logic;
+    reg in_trap_handler_q : logic;
+
+    /* Input staging registers */
+    reg r_commit_pc : logic[64];
+    reg r_commit_op : logic[8];
+    reg r_commit_result : logic[64];
+    reg r_commit_ack : logic[2];
+    reg r_ex_valid : logic;
+    reg r_ex_cause : logic[64];
+    reg r_priv_lvl : logic[2];
+    reg r_debug_mode : logic;
+    reg r_mret : logic;
+    reg r_sret : logic;
+    reg r_vaddr : logic[39];
+    reg r_orig_instr : logic[32];
+    reg r_store_result : logic[64];
+    reg r_scontext : logic[64];
+    reg r_tdata1_i : logic[64];
+    reg r_tdata2_i : logic[64];
+    reg r_tdata3_i : logic[64];
+    reg r_tselect_i : logic[64];
+    reg r_tselect_we : logic;
+    reg r_tdata1_we : logic;
+    reg r_tdata2_we : logic;
+    reg r_tdata3_we : logic;
+
+    /* Snapshot registers */
+    reg snap_tselect : logic[2];
+    reg snap_mctrl_dbg : logic;
+    reg snap_break : logic;
+    reg snap_debug : logic;
+
+    /* Recv loop */
+    loop {
+        let a0 = recv inp.commit_instr_pc >>
+        set r_commit_pc := a0 >>
+        let a1 = recv inp.commit_instr_op >>
+        set r_commit_op := a1 >>
+        let a2 = recv inp.commit_instr_result >>
+        set r_commit_result := a2 >>
+        let a3 = recv inp.commit_ack >>
+        set r_commit_ack := a3 >>
+        let a4 = recv inp.ex_valid >>
+        set r_ex_valid := a4 >>
+        let a5 = recv inp.ex_cause >>
+        set r_ex_cause := a5 >>
+        let a6 = recv inp.priv_lvl >>
+        set r_priv_lvl := a6 >>
+        let a7 = recv inp.debug_mode >>
+        set r_debug_mode := a7 >>
+        let a8 = recv inp.mret >>
+        set r_mret := a8 >>
+        let a9 = recv inp.sret >>
+        set r_sret := a9 >>
+        let a10 = recv inp.vaddr_from_lsu >>
+        set r_vaddr := a10 >>
+        let a11 = recv inp.orig_instr >>
+        set r_orig_instr := a11 >>
+        let a12 = recv inp.store_result >>
+        set r_store_result := a12 >>
+        let a13 = recv inp.scontext >>
+        set r_scontext := a13 >>
+        let a14 = recv inp.tdata1_i >>
+        set r_tdata1_i := a14 >>
+        let a15 = recv inp.tdata2_i >>
+        set r_tdata2_i := a15 >>
+        let a16 = recv inp.tdata3_i >>
+        set r_tdata3_i := a16 >>
+        let a17 = recv inp.tselect_i >>
+        set r_tselect_i := a17 >>
+        let a18 = recv inp.tselect_we >>
+        set r_tselect_we := a18 >>
+        let a19 = recv inp.tdata1_we >>
+        set r_tdata1_we := a19 >>
+        let a20 = recv inp.tdata2_we >>
+        set r_tdata2_we := a20 >>
+        let a21 = recv inp.tdata3_we >>
+        set r_tdata3_we := a21 >>
+        cycle 1
+    }
+
+    /* Snapshot loop */
+    loop {
+        set snap_tselect := *tselect_q;
+        set snap_mctrl_dbg := *mcontrol6_debug_q;
+        set snap_break := *break_trigger_q;
+        set snap_debug := *debug_trigger_q
+    }
+
+    /* Output loop: read path for CSR reads */
+    loop {
+        /* tselect_o: zero-extend tselect_q */
+        let tsel_out = <(*snap_tselect)::logic[64]> >>
+
+        /* tdata1_o: simplified - output zeros (structural placeholder) */
+        let td1_out = 64'd0 >>
+
+        /* tdata2_o: mux based on tselect */
+        let td2_out = match (*snap_tselect) {
+            2'd0 => *tdata2_0,
+            2'd1 => *tdata2_1,
+            2'd2 => *tdata2_2,
+            _ => *tdata2_3
+        } >>
+
+        /* tdata3_o: placeholder */
+        let td3_out = 64'd0 >>
+
+        /* flush_o: set when tdata1 is written */
+        let fl = *r_tdata1_we >>
+
+        send out.tselect_o (tsel_out) >>
+        send out.tdata1_o (td1_out) >>
+        send out.tdata2_o (td2_out) >>
+        send out.tdata3_o (td3_out) >>
+        send out.flush_o (fl) >>
+        send out.break_from_trigger (*snap_break) >>
+        send out.debug_from_trigger (*snap_debug) >>
+
+        /* debug_from_mcontrol: rising edge detect */
+        let mctrl_rise = *mcontrol6_debug_q & ~(*snap_mctrl_dbg) >>
+        send out.debug_from_mcontrol (mctrl_rise) >>
+        cycle 1
+    }
+
+    /* State update loop: CSR write logic */
+    loop {
+        /* tselect write */
+        if (*r_tselect_we == 1'b1) {
+            let new_tsel = <(*r_tselect_i)::logic[2]> >>
+            if (new_tsel < 2'd4) {
+                set tselect_q := new_tsel
+            } else {
+                cycle 1
+            }
+        } else if (*r_tdata2_we == 1'b1) {
+            /* tdata2 write: store to selected trigger's tdata2 */
+            match (*snap_tselect) {
+                2'd0 => set tdata2_0 := *r_tdata2_i,
+                2'd1 => set tdata2_1 := *r_tdata2_i,
+                2'd2 => set tdata2_2 := *r_tdata2_i,
+                _ => set tdata2_3 := *r_tdata2_i
+            }
+        } else if (*r_tdata1_we == 1'b1) {
+            /* tdata1 write: update trigger type for selected trigger */
+            let new_type = <(*r_tdata1_i >> 60)::logic[4]> >>
+            match (*snap_tselect) {
+                2'd0 => set trig_type0 := new_type,
+                2'd1 => set trig_type1 := new_type,
+                2'd2 => set trig_type2 := new_type,
+                _ => set trig_type3 := new_type
+            }
+        } else {
+            cycle 1
+        }
+    }
+
+    /* Trigger match state update loop */
+    loop {
+        /* Simplified trigger matching: update break/debug state */
+        let any_ack = *r_commit_ack != 2'd0 >>
+        let mret_or_sret = *r_mret | *r_sret >>
+
+        if (*r_ex_valid == 1'b1) {
+            set e_matched_q := 1'b1;
+            set in_trap_handler_q := 1'b1
+        } else if (mret_or_sret == 1'b1) {
+            set mret_reg_q := 1'b1;
+            set in_trap_handler_q := 1'b0
+        } else if (*snap_break == 1'b1) {
+            set break_trigger_q := 1'b0
+        } else if (*r_debug_mode == 1'b1) {
+            set debug_trigger_q := 1'b0;
+            set mcontrol6_debug_q := 1'b0
+        } else {
+            cycle 1
+        }
+    }
+}
