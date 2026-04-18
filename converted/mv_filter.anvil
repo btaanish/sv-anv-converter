@@ -1,0 +1,95 @@
+/* Hand-written Anvil for mv_filter.sv
+   Majority vote filter — counts samples of d_i when sample_i is asserted.
+   When counter reaches THRESHOLD, output goes high. Clear resets everything.
+   Concrete params: WIDTH=4, THRESHOLD=10.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~55
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] THRESHOLD[WIDTH-1:0] truncation hardcoded to 4'd10
+       - [MANUAL-CLEANUP-NEEDED] WIDTH param hardcoded to 4
+*/
+
+// [MANUAL] Channel for mv_filter inputs
+chan mv_filter_in_ch {
+    left sample : (logic@#1) @dyn - @dyn,
+    left clear  : (logic@#1) @dyn - @dyn,
+    left d      : (logic@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for mv_filter output
+chan mv_filter_out_ch {
+    left q      : (logic@#1) @dyn - @dyn
+}
+
+proc mv_filter(
+    inp  : left mv_filter_in_ch,    // [MANUAL] input ports
+    out  : right mv_filter_out_ch   // [MANUAL] output port
+) {
+    // [MANUAL] State registers (from always_ff)
+    reg counter_q : logic[4];  // [MANUAL] WIDTH=4
+    reg q         : logic;     // [MANUAL] output register
+
+    // [MANUAL] Input staging registers
+    reg r_sample : logic;
+    reg r_clear  : logic;
+    reg r_d      : logic;
+
+    // [MANUAL] Combinational next-state registers
+    reg counter_d : logic[4];
+    reg d_next    : logic;
+
+    // [MANUAL] Recv loop — stage inputs
+    loop {
+        let v_sample = recv inp.sample >>
+        set r_sample := v_sample >>
+        let v_clear = recv inp.clear >>
+        set r_clear := v_clear >>
+        let v_d = recv inp.d >>
+        set r_d := v_d
+    }
+
+    // [MANUAL] Combinational logic — compute next state
+    loop {
+        // [MANUAL] Default: hold current values
+        set counter_d := *counter_q >>
+        set d_next := *q >>
+
+        // [MANUAL] Check threshold (THRESHOLD=10, but WIDTH=4, so 4'd10)
+        // [MANUAL-CLEANUP-NEEDED] 4-bit counter can only reach 15; THRESHOLD=10 fits
+        if (*counter_q >= 4'd10) {
+            set d_next := 1'b1
+        } else {
+            if (*r_sample == 1'b1) {
+                if (*r_d == 1'b1) {
+                    set counter_d := *counter_q + 4'd1
+                } else {
+                    cycle 1
+                }
+            } else {
+                cycle 1
+            }
+        } >>
+
+        // [MANUAL] Sync clear overrides everything
+        if (*r_clear == 1'b1) {
+            set counter_d := 4'd0 >>
+            set d_next := 1'b0
+        } else {
+            cycle 1
+        }
+    }
+
+    // [MANUAL] Sequential update — register transfer (models always_ff)
+    loop {
+        set counter_q := *counter_d >>
+        set q := *d_next
+    }
+
+    // [MANUAL] Send output loop
+    loop {
+        send out.q (*q) >>
+        cycle 1
+    }
+}

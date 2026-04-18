@@ -1,0 +1,88 @@
+/* Hand-written Anvil for rstgen_bypass.sv
+   Reset synchronizer with test-mode bypass.
+   Shifts 1s through a chain of NumRegs flip-flops after reset release.
+   In test mode, bypasses the synchronizer chain.
+   Concrete params: NumRegs=4.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~50
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] NumRegs=4 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] test_mode bypass modeled combinationally
+*/
+
+chan rstgen_in_ch {
+    left test_mode_i      : (logic@#1) @dyn - @dyn,
+    left rst_test_mode_ni : (logic@#1) @dyn - @dyn
+}
+
+chan rstgen_out_ch {
+    left rst_no  : (logic@#1) @dyn - @dyn,
+    left init_no : (logic@#1) @dyn - @dyn
+}
+
+proc rstgen_bypass(
+    inp : left rstgen_in_ch,
+    out : right rstgen_out_ch
+) {
+    // 4-stage synchronizer shift register (initialized to 0)
+    reg synch_reg0 : logic;
+    reg synch_reg1 : logic;
+    reg synch_reg2 : logic;
+    reg synch_reg3 : logic;
+
+    // Input staging regs
+    reg r_test_mode : logic;
+    reg r_rst_test : logic;
+
+    // Receive test_mode_i
+    loop {
+        let tm = recv inp.test_mode_i >>
+        set r_test_mode := tm >>
+        cycle 1
+    }
+
+    // Receive rst_test_mode_ni
+    loop {
+        let rt = recv inp.rst_test_mode_ni >>
+        set r_rst_test := rt >>
+        cycle 1
+    }
+
+    // Shift register: {synch_regs_q[NumRegs-2:0], 1'b1}
+    // synch_reg0 <= 1, synch_reg1 <= synch_reg0, etc.
+    loop {
+        set synch_reg0 := 1'b1 >>
+        cycle 1
+    }
+
+    loop {
+        set synch_reg1 := *synch_reg0 >>
+        cycle 1
+    }
+
+    loop {
+        set synch_reg2 := *synch_reg1 >>
+        cycle 1
+    }
+
+    loop {
+        set synch_reg3 := *synch_reg2 >>
+        cycle 1
+    }
+
+    // Output: mux based on test_mode
+    loop {
+        let tm = *r_test_mode >>
+        let rst_test = *r_rst_test >>
+        let top_bit = *synch_reg3 >>
+        // Normal mode: rst_no = synch_regs_q[3], init_no = synch_regs_q[3]
+        // Test mode: rst_no = rst_test_mode_ni, init_no = 1
+        let rst_out = if tm { rst_test } else { top_bit } >>
+        let init_out = if tm { 1'b1 } else { top_bit } >>
+        send out.rst_no (rst_out) >>
+        send out.init_no (init_out) >>
+        cycle 1
+    }
+}

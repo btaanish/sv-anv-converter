@@ -1,0 +1,74 @@
+/* Hand-written Anvil for edge_propagator_tx.sv
+   TX-side edge propagator. Captures a valid pulse and holds it until
+   acknowledged via a 2-stage synchronizer feedback path.
+
+   Ports:
+     valid_i  : input pulse to propagate
+     ack_i    : acknowledgment from RX domain (already synchronized)
+     valid_o  : output = r_input_reg (held until ack)
+
+   Logic:
+     s_input_reg_next = valid_i | (r_input_reg & ~sync_a[0])
+     FF: r_input_reg <= s_input_reg_next
+         sync_a <= {ack_i, sync_a[1]}
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~45
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] sync_a modeled as two separate regs
+*/
+
+chan edge_prop_tx_in_ch {
+    left valid_i : (logic@#1) @dyn - @dyn,
+    left ack_i   : (logic@#1) @dyn - @dyn
+}
+
+chan edge_prop_tx_out_ch {
+    left valid_o : (logic@#1) @dyn - @dyn
+}
+
+proc edge_propagator_tx(
+    inp : left edge_prop_tx_in_ch,
+    out : right edge_prop_tx_out_ch
+) {
+    // 2-stage ack synchronizer: sync_a[1] then sync_a[0]
+    reg sync_a0 : logic;
+    reg sync_a1 : logic;
+    // Input register holds valid until ack
+    reg r_input_reg : logic;
+    // Staging regs for channel inputs
+    reg r_valid_i : logic;
+    reg r_ack_i : logic;
+
+    // Receive valid_i
+    loop {
+        let v = recv inp.valid_i >>
+        set r_valid_i := v >>
+        cycle 1
+    }
+
+    // Receive ack_i
+    loop {
+        let a = recv inp.ack_i >>
+        set r_ack_i := a >>
+        cycle 1
+    }
+
+    // Main logic: compute next state and update regs
+    // s_input_reg_next = valid_i | (r_input_reg & ~sync_a[0])
+    // sync_a <= {ack_i, sync_a[1]}
+    loop {
+        let next = *r_valid_i | (*r_input_reg & (~(*sync_a0))) >>
+        set r_input_reg := next >>
+        set sync_a0 := *sync_a1 >>
+        set sync_a1 := *r_ack_i >>
+        cycle 1
+    }
+
+    // Output: valid_o = r_input_reg
+    loop {
+        send out.valid_o (*r_input_reg) >>
+        cycle 1
+    }
+}

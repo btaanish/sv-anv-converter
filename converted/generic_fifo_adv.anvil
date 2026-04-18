@@ -1,0 +1,186 @@
+/* Hand-written Anvil for generic_fifo_adv.sv
+   Circular FIFO with push/pop handshake and synchronous clear.
+   3-state FSM: EMPTY, MIDDLE, FULL. Same as generic_fifo but with clear_i.
+   Concrete params: DATA_WIDTH=32, DATA_DEPTH=8, ADDR_DEPTH=3.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~130
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] DATA_WIDTH=32, DATA_DEPTH=8 hardcoded
+       - [MANUAL-CLEANUP-NEEDED] cluster_clock_gating omitted (FPGA path)
+       - [MANUAL-CLEANUP-NEEDED] clear_i resets FSM to EMPTY and zeroes pointers
+*/
+
+chan fifoadv_push_ch {
+    left data_i  : (logic[32]@#1) @dyn - @dyn,
+    left valid_i : (logic@#1) @dyn - @dyn,
+    right grant_o : (logic@#1) @dyn - @dyn
+}
+
+chan fifoadv_pop_ch {
+    right data_o  : (logic[32]@#1) @dyn - @dyn,
+    right valid_o : (logic@#1) @dyn - @dyn,
+    left grant_i  : (logic@#1) @dyn - @dyn
+}
+
+chan fifoadv_misc_ch {
+    left clear_i   : (logic@#1) @dyn - @dyn,
+    left test_mode : (logic@#1) @dyn - @dyn
+}
+
+type fifoadv_word = (logic[32]);
+
+proc generic_fifo_adv(
+    push : left fifoadv_push_ch,
+    pop  : left fifoadv_pop_ch,
+    misc : left fifoadv_misc_ch
+) {
+    // FSM state: 0=EMPTY, 1=FULL, 2=MIDDLE
+    reg cs : logic[2];
+    reg pop_ptr  : logic[3];
+    reg push_ptr : logic[3];
+    reg fifo_mem : fifoadv_word[8];
+
+    // Input staging regs
+    reg r_vi : logic;
+    reg r_di : logic[32];
+    reg r_gi : logic;
+    reg r_clear : logic;
+
+    // Next-state regs
+    reg next_cs : logic[2];
+    reg next_push : logic[3];
+    reg next_pop : logic[3];
+    reg r_do_write : logic;
+
+    // Output regs
+    reg r_grant : logic;
+    reg r_valid : logic;
+    reg r_data_o : logic[32];
+
+    // Receive push valid
+    loop {
+        let vi = recv push.valid_i >>
+        set r_vi := vi >>
+        cycle 1
+    }
+
+    // Receive push data
+    loop {
+        let di = recv push.data_i >>
+        set r_di := di >>
+        cycle 1
+    }
+
+    // Receive pop grant
+    loop {
+        let gi = recv pop.grant_i >>
+        set r_gi := gi >>
+        cycle 1
+    }
+
+    // Receive clear
+    loop {
+        let cl = recv misc.clear_i >>
+        set r_clear := cl >>
+        cycle 1
+    }
+
+    // Compute next state
+    loop {
+        let cur_cs = *cs >>
+        let cur_pop = *pop_ptr >>
+        let cur_push = *push_ptr >>
+        let vi = *r_vi >>
+        let gi = *r_gi >>
+        let clr = *r_clear >>
+
+        // If clear, reset to EMPTY with zero pointers
+        let ncs =
+            if clr { 2'd0 }
+            else {
+                if cur_cs == 2'd0 {
+                    if vi { 2'd2 } else { 2'd0 }
+                } else { if cur_cs == 2'd1 {
+                    if gi { 2'd2 } else { 2'd1 }
+                } else {
+                    let vi_gi = (<(vi)::logic[2]> << 2'd1) | <(gi)::logic[2]> >>
+                    if vi_gi == 2'd1 {
+                        if (cur_pop == cur_push - 3'd1) | ((cur_pop == 3'd7) & (cur_push == 3'd0)) {
+                            2'd0
+                        } else { 2'd2 }
+                    } else { if vi_gi == 2'd2 {
+                        if (cur_push == cur_pop - 3'd1) | ((cur_push == 3'd7) & (cur_pop == 3'd0)) {
+                            2'd1
+                        } else { 2'd2 }
+                    } else {
+                        2'd2
+                    }}
+                }}
+            } >>
+
+        let npush =
+            if clr { 3'd0 }
+            else {
+                if cur_cs == 2'd0 {
+                    if vi { if cur_push == 3'd7 { 3'd0 } else { cur_push + 3'd1 } }
+                    else { cur_push }
+                } else { if cur_cs == 2'd1 {
+                    cur_push
+                } else {
+                    let vi_gi2 = (<(vi)::logic[2]> << 2'd1) | <(gi)::logic[2]> >>
+                    if (vi_gi2 == 2'd2) | (vi_gi2 == 2'd3) {
+                        if cur_push == 3'd7 { 3'd0 } else { cur_push + 3'd1 }
+                    } else { cur_push }
+                }}
+            } >>
+
+        let npop =
+            if clr { 3'd0 }
+            else {
+                if cur_cs == 2'd0 {
+                    cur_pop
+                } else { if cur_cs == 2'd1 {
+                    if gi { if cur_pop == 3'd7 { 3'd0 } else { cur_pop + 3'd1 } }
+                    else { cur_pop }
+                } else {
+                    let vi_gi3 = (<(vi)::logic[2]> << 2'd1) | <(gi)::logic[2]> >>
+                    if (vi_gi3 == 2'd1) | (vi_gi3 == 2'd3) {
+                        if cur_pop == 3'd7 { 3'd0 } else { cur_pop + 3'd1 }
+                    } else { cur_pop }
+                }}
+            } >>
+
+        let grant_val = if cur_cs == 2'd1 { 1'd0 } else { 1'd1 } >>
+        let valid_val = if cur_cs == 2'd0 { 1'd0 } else { 1'd1 } >>
+
+        set next_cs := ncs >>
+        set next_push := npush >>
+        set next_pop := npop >>
+        set r_grant := grant_val >>
+        set r_valid := valid_val >>
+        set r_do_write := grant_val & vi >>
+        cycle 1
+    }
+
+    // Apply next state
+    loop {
+        set cs := *next_cs >>
+        set push_ptr := *next_push >>
+        set pop_ptr := *next_pop >>
+        if (*r_do_write) {
+            set fifo_mem[*push_ptr] := <(*r_di)::fifoadv_word>
+        } else { () } >>
+        set r_data_o := <(*fifo_mem[*pop_ptr])::logic[32]> >>
+        cycle 1
+    }
+
+    // Send outputs
+    loop {
+        send push.grant_o (*r_grant) >>
+        send pop.valid_o (*r_valid) >>
+        send pop.data_o (*r_data_o) >>
+        cycle 1
+    }
+}

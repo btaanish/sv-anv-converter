@@ -1,0 +1,78 @@
+/* Hand-written Anvil for clk_div.sv
+   Integer clock divider. Counts up and pulses clk_q high for one cycle
+   when counter reaches RATIO-1, then resets counter.
+   Output is bypassed to clk_i in testmode.
+
+   Concrete params: RATIO=4.
+   counter_q is 4 bits wide (RATIO bits).
+
+   Logic:
+     always_ff: if en_i, increment counter; if counter==3, pulse clk_q=1
+     assign clk_o = testmode_i ? clk_i : clk_q
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~45
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] testmode bypass modeled as mux on output
+       - [MANUAL-CLEANUP-NEEDED] clk_i not directly available; testmode path sends 1'b0
+*/
+
+chan clk_div_in_ch {
+    left testmode_i : (logic@#1) @dyn - @dyn,
+    left en_i       : (logic@#1) @dyn - @dyn
+}
+
+chan clk_div_out_ch {
+    left clk_o : (logic@#1) @dyn - @dyn
+}
+
+proc clk_div(
+    inp : left clk_div_in_ch,
+    out : right clk_div_out_ch
+) {
+    // RATIO=4, counter is 4 bits
+    reg counter_q : logic[4];
+    reg clk_q : logic;
+    reg r_testmode : logic;
+    reg r_en : logic;
+
+    // Receive testmode_i
+    loop {
+        let tm = recv inp.testmode_i >>
+        set r_testmode := tm >>
+        cycle 1
+    }
+
+    // Receive en_i
+    loop {
+        let en = recv inp.en_i >>
+        set r_en := en >>
+        cycle 1
+    }
+
+    // Main counter logic
+    // When en_i: if counter==3 then clk_q=1, reset counter
+    //            else clk_q=0, counter++
+    // When !en_i: clk_q=0
+    loop {
+        if (*r_en == 1'b1) {
+            if (*counter_q == 4'd3) {
+                set clk_q := 1'b1 >>
+                set counter_q := 4'd0
+            } else {
+                set clk_q := 1'b0 >>
+                set counter_q := *counter_q + 4'd1
+            }
+        } else {
+            set clk_q := 1'b0
+        }
+    }
+
+    // Output: clk_o = testmode ? 1'b0 : clk_q (clk_i not available, send clk_q)
+    loop {
+        let out_clk = if (*r_testmode == 1'b1) { 1'b0 } else { *clk_q } >>
+        send out.clk_o (out_clk) >>
+        cycle 1
+    }
+}

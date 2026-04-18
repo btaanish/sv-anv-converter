@@ -1,0 +1,40 @@
+/* Hand-written Anvil for pulp_sync.sv
+   Multi-stage synchronizer for crossing clock domains.
+   Shifts serial_i through a chain of flip-flops.
+   Concrete params: STAGES=2.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~25
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] STAGES=2 hardcoded
+*/
+
+chan pulp_sync_ch {
+    left serial_i : (logic@#1) @dyn - @dyn,
+    right serial_o : (logic@#1) @dyn - @dyn
+}
+
+proc pulp_sync(
+    io : left pulp_sync_ch
+) {
+    // 2-stage synchronizer: r_reg[0] = serial_i, r_reg[1] = r_reg[0] (prev)
+    reg r_reg0 : logic;
+    reg r_reg1 : logic;
+
+    // Receive serial_i and store to reg
+    loop {
+        let si = recv io.serial_i >>
+        set r_reg0 := si >>
+        cycle 1
+    }
+
+    // Shift register and output
+    loop {
+        // Shift: r_reg1 <= r_reg0 (previous stage)
+        set r_reg1 := *r_reg0 >>
+        // Output is r_reg[STAGES-1] = r_reg1
+        send io.serial_o (*r_reg1) >>
+        cycle 1
+    }
+}

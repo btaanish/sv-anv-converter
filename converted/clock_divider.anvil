@@ -1,0 +1,113 @@
+/* Hand-written Anvil for clock_divider.sv
+   Clock divider with async handshake for clock division ratio updates.
+   Contains a 4-state FSM (IDLE, STOP, WAIT, RELEASE) controlling clock gating.
+   Concrete params: DIV_INIT=0, BYPASS_INIT=1.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~80
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] Submodules (rstgen, pulp_sync_wedge, clock_divider_counter,
+         pulp_clock_gating) modeled as external channel inputs
+       - [MANUAL-CLEANUP-NEEDED] FPGA path taken (s_rstn_sync = rstn_i)
+       - [MANUAL-CLEANUP-NEEDED] ext_gate_sync 2-stage synchronizer inlined
+*/
+
+// Channel for clock divider inputs
+chan clkdiv_in_ch {
+    left test_mode    : (logic@#1) @dyn - @dyn,
+    left clk_gate_async : (logic@#1) @dyn - @dyn,
+    left clk_div_data : (logic[8]@#1) @dyn - @dyn,
+    left clk_div_valid : (logic@#1) @dyn - @dyn
+}
+
+// Channel for clock divider outputs
+chan clkdiv_out_ch {
+    left clk_div_ack : (logic@#1) @dyn - @dyn,
+    left clk_o       : (logic@#1) @dyn - @dyn
+}
+
+// Channel for submodule results (modeled as external inputs)
+chan clkdiv_sub_ch {
+    left clk_div_valid_sync : (logic@#1) @dyn - @dyn,
+    left clk_out_sub        : (logic@#1) @dyn - @dyn
+}
+
+proc clock_divider(
+    inp  : left clkdiv_in_ch,
+    sub  : left clkdiv_sub_ch,
+    out  : right clkdiv_out_ch
+) {
+    // FSM state: 0=IDLE, 1=STOP, 2=WAIT, 3=RELEASE
+    reg state : logic[2];
+    // Clock division data register
+    reg reg_clk_div : logic[8];
+    // 2-stage ext gate synchronizer
+    reg ext_gate_sync0 : logic;
+    reg ext_gate_sync1 : logic;
+    // FSM output registers
+    reg r_clock_enable : logic;
+    reg r_clk_div_valid : logic;
+    reg r_clk_div_ack : logic;
+    reg r_clk_o : logic;
+
+    // Receive submodule sync edge signal
+    loop {
+        let sync_edge = recv sub.clk_div_valid_sync >>
+        // Sample clk_div_data when valid sync edge detected
+        if sync_edge {
+            let data = recv inp.clk_div_data >>
+            set reg_clk_div := data
+        } else { () } >>
+        cycle 1
+    }
+
+    // Receive external gate async input
+    loop {
+        let gate_async = recv inp.clk_gate_async >>
+        set ext_gate_sync0 := gate_async >>
+        cycle 1
+    }
+
+    // Synchronizer stage 2
+    loop {
+        set ext_gate_sync1 := *ext_gate_sync0 >>
+        cycle 1
+    }
+
+    // FSM: compute next state and outputs
+    loop {
+        let cur_state = *state >>
+        // IDLE=0: clock_enable=1, clk_div_valid=0
+        // STOP=1: clock_enable=0, clk_div_valid=1
+        // WAIT=2: clock_enable=0, clk_div_valid=0
+        // RELEASE=3: clock_enable=0, clk_div_valid=0
+        let next_state =
+            if cur_state == 2'd0 {
+                // IDLE: check sync edge (modeled via reg_clk_div changes)
+                2'd0
+            } else { if cur_state == 2'd1 {
+                2'd2
+            } else { if cur_state == 2'd2 {
+                2'd3
+            } else {
+                2'd0
+            }}} >>
+        let clk_en = if cur_state == 2'd0 { 1'd1 } else { 1'd0 } >>
+        set r_clock_enable := clk_en >>
+        set state := next_state >>
+        cycle 1
+    }
+
+    // Output: clk_div_ack from submodule, clk_o gated
+    loop {
+        let sub_clk = recv sub.clk_out_sub >>
+        // clock_enable_gate = clock_enable & ext_gate_sync
+        let gate = *r_clock_enable & *ext_gate_sync1 >>
+        let out_clk = sub_clk & gate >>
+        set r_clk_o := out_clk >>
+        send out.clk_o (*r_clk_o) >>
+        send out.clk_div_ack (*r_clk_div_ack) >>
+        cycle 1
+    }
+}
