@@ -13,6 +13,19 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional, Tuple, Dict
 
+# Anvil reserved words — identifiers that cannot be used as proc/let names
+ANVIL_RESERVED = {
+    "chan", "proc", "reg", "set", "loop", "cycle", "recv", "send",
+    "let", "if", "else", "match", "logic", "left", "right", "sync",
+    "ready",
+}
+
+def _sanitize_ident(name: str) -> str:
+    """Append _m suffix if name collides with an Anvil reserved word."""
+    if name in ANVIL_RESERVED:
+        return name + "_m"
+    return name
+
 
 # ===========================================================================
 # LEXER
@@ -549,16 +562,40 @@ class Parser:
     def parse_module(self) -> SVModule:
         """Parse: module name import... #(params) (ports); body endmodule"""
         imports = []
-        # Skip to module keyword
+        # Check for package/interface (no module keyword) — generate stub
+        pkg_name = None
         while not self.at(TokenKind.MODULE) and not self.at(TokenKind.EOF):
-            # Collect imports before module
-            if self.at(TokenKind.IMPORT):
+            tok = self.peek()
+            if tok.kind == TokenKind.IDENT and tok.value in ("package", "interface"):
+                self.advance()
+                if self.at(TokenKind.IDENT):
+                    pkg_name = self.peek().value
+                    self.advance()
+                # Skip to EOF — package/interface bodies don't have module structure
+                while not self.at(TokenKind.EOF):
+                    self.advance()
+                break
+            elif self.at(TokenKind.IMPORT):
                 self.advance()
                 imp_text = self.collect_expr_until(TokenKind.SEMI)
                 imports.append(imp_text.strip())
                 self.match(TokenKind.SEMI)
             else:
                 self.advance()
+
+        if pkg_name or self.at(TokenKind.EOF):
+            # Package or interface — return stub module
+            name = pkg_name or "unnamed_pkg"
+            return SVModule(
+                name=name,
+                params=[],
+                ports=[],
+                signals=[],
+                assigns=[],
+                always_comb_blocks=[],
+                always_ff_blocks=[],
+                imports=imports,
+            )
 
         self.expect(TokenKind.MODULE)
         name_tok = self.expect(TokenKind.IDENT)
@@ -1243,9 +1280,10 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     # '0 → explicit zero
     e = re.sub(r"'\{default\s*:\s*'0\s*\}", "0", e)
     # Unsized literals: 'bXXX → 1'bXXX, 'hXXX → 1'hXXX, 'dXXX → 1'dXXX, 'oXXX → 1'oXXX
-    e = re.sub(r"'([bdho])([0-9a-fA-F_xXzZ]+)", r"1'\1\2", e)
-    e = re.sub(r"'0", "1'b0", e)
-    e = re.sub(r"'1", "1'b1", e)
+    # Negative lookbehind prevents matching inside already-sized literals like 1'b0
+    e = re.sub(r"(?<!\d)'([bdho])([0-9a-fA-F_xXzZ]+)", r"1'\1\2", e)
+    e = re.sub(r"(?<!\d)'0", "1'b0", e)
+    e = re.sub(r"(?<!\d)'1", "1'b1", e)
 
     # $signed(...) / $unsigned(...) → just the inner expression
     # Handle nested parens by matching balanced parentheses
@@ -1506,6 +1544,10 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
             return m.group(0)
     e = re.sub(r'logic\[([^\]]+)\]', _eval_type_width, e)
 
+    # Clean up remaining bare tick chars from SV struct literals '{...}
+    # Remove ' that aren't part of sized literals (N'bXX, N'hXX, etc.)
+    e = re.sub(r"(?<![0-9])'(?![bdhoBDHO0-9])", "", e)
+
     return e
 
 
@@ -1549,13 +1591,13 @@ def _convert_all_ternaries(expr: str) -> str:
 
 
 def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
-    """Split a ternary expression respecting brackets, braces, and angle brackets."""
+    """Split a ternary expression respecting brackets and braces (not angle brackets)."""
     depth = 0
     q_pos = -1
     for i, ch in enumerate(expr):
-        if ch in "([{<":
+        if ch in "([{":
             depth += 1
-        elif ch in ")]}>":
+        elif ch in ")]}":
             depth -= 1
         elif ch == "?" and depth == 0:
             q_pos = i
@@ -1570,9 +1612,9 @@ def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
     # Find the colon at depth 0
     depth = 0
     for i, ch in enumerate(rest):
-        if ch in "([{<":
+        if ch in "([{":
             depth += 1
-        elif ch in ")]}>":
+        elif ch in ")]}":
             depth -= 1
         elif ch == ":" and depth == 0:
             return (cond, rest[:i], rest[i + 1:])
@@ -1983,7 +2025,7 @@ def codegen(ir: AnvilIR) -> str:
     ep_parts = []
     for ep in ir.endpoints:
         ep_parts.append(f"    {ep.name} : {ep.side} {ep.chan_name}")
-    lines.append(f"proc {ir.module_name}(")
+    lines.append(f"proc {_sanitize_ident(ir.module_name)}(")
     lines.append(",\n".join(ep_parts))
     lines.append(") {")
 
@@ -2020,14 +2062,17 @@ def _emit_stmts(stmts: list, lines: List[str], indent: int):
                 expr = f"<({expr})::{stmt.cast_type}>"
             lines.append(f"{pad}send {stmt.endpoint}.{stmt.msg_name} ({expr}){seq}")
         elif isinstance(stmt, AnvilLetBinding):
-            lines.append(f"{pad}let {stmt.name} = {stmt.expr}{seq}")
+            lines.append(f"{pad}let {_sanitize_ident(stmt.name)} = {stmt.expr}{seq}")
         elif isinstance(stmt, AnvilSet):
             lines.append(f"{pad}set {stmt.reg_name} := {stmt.expr}{seq}")
         elif isinstance(stmt, AnvilCycle):
             lines.append(f"{pad}cycle {stmt.count}")
         elif isinstance(stmt, AnvilIf):
             lines.append(f"{pad}if ({_paren_cond(stmt.condition)}) {{")
-            _emit_stmts(stmt.then_stmts, lines, indent + 4)
+            if not stmt.then_stmts:
+                lines.append(f"{pad}    cycle 1")
+            else:
+                _emit_stmts(stmt.then_stmts, lines, indent + 4)
             if stmt.else_stmts:
                 lines.append(f"{pad}}} else {{")
                 _emit_stmts(stmt.else_stmts, lines, indent + 4)
@@ -2227,12 +2272,40 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     if len(expr_comment) > 80:
                         expr_comment = expr_comment[:77] + '...'
 
-                    new_lines.append(f"{indent}let {name} = <(0)::logic[{width}]> /* {expr_comment} */{suffix}")
+                    new_lines.append(f"{indent}let {_sanitize_ident(name)} = <(0)::logic[{width}]> /* {expr_comment} */{suffix}")
             else:
                 new_lines.append(line)
         else:
             new_lines.append(line)
-    return '\n'.join(new_lines)
+    result = '\n'.join(new_lines)
+    # Final cleanup: remove bare tick chars outside of comments and sized literals
+    cleaned_lines = []
+    for line in result.split('\n'):
+        # Split off inline comment
+        comment_start = line.find('/*')
+        if comment_start >= 0:
+            code_part = line[:comment_start]
+            comment_part = line[comment_start:]
+        else:
+            code_part = line
+            comment_part = ""
+        # Remove bare ticks from code (not part of sized literals)
+        code_part = re.sub(r"(?<![0-9])'(?![bdhoBDHO0-9])", "", code_part)
+        # Fix struct-like expressions in cast: <( field : value )::type> → <(0)::type>
+        # Colons inside <(...)::type> that aren't part of :: indicate SV struct syntax
+        def _fix_struct_cast(m):
+            inner = m.group(1)
+            typ = m.group(2)
+            # If inner contains bare colons (not ::), replace with 0
+            inner_no_scope = inner.replace("::", "@@SCOPE@@")
+            if ":" in inner_no_scope:
+                return f"<(0)::{typ}>"
+            return m.group(0)
+        code_part = re.sub(r'<\(([^)]*)\)::(logic\[\d+\])>', _fix_struct_cast, code_part)
+        # Fix SV type casts: <(type_name ( expr ))::type> → <(0)::type>
+        code_part = re.sub(r'<\((\w+_t\s*\([^)]*\))\)::(logic\[\d+\])>', r'<(0)::\2>', code_part)
+        cleaned_lines.append(code_part + comment_part)
+    return '\n'.join(cleaned_lines)
 
 
 def main():
