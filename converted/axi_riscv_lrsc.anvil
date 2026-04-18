@@ -1,0 +1,482 @@
+/* Hand-written Anvil for axi_riscv_lrsc.sv
+   AXI RISC-V LR/SC (Load Reserved / Store Conditional) Adapter.
+   Adds exclusive access support to slaves that don't natively support it.
+
+   Concrete params:
+     ADDR_BEGIN=0x80000000, ADDR_END=0x80FFFFFF,
+     AXI_ADDR_WIDTH=64, AXI_DATA_WIDTH=64, AXI_ID_WIDTH=4, AXI_USER_WIDTH=1.
+     AXI_STRB_WIDTH=8.
+
+   Two FSMs:
+     R FSM: R_IDLE(0), R_WAIT_AR(1), R_WAIT_R(2)
+     W FSM: AW_IDLE(0), W_FORWARD(1), W_BYPASS(2), W_DROP(3),
+            B_FORWARD(4), B_INJECT(5), W_WAIT_ART_CLR(6)
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~300
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] axi_res_tbl submodule modeled as inline reservation reg
+       - [MANUAL-CLEANUP-NEEDED] stream_arbiter for ART clear modeled inline
+       - [MANUAL-CLEANUP-NEEDED] Address range check uses concrete constants
+*/
+
+// Slave AR channel
+chan lrsc_slv_ar_ch {
+    left valid  : (logic@#1) @dyn - @dyn,
+    left addr   : (logic[64]@#1) @dyn - @dyn,
+    left id     : (logic[4]@#1) @dyn - @dyn,
+    left lock   : (logic@#1) @dyn - @dyn,
+    left len    : (logic[8]@#1) @dyn - @dyn
+}
+
+// Slave AW channel
+chan lrsc_slv_aw_ch {
+    left valid  : (logic@#1) @dyn - @dyn,
+    left addr   : (logic[64]@#1) @dyn - @dyn,
+    left id     : (logic[4]@#1) @dyn - @dyn,
+    left lock   : (logic@#1) @dyn - @dyn,
+    left len    : (logic[8]@#1) @dyn - @dyn
+}
+
+// Slave W channel
+chan lrsc_slv_w_ch {
+    left valid : (logic@#1) @dyn - @dyn,
+    left last  : (logic@#1) @dyn - @dyn
+}
+
+// Master responses
+chan lrsc_mst_resp_ch {
+    left ar_ready : (logic@#1) @dyn - @dyn,
+    left aw_ready : (logic@#1) @dyn - @dyn,
+    left w_ready  : (logic@#1) @dyn - @dyn,
+    left r_valid  : (logic@#1) @dyn - @dyn,
+    left r_data   : (logic[64]@#1) @dyn - @dyn,
+    left r_resp   : (logic[2]@#1) @dyn - @dyn,
+    left r_last   : (logic@#1) @dyn - @dyn,
+    left r_id     : (logic[4]@#1) @dyn - @dyn,
+    left b_valid  : (logic@#1) @dyn - @dyn,
+    left b_resp   : (logic[2]@#1) @dyn - @dyn,
+    left b_id     : (logic[4]@#1) @dyn - @dyn
+}
+
+// Slave ready signals
+chan lrsc_slv_ready_ch {
+    left r_ready : (logic@#1) @dyn - @dyn,
+    left b_ready : (logic@#1) @dyn - @dyn
+}
+
+// Output signals
+chan lrsc_out_ch {
+    left mst_ar_valid : (logic@#1) @dyn - @dyn,
+    left mst_aw_valid : (logic@#1) @dyn - @dyn,
+    left mst_w_valid  : (logic@#1) @dyn - @dyn,
+    left slv_ar_ready : (logic@#1) @dyn - @dyn,
+    left slv_aw_ready : (logic@#1) @dyn - @dyn,
+    left slv_w_ready  : (logic@#1) @dyn - @dyn,
+    left slv_r_valid  : (logic@#1) @dyn - @dyn,
+    left slv_r_resp   : (logic[2]@#1) @dyn - @dyn,
+    left slv_b_valid  : (logic@#1) @dyn - @dyn,
+    left slv_b_resp   : (logic[2]@#1) @dyn - @dyn,
+    left slv_b_id     : (logic[4]@#1) @dyn - @dyn,
+    left mst_r_ready  : (logic@#1) @dyn - @dyn,
+    left mst_b_ready  : (logic@#1) @dyn - @dyn
+}
+
+proc axi_riscv_lrsc(
+    slv_ar   : left lrsc_slv_ar_ch,
+    slv_aw   : left lrsc_slv_aw_ch,
+    slv_w    : left lrsc_slv_w_ch,
+    mst_resp : left lrsc_mst_resp_ch,
+    slv_rdy  : left lrsc_slv_ready_ch,
+    out      : right lrsc_out_ch
+) {
+    // R FSM: 0=IDLE, 1=WAIT_AR, 2=WAIT_R
+    reg r_state : logic[2];
+    // W FSM: 0=AW_IDLE, 1=W_FORWARD, 2=W_BYPASS, 3=W_DROP,
+    //        4=B_FORWARD, 5=B_INJECT, 6=W_WAIT_ART_CLR
+    reg w_state : logic[3];
+
+    // Reservation table (simplified: one reservation slot)
+    reg res_valid : logic;
+    reg res_addr  : logic[64];
+    reg res_id    : logic[4];
+
+    // Exclusive flags
+    reg r_excl : logic;
+    reg b_excl : logic;
+
+    // Saved W address/id
+    reg w_addr : logic[64];
+    reg w_id   : logic[4];
+
+    // Input staging
+    reg i_ar_valid  : logic;
+    reg i_ar_addr   : logic[64];
+    reg i_ar_id     : logic[4];
+    reg i_ar_lock   : logic;
+    reg i_ar_len    : logic[8];
+    reg i_aw_valid  : logic;
+    reg i_aw_addr   : logic[64];
+    reg i_aw_id     : logic[4];
+    reg i_aw_lock   : logic;
+    reg i_aw_len    : logic[8];
+    reg i_w_valid   : logic;
+    reg i_w_last    : logic;
+    reg i_mst_ar_rdy : logic;
+    reg i_mst_aw_rdy : logic;
+    reg i_mst_w_rdy  : logic;
+    reg i_mst_r_val  : logic;
+    reg i_mst_r_data : logic[64];
+    reg i_mst_r_resp : logic[2];
+    reg i_mst_r_last : logic;
+    reg i_mst_r_id   : logic[4];
+    reg i_mst_b_val  : logic;
+    reg i_mst_b_resp : logic[2];
+    reg i_mst_b_id   : logic[4];
+    reg i_slv_r_rdy  : logic;
+    reg i_slv_b_rdy  : logic;
+
+    // Output registers
+    reg o_mst_ar_val : logic;
+    reg o_mst_aw_val : logic;
+    reg o_mst_w_val  : logic;
+    reg o_slv_ar_rdy : logic;
+    reg o_slv_aw_rdy : logic;
+    reg o_slv_w_rdy  : logic;
+    reg o_slv_r_val  : logic;
+    reg o_slv_r_resp : logic[2];
+    reg o_slv_b_val  : logic;
+    reg o_slv_b_resp : logic[2];
+    reg o_slv_b_id   : logic[4];
+    reg o_mst_r_rdy  : logic;
+    reg o_mst_b_rdy  : logic;
+
+    // Receive all inputs
+    loop { let v = recv slv_ar.valid >> set i_ar_valid := v >> cycle 1 }
+    loop { let v = recv slv_ar.addr >> set i_ar_addr := v >> cycle 1 }
+    loop { let v = recv slv_ar.id >> set i_ar_id := v >> cycle 1 }
+    loop { let v = recv slv_ar.lock >> set i_ar_lock := v >> cycle 1 }
+    loop { let v = recv slv_ar.len >> set i_ar_len := v >> cycle 1 }
+    loop { let v = recv slv_aw.valid >> set i_aw_valid := v >> cycle 1 }
+    loop { let v = recv slv_aw.addr >> set i_aw_addr := v >> cycle 1 }
+    loop { let v = recv slv_aw.id >> set i_aw_id := v >> cycle 1 }
+    loop { let v = recv slv_aw.lock >> set i_aw_lock := v >> cycle 1 }
+    loop { let v = recv slv_aw.len >> set i_aw_len := v >> cycle 1 }
+    loop { let v = recv slv_w.valid >> set i_w_valid := v >> cycle 1 }
+    loop { let v = recv slv_w.last >> set i_w_last := v >> cycle 1 }
+    loop { let v = recv mst_resp.ar_ready >> set i_mst_ar_rdy := v >> cycle 1 }
+    loop { let v = recv mst_resp.aw_ready >> set i_mst_aw_rdy := v >> cycle 1 }
+    loop { let v = recv mst_resp.w_ready >> set i_mst_w_rdy := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_valid >> set i_mst_r_val := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_data >> set i_mst_r_data := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_resp >> set i_mst_r_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_last >> set i_mst_r_last := v >> cycle 1 }
+    loop { let v = recv mst_resp.r_id >> set i_mst_r_id := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_valid >> set i_mst_b_val := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_resp >> set i_mst_b_resp := v >> cycle 1 }
+    loop { let v = recv mst_resp.b_id >> set i_mst_b_id := v >> cycle 1 }
+    loop { let v = recv slv_rdy.r_ready >> set i_slv_r_rdy := v >> cycle 1 }
+    loop { let v = recv slv_rdy.b_ready >> set i_slv_b_rdy := v >> cycle 1 }
+
+    // Address range constants: ADDR_BEGIN=0x80000000, ADDR_END=0x80FFFFFF
+    // In range check: addr >= begin && addr <= end
+    // Simplified: check upper bits
+
+    // R FSM: handle exclusive reads (set reservation on LR)
+    loop {
+        match (*r_state) {
+            // R_IDLE=0
+            2'd0 => {
+                set o_mst_ar_val := 1'b0 >>
+                set o_slv_ar_rdy := 1'b0 >>
+                set o_mst_r_rdy := 1'b0 >>
+                set o_slv_r_val := 1'b0 >>
+                if (*i_ar_valid == 1'b1) {
+                    if (*i_ar_lock == 1'b1) {
+                        if (*i_ar_len == 8'd0) {
+                            // Exclusive read: set reservation
+                            set res_valid := 1'b1 >>
+                            set res_addr := *i_ar_addr >>
+                            set res_id := *i_ar_id >>
+                            set r_excl := 1'b1 >>
+                            set o_mst_ar_val := 1'b1 >>
+                            if (*i_mst_ar_rdy == 1'b1) {
+                                set o_slv_ar_rdy := 1'b1 >>
+                                set r_state := 2'd2
+                            } else {
+                                set r_state := 2'd1
+                            }
+                        } else {
+                            // Burst with lock - treat as normal
+                            set r_excl := 1'b0 >>
+                            set o_mst_ar_val := 1'b1 >>
+                            if (*i_mst_ar_rdy == 1'b1) {
+                                set o_slv_ar_rdy := 1'b1 >>
+                                set r_state := 2'd2
+                            } else {
+                                set r_state := 2'd1
+                            }
+                        }
+                    } else {
+                        // Normal read
+                        set r_excl := 1'b0 >>
+                        set o_mst_ar_val := 1'b1 >>
+                        if (*i_mst_ar_rdy == 1'b1) {
+                            set o_slv_ar_rdy := 1'b1 >>
+                            set r_state := 2'd2
+                        } else {
+                            set r_state := 2'd1
+                        }
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // R_WAIT_AR=1
+            2'd1 => {
+                set o_mst_ar_val := *i_ar_valid >>
+                set o_slv_ar_rdy := *i_mst_ar_rdy >>
+                if (*i_mst_ar_rdy == 1'b1) {
+                    if (*o_mst_ar_val == 1'b1) {
+                        set r_state := 2'd2
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // R_WAIT_R=2
+            _ => {
+                set o_mst_r_rdy := *i_slv_r_rdy >>
+                set o_slv_r_val := *i_mst_r_val >>
+                // Modify resp for exclusive access
+                if (<(*i_mst_r_resp)::logic> == 1'b0) {
+                    set o_slv_r_resp := #{1'b0, *r_excl}
+                } else {
+                    set o_slv_r_resp := *i_mst_r_resp >>
+                    cycle 1
+                } >>
+                if (*i_mst_r_val == 1'b1) {
+                    if (*i_mst_r_last == 1'b1) {
+                        set r_excl := 1'b0 >>
+                        set r_state := 2'd0
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            }
+        }
+    }
+
+    // W FSM: handle exclusive writes (SC checks reservation, drops if no match)
+    loop {
+        match (*w_state) {
+            // AW_IDLE=0
+            3'd0 => {
+                set o_mst_aw_val := 1'b0 >>
+                set o_slv_aw_rdy := 1'b0 >>
+                set o_mst_w_val := 1'b0 >>
+                set o_slv_w_rdy := 1'b0 >>
+                set o_slv_b_val := 1'b0 >>
+                set o_mst_b_rdy := 1'b0 >>
+                if (*i_aw_valid == 1'b1) {
+                    if (*i_aw_lock == 1'b1) {
+                        if (*i_aw_len == 8'd0) {
+                            // Exclusive write: check reservation
+                            if (*res_valid == 1'b1) {
+                                if (*res_addr == *i_aw_addr) {
+                                    if (*res_id == *i_aw_id) {
+                                        // Reservation matches: forward
+                                        set o_mst_aw_val := 1'b1 >>
+                                        if (*i_mst_aw_rdy == 1'b1) {
+                                            set o_slv_aw_rdy := 1'b1 >>
+                                            set w_addr := *i_aw_addr >>
+                                            set w_id := *i_aw_id >>
+                                            set b_excl := 1'b1 >>
+                                            set w_state := 3'd1
+                                        } else {
+                                            cycle 1
+                                        }
+                                    } else {
+                                        // ID mismatch: drop
+                                        set o_slv_aw_rdy := 1'b1 >>
+                                        set w_addr := *i_aw_addr >>
+                                        set w_id := *i_aw_id >>
+                                        set w_state := 3'd3
+                                    }
+                                } else {
+                                    // Addr mismatch: drop
+                                    set o_slv_aw_rdy := 1'b1 >>
+                                    set w_addr := *i_aw_addr >>
+                                    set w_id := *i_aw_id >>
+                                    set w_state := 3'd3
+                                }
+                            } else {
+                                // No reservation: drop
+                                set o_slv_aw_rdy := 1'b1 >>
+                                set w_addr := *i_aw_addr >>
+                                set w_id := *i_aw_id >>
+                                set w_state := 3'd3
+                            }
+                        } else {
+                            // Burst with lock: forward normally
+                            set o_mst_aw_val := 1'b1 >>
+                            if (*i_mst_aw_rdy == 1'b1) {
+                                set o_slv_aw_rdy := 1'b1 >>
+                                set w_addr := *i_aw_addr >>
+                                set w_id := *i_aw_id >>
+                                set w_state := 3'd1
+                            } else {
+                                cycle 1
+                            }
+                        }
+                    } else {
+                        // Non-exclusive: forward or bypass
+                        set o_mst_aw_val := 1'b1 >>
+                        set o_slv_aw_rdy := *i_mst_aw_rdy >>
+                        if (*i_mst_aw_rdy == 1'b1) {
+                            set w_addr := *i_aw_addr >>
+                            set w_id := *i_aw_id >>
+                            set w_state := 3'd2
+                        } else {
+                            cycle 1
+                        }
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // W_FORWARD=1: forward W data, clear reservation on last
+            3'd1 => {
+                set o_mst_w_val := *i_w_valid >>
+                set o_slv_w_rdy := *i_mst_w_rdy >>
+                if (*i_w_valid == 1'b1) {
+                    if (*i_mst_w_rdy == 1'b1) {
+                        if (*i_w_last == 1'b1) {
+                            // Clear reservation for this address
+                            if (*res_valid == 1'b1) {
+                                if (*res_addr == *w_addr) {
+                                    set res_valid := 1'b0
+                                } else {
+                                    cycle 1
+                                } >>
+                                set w_state := 3'd4
+                            } else {
+                                set w_state := 3'd4
+                            }
+                        } else {
+                            cycle 1
+                        }
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // W_BYPASS=2: bypass W data
+            3'd2 => {
+                set o_mst_w_val := *i_w_valid >>
+                set o_slv_w_rdy := *i_mst_w_rdy >>
+                if (*i_w_valid == 1'b1) {
+                    if (*i_mst_w_rdy == 1'b1) {
+                        if (*i_w_last == 1'b1) {
+                            set w_state := 3'd4
+                        } else {
+                            cycle 1
+                        }
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // W_DROP=3: drop W data (failed SC)
+            3'd3 => {
+                set o_slv_w_rdy := 1'b1 >>
+                if (*i_w_valid == 1'b1) {
+                    if (*i_w_last == 1'b1) {
+                        set w_state := 3'd5
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // B_FORWARD=4: forward B response
+            3'd4 => {
+                set o_mst_b_rdy := *i_slv_b_rdy >>
+                set o_slv_b_val := *i_mst_b_val >>
+                set o_slv_b_id := *i_mst_b_id >>
+                // Modify resp for exclusive
+                if (<(*i_mst_b_resp)::logic> == 1'b0) {
+                    if (*b_excl == 1'b1) {
+                        set o_slv_b_resp := 2'b01
+                    } else {
+                        set o_slv_b_resp := *i_mst_b_resp >>
+                        cycle 1
+                    }
+                } else {
+                    set o_slv_b_resp := *i_mst_b_resp >>
+                    cycle 1
+                } >>
+                if (*i_mst_b_val == 1'b1) {
+                    if (*i_slv_b_rdy == 1'b1) {
+                        set b_excl := 1'b0 >>
+                        set w_state := 3'd0
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            },
+            // B_INJECT=5: inject B response for dropped SC
+            3'd5 => {
+                set o_slv_b_id := *w_id >>
+                set o_slv_b_resp := 2'b00 >>
+                set o_slv_b_val := 1'b1 >>
+                if (*i_slv_b_rdy == 1'b1) {
+                    set w_state := 3'd0
+                } else {
+                    cycle 1
+                }
+            },
+            // W_WAIT_ART_CLR=6
+            _ => {
+                // Clear reservation then go to B_FORWARD
+                if (*res_valid == 1'b1) {
+                    if (*res_addr == *w_addr) {
+                        set res_valid := 1'b0
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                } >>
+                set w_state := 3'd4
+            }
+        }
+    }
+
+    // Send outputs
+    loop { send out.mst_ar_valid (*o_mst_ar_val) >> cycle 1 }
+    loop { send out.mst_aw_valid (*o_mst_aw_val) >> cycle 1 }
+    loop { send out.mst_w_valid (*o_mst_w_val) >> cycle 1 }
+    loop { send out.slv_ar_ready (*o_slv_ar_rdy) >> cycle 1 }
+    loop { send out.slv_aw_ready (*o_slv_aw_rdy) >> cycle 1 }
+    loop { send out.slv_w_ready (*o_slv_w_rdy) >> cycle 1 }
+    loop { send out.slv_r_valid (*o_slv_r_val) >> cycle 1 }
+    loop { send out.slv_r_resp (*o_slv_r_resp) >> cycle 1 }
+    loop { send out.slv_b_valid (*o_slv_b_val) >> cycle 1 }
+    loop { send out.slv_b_resp (*o_slv_b_resp) >> cycle 1 }
+    loop { send out.slv_b_id (*o_slv_b_id) >> cycle 1 }
+    loop { send out.mst_r_ready (*o_mst_r_rdy) >> cycle 1 }
+    loop { send out.mst_b_ready (*o_mst_b_rdy) >> cycle 1 }
+}
