@@ -1,0 +1,455 @@
+/* Hand-written Anvil for cva6_rvfi.sv
+   RVFI trace module: unpacks pipeline probes, tracks issue/commit,
+   packs RVFI outputs for formal verification.
+   Concrete params: XLEN=64, VLEN=64, PLEN=56, NrIssuePorts=1,
+   NrCommitPorts=2, NR_SB_ENTRIES=8, TRANS_ID_BITS=3, NrWbPorts=5,
+   REG_ADDR_SIZE=5, STORE_WB=3.
+   SV struct types flattened to concrete logic widths.
+   CSR macro connections stubbed — outputs zeroed.
+   Clock/reset implicit in Anvil. */
+
+chan rvfi_in_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left issue_instr_ack : (logic@#1) @dyn - @dyn,
+    left fetch_entry_valid : (logic@#1) @dyn - @dyn,
+    left instruction : (logic[32]@#1) @dyn - @dyn,
+    left is_compressed : (logic@#1) @dyn - @dyn,
+    left issue_pointer : (logic[3]@#1) @dyn - @dyn,
+    left commit_pointer0 : (logic[3]@#1) @dyn - @dyn,
+    left commit_pointer1 : (logic[3]@#1) @dyn - @dyn,
+    left flush_unissued : (logic@#1) @dyn - @dyn,
+    left decoded_valid : (logic@#1) @dyn - @dyn,
+    left decoded_ack : (logic@#1) @dyn - @dyn,
+    left rs1 : (logic[64]@#1) @dyn - @dyn,
+    left rs2 : (logic[64]@#1) @dyn - @dyn,
+    left commit_pc0 : (logic[64]@#1) @dyn - @dyn,
+    left commit_pc1 : (logic[64]@#1) @dyn - @dyn,
+    left commit_op0 : (logic[8]@#1) @dyn - @dyn,
+    left commit_op1 : (logic[8]@#1) @dyn - @dyn,
+    left commit_rs1_0 : (logic[5]@#1) @dyn - @dyn,
+    left commit_rs1_1 : (logic[5]@#1) @dyn - @dyn,
+    left commit_rs2_0 : (logic[5]@#1) @dyn - @dyn,
+    left commit_rs2_1 : (logic[5]@#1) @dyn - @dyn,
+    left commit_rd0 : (logic[5]@#1) @dyn - @dyn,
+    left commit_rd1 : (logic[5]@#1) @dyn - @dyn,
+    left commit_result0 : (logic[64]@#1) @dyn - @dyn,
+    left commit_result1 : (logic[64]@#1) @dyn - @dyn,
+    left commit_valid0 : (logic@#1) @dyn - @dyn,
+    left commit_valid1 : (logic@#1) @dyn - @dyn,
+    left commit_drop0 : (logic@#1) @dyn - @dyn,
+    left commit_drop1 : (logic@#1) @dyn - @dyn,
+    left ex_cause : (logic[64]@#1) @dyn - @dyn,
+    left ex_valid : (logic@#1) @dyn - @dyn,
+    left priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left lsu_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left lsu_fu : (logic[4]@#1) @dyn - @dyn,
+    left lsu_be : (logic[8]@#1) @dyn - @dyn,
+    left lsu_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left wbdata_store : (logic[64]@#1) @dyn - @dyn,
+    left commit_ack0 : (logic@#1) @dyn - @dyn,
+    left commit_ack1 : (logic@#1) @dyn - @dyn,
+    left mem_paddr : (logic[56]@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left wdata0 : (logic[64]@#1) @dyn - @dyn,
+    left wdata1 : (logic[64]@#1) @dyn - @dyn,
+    left branch_valid : (logic@#1) @dyn - @dyn,
+    left is_taken : (logic@#1) @dyn - @dyn,
+    left branch_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left tval : (logic[64]@#1) @dyn - @dyn,
+    left cycle_q : (logic[64]@#1) @dyn - @dyn
+}
+
+chan rvfi_out_ch {
+    left instr0_valid : (logic@#1) @dyn - @dyn,
+    left instr0_insn : (logic[32]@#1) @dyn - @dyn,
+    left instr0_trap : (logic@#1) @dyn - @dyn,
+    left instr0_cause : (logic[64]@#1) @dyn - @dyn,
+    left instr0_mode : (logic[2]@#1) @dyn - @dyn,
+    left instr0_ixl : (logic[2]@#1) @dyn - @dyn,
+    left instr0_rs1_addr : (logic[5]@#1) @dyn - @dyn,
+    left instr0_rs2_addr : (logic[5]@#1) @dyn - @dyn,
+    left instr0_rd_addr : (logic[5]@#1) @dyn - @dyn,
+    left instr0_rd_wdata : (logic[64]@#1) @dyn - @dyn,
+    left instr0_pc : (logic[64]@#1) @dyn - @dyn,
+    left instr0_mem_addr : (logic[64]@#1) @dyn - @dyn,
+    left instr0_mem_wmask : (logic[8]@#1) @dyn - @dyn,
+    left instr0_mem_wdata : (logic[64]@#1) @dyn - @dyn,
+    left instr0_mem_rmask : (logic[8]@#1) @dyn - @dyn,
+    left instr0_mem_rdata : (logic[64]@#1) @dyn - @dyn,
+    left instr0_rs1_rdata : (logic[64]@#1) @dyn - @dyn,
+    left instr0_rs2_rdata : (logic[64]@#1) @dyn - @dyn,
+    left instr1_valid : (logic@#1) @dyn - @dyn,
+    left instr1_insn : (logic[32]@#1) @dyn - @dyn,
+    left instr1_trap : (logic@#1) @dyn - @dyn,
+    left instr1_cause : (logic[64]@#1) @dyn - @dyn,
+    left instr1_mode : (logic[2]@#1) @dyn - @dyn,
+    left instr1_ixl : (logic[2]@#1) @dyn - @dyn,
+    left instr1_rs1_addr : (logic[5]@#1) @dyn - @dyn,
+    left instr1_rs2_addr : (logic[5]@#1) @dyn - @dyn,
+    left instr1_rd_addr : (logic[5]@#1) @dyn - @dyn,
+    left instr1_rd_wdata : (logic[64]@#1) @dyn - @dyn,
+    left instr1_pc : (logic[64]@#1) @dyn - @dyn,
+    left instr1_mem_addr : (logic[64]@#1) @dyn - @dyn,
+    left instr1_mem_wmask : (logic[8]@#1) @dyn - @dyn,
+    left instr1_mem_wdata : (logic[64]@#1) @dyn - @dyn,
+    left instr1_mem_rmask : (logic[8]@#1) @dyn - @dyn,
+    left instr1_mem_rdata : (logic[64]@#1) @dyn - @dyn,
+    left instr1_rs1_rdata : (logic[64]@#1) @dyn - @dyn,
+    left instr1_rs2_rdata : (logic[64]@#1) @dyn - @dyn,
+    left iti_valid0 : (logic@#1) @dyn - @dyn,
+    left iti_valid1 : (logic@#1) @dyn - @dyn,
+    left iti_pc0 : (logic[64]@#1) @dyn - @dyn,
+    left iti_pc1 : (logic[64]@#1) @dyn - @dyn,
+    left iti_op0 : (logic[8]@#1) @dyn - @dyn,
+    left iti_op1 : (logic[8]@#1) @dyn - @dyn,
+    left iti_branch_valid0 : (logic@#1) @dyn - @dyn,
+    left iti_branch_valid1 : (logic@#1) @dyn - @dyn,
+    left iti_is_taken0 : (logic@#1) @dyn - @dyn,
+    left iti_is_taken1 : (logic@#1) @dyn - @dyn,
+    left iti_compressed0 : (logic@#1) @dyn - @dyn,
+    left iti_compressed1 : (logic@#1) @dyn - @dyn,
+    left iti_ex_valid : (logic@#1) @dyn - @dyn,
+    left iti_cycles : (logic[64]@#1) @dyn - @dyn,
+    left iti_cause : (logic[64]@#1) @dyn - @dyn,
+    left iti_tval : (logic[64]@#1) @dyn - @dyn,
+    left iti_priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left csr_out : (logic[64]@#1) @dyn - @dyn
+}
+
+type sb_entry_64 = (logic[64]);
+type sb_entry_32 = (logic[32]);
+type sb_entry_8 = (logic[8]);
+type sb_entry_1 = (logic);
+
+proc cva6_rvfi(
+    inp : left rvfi_in_ch,
+    out : right rvfi_out_ch
+) {
+    /* Input staging registers */
+    reg r_flush : logic;
+    reg r_issue_ack : logic;
+    reg r_fev : logic;
+    reg r_instr : logic[32];
+    reg r_comp : logic;
+    reg r_iptr : logic[3];
+    reg r_cptr0 : logic[3];
+    reg r_cptr1 : logic[3];
+    reg r_fui : logic;
+    reg r_dv : logic;
+    reg r_da : logic;
+    reg r_rs1 : logic[64];
+    reg r_rs2 : logic[64];
+    reg r_cpc0 : logic[64];
+    reg r_cpc1 : logic[64];
+    reg r_cop0 : logic[8];
+    reg r_cop1 : logic[8];
+    reg r_crs1_0 : logic[5];
+    reg r_crs1_1 : logic[5];
+    reg r_crs2_0 : logic[5];
+    reg r_crs2_1 : logic[5];
+    reg r_crd0 : logic[5];
+    reg r_crd1 : logic[5];
+    reg r_cres0 : logic[64];
+    reg r_cres1 : logic[64];
+    reg r_cvalid0 : logic;
+    reg r_cvalid1 : logic;
+    reg r_cdrop0 : logic;
+    reg r_cdrop1 : logic;
+    reg r_excause : logic[64];
+    reg r_exvalid : logic;
+    reg r_priv : logic[2];
+    reg r_lva : logic[64];
+    reg r_lfu : logic[4];
+    reg r_lbe : logic[8];
+    reg r_ltid : logic[3];
+    reg r_wbs : logic[64];
+    reg r_cack0 : logic;
+    reg r_cack1 : logic;
+    reg r_mpa : logic[56];
+    reg r_dbg : logic;
+    reg r_wd0 : logic[64];
+    reg r_wd1 : logic[64];
+    reg r_bv : logic;
+    reg r_bt : logic;
+    reg r_btid : logic[3];
+    reg r_tval : logic[64];
+    reg r_cyc : logic[64];
+
+    /* Issue queue: valid + instruction + compressed (NrIssuePorts=1) */
+    reg iq_valid : logic;
+    reg iq_instr : logic[32];
+    reg iq_comp : logic;
+
+    /* Scoreboard memory: 8 entries (NR_SB_ENTRIES=8) */
+    reg sb_rs1 : sb_entry_64[8];
+    reg sb_rs2 : sb_entry_64[8];
+    reg sb_laddr : sb_entry_64[8];
+    reg sb_rmask : sb_entry_8[8];
+    reg sb_wmask : sb_entry_8[8];
+    reg sb_wdata : sb_entry_64[8];
+    reg sb_insn : sb_entry_32[8];
+    reg sb_bv : sb_entry_1[8];
+    reg sb_bt : sb_entry_1[8];
+    reg sb_ic : sb_entry_1[8];
+
+    /* RVFI interrupt tracking */
+    reg rvfi_intr0 : logic[64];
+    reg rvfi_intr1 : logic[64];
+
+    /* Recv loop: receive and stage all inputs */
+    loop {
+        let v0 = recv inp.flush >>
+        set r_flush := v0 >>
+        let v1 = recv inp.issue_instr_ack >>
+        set r_issue_ack := v1 >>
+        let v2 = recv inp.fetch_entry_valid >>
+        set r_fev := v2 >>
+        let v3 = recv inp.instruction >>
+        set r_instr := v3 >>
+        let v4 = recv inp.is_compressed >>
+        set r_comp := v4 >>
+        let v5 = recv inp.issue_pointer >>
+        set r_iptr := v5 >>
+        let v6 = recv inp.commit_pointer0 >>
+        set r_cptr0 := v6 >>
+        let v7 = recv inp.commit_pointer1 >>
+        set r_cptr1 := v7 >>
+        let v8 = recv inp.flush_unissued >>
+        set r_fui := v8 >>
+        let v9 = recv inp.decoded_valid >>
+        set r_dv := v9 >>
+        let v10 = recv inp.decoded_ack >>
+        set r_da := v10 >>
+        let v11 = recv inp.rs1 >>
+        set r_rs1 := v11 >>
+        let v12 = recv inp.rs2 >>
+        set r_rs2 := v12 >>
+        let v13 = recv inp.commit_pc0 >>
+        set r_cpc0 := v13 >>
+        let v14 = recv inp.commit_pc1 >>
+        set r_cpc1 := v14 >>
+        let v15 = recv inp.commit_op0 >>
+        set r_cop0 := v15 >>
+        let v16 = recv inp.commit_op1 >>
+        set r_cop1 := v16 >>
+        let v17 = recv inp.commit_rs1_0 >>
+        set r_crs1_0 := v17 >>
+        let v18 = recv inp.commit_rs1_1 >>
+        set r_crs1_1 := v18 >>
+        let v19 = recv inp.commit_rs2_0 >>
+        set r_crs2_0 := v19 >>
+        let v20 = recv inp.commit_rs2_1 >>
+        set r_crs2_1 := v20 >>
+        let v21 = recv inp.commit_rd0 >>
+        set r_crd0 := v21 >>
+        let v22 = recv inp.commit_rd1 >>
+        set r_crd1 := v22 >>
+        let v23 = recv inp.commit_result0 >>
+        set r_cres0 := v23 >>
+        let v24 = recv inp.commit_result1 >>
+        set r_cres1 := v24 >>
+        let v25 = recv inp.commit_valid0 >>
+        set r_cvalid0 := v25 >>
+        let v26 = recv inp.commit_valid1 >>
+        set r_cvalid1 := v26 >>
+        let v27 = recv inp.commit_drop0 >>
+        set r_cdrop0 := v27 >>
+        let v28 = recv inp.commit_drop1 >>
+        set r_cdrop1 := v28 >>
+        let v29 = recv inp.ex_cause >>
+        set r_excause := v29 >>
+        let v30 = recv inp.ex_valid >>
+        set r_exvalid := v30 >>
+        let v31 = recv inp.priv_lvl >>
+        set r_priv := v31 >>
+        let v32 = recv inp.lsu_vaddr >>
+        set r_lva := v32 >>
+        let v33 = recv inp.lsu_fu >>
+        set r_lfu := v33 >>
+        let v34 = recv inp.lsu_be >>
+        set r_lbe := v34 >>
+        let v35 = recv inp.lsu_trans_id >>
+        set r_ltid := v35 >>
+        let v36 = recv inp.wbdata_store >>
+        set r_wbs := v36 >>
+        let v37 = recv inp.commit_ack0 >>
+        set r_cack0 := v37 >>
+        let v38 = recv inp.commit_ack1 >>
+        set r_cack1 := v38 >>
+        let v39 = recv inp.mem_paddr >>
+        set r_mpa := v39 >>
+        let v40 = recv inp.debug_mode >>
+        set r_dbg := v40 >>
+        let v41 = recv inp.wdata0 >>
+        set r_wd0 := v41 >>
+        let v42 = recv inp.wdata1 >>
+        set r_wd1 := v42 >>
+        let v43 = recv inp.branch_valid >>
+        set r_bv := v43 >>
+        let v44 = recv inp.is_taken >>
+        set r_bt := v44 >>
+        let v45 = recv inp.branch_trans_id >>
+        set r_btid := v45 >>
+        let v46 = recv inp.tval >>
+        set r_tval := v46 >>
+        let v47 = recv inp.cycle_q >>
+        set r_cyc := v47
+    }
+
+    /* Issue queue update loop (NrIssuePorts=1) */
+    loop {
+        /* Truncated instruction for compressed */
+        let trunc = if (*r_comp == 1'b1) {
+            <(*r_instr)::logic[16]>
+        } else {
+            <(*r_instr)::logic[16]>
+        } >>
+
+        /* Clear on ack */
+        let nv = if (*r_issue_ack == 1'b1) { 1'b0 } else { *iq_valid } >>
+        /* Fill if not valid */
+        let nv2 = if (nv == 1'b0) { *r_fev } else { nv } >>
+        let ni = if (nv == 1'b0) { *r_instr } else { *iq_instr } >>
+        let nc = if (nv == 1'b0) { *r_comp } else { *iq_comp } >>
+        /* Flush clears valid */
+        let nv_final = if (*r_flush == 1'b1) { 1'b0 } else { nv2 } >>
+
+        set iq_valid := nv_final;
+        set iq_instr := ni;
+        set iq_comp := nc
+    }
+
+    /* Scoreboard update loop */
+    loop {
+        /* Issue: write rs1/rs2 and instruction into scoreboard at issue_pointer */
+        if (*r_dv == 1'b1 & *r_da == 1'b1 & *r_fui == 1'b0) {
+            set sb_rs1[<(*r_iptr)::logic[3]>] := *r_rs1;
+            set sb_rs2[<(*r_iptr)::logic[3]>] := *r_rs2;
+            set sb_laddr[<(*r_iptr)::logic[3]>] := 64'd0;
+            set sb_rmask[<(*r_iptr)::logic[3]>] := 8'd0;
+            set sb_wmask[<(*r_iptr)::logic[3]>] := 8'd0;
+            set sb_wdata[<(*r_iptr)::logic[3]>] := 64'd0;
+            set sb_insn[<(*r_iptr)::logic[3]>] := *iq_instr;
+            set sb_bv[<(*r_iptr)::logic[3]>] := 1'b0;
+            set sb_bt[<(*r_iptr)::logic[3]>] := 1'b0;
+            set sb_ic[<(*r_iptr)::logic[3]>] := *iq_comp
+        } else {
+            cycle 1
+        }
+    }
+
+    /* Branch/LSU update loop */
+    loop {
+        if (*r_bv == 1'b1) {
+            set sb_bv[<(*r_btid)::logic[3]>] := 1'b1;
+            set sb_bt[<(*r_btid)::logic[3]>] := *r_bt
+        } else {
+            cycle 1
+        }
+    }
+
+    loop {
+        /* LOAD: store lsu_addr and rmask */
+        let is_load = if (*r_lfu == 4'd7) { 1'b1 } else { 1'b0 } >>
+        let is_store = if (*r_lfu == 4'd8) { 1'b1 } else { 1'b0 } >>
+        if (is_load == 1'b1) {
+            set sb_laddr[<(*r_ltid)::logic[3]>] := *r_lva;
+            set sb_rmask[<(*r_ltid)::logic[3]>] := *r_lbe
+        } else if (is_store == 1'b1) {
+            set sb_laddr[<(*r_ltid)::logic[3]>] := *r_lva;
+            set sb_wmask[<(*r_ltid)::logic[3]>] := *r_lbe;
+            set sb_wdata[<(*r_ltid)::logic[3]>] := *r_wbs
+        } else {
+            cycle 1
+        }
+    }
+
+    /* RVFI output pack loop (commit port 0 and 1) */
+    loop {
+        /* Port 0 */
+        let exc0 = *r_cvalid0 & *r_exvalid & ~(*r_cdrop0) >>
+        let valid0 = (*r_cack0 & ~(*r_exvalid) & ~(*r_cdrop0)) |
+                     (exc0 & ((*r_excause == 64'd8) |
+                              (*r_excause == 64'd9) |
+                              (*r_excause == 64'd11))) >>
+        let trap0 = exc0 & ~(<(*r_excause)::logic[32]>[31]) >>
+        /* Port 1 */
+        let valid1 = *r_cack1 & ~(*r_exvalid) & ~(*r_cdrop1) >>
+
+        /* Interrupt tracking for port 0 */
+        let intr0_next = if (exc0 == 1'b1 & <(*r_excause)::logic[32]>[31] == 1'b1) {
+            64'd5
+        } else if (exc0 == 1'b1) {
+            64'd3
+        } else if (valid0 == 1'b1) {
+            64'd0
+        } else {
+            *rvfi_intr0
+        } >>
+
+        set rvfi_intr0 := intr0_next >>
+
+        /* Send port 0 outputs */
+        send out.instr0_valid (valid0) >>
+        send out.instr0_insn (*sb_insn[<(*r_cptr0)::logic[3]>]) >>
+        send out.instr0_trap (trap0) >>
+        send out.instr0_cause (*r_excause) >>
+        send out.instr0_mode (*r_priv) >>
+        send out.instr0_ixl (2'd2) >>
+        send out.instr0_rs1_addr (*r_crs1_0) >>
+        send out.instr0_rs2_addr (*r_crs2_0) >>
+        send out.instr0_rd_addr (*r_crd0) >>
+        send out.instr0_rd_wdata (*r_wd0) >>
+        send out.instr0_pc (*r_cpc0) >>
+        send out.instr0_mem_addr (*sb_laddr[<(*r_cptr0)::logic[3]>]) >>
+        send out.instr0_mem_wmask (*sb_wmask[<(*r_cptr0)::logic[3]>]) >>
+        send out.instr0_mem_wdata (*sb_wdata[<(*r_cptr0)::logic[3]>]) >>
+        send out.instr0_mem_rmask (*sb_rmask[<(*r_cptr0)::logic[3]>]) >>
+        send out.instr0_mem_rdata (*r_cres0) >>
+        send out.instr0_rs1_rdata (*sb_rs1[<(*r_cptr0)::logic[3]>]) >>
+        send out.instr0_rs2_rdata (*sb_rs2[<(*r_cptr0)::logic[3]>]) >>
+
+        /* Send port 1 outputs */
+        send out.instr1_valid (valid1) >>
+        send out.instr1_insn (*sb_insn[<(*r_cptr1)::logic[3]>]) >>
+        send out.instr1_trap (1'b0) >>
+        send out.instr1_cause (*r_excause) >>
+        send out.instr1_mode (*r_priv) >>
+        send out.instr1_ixl (2'd2) >>
+        send out.instr1_rs1_addr (*r_crs1_1) >>
+        send out.instr1_rs2_addr (*r_crs2_1) >>
+        send out.instr1_rd_addr (*r_crd1) >>
+        send out.instr1_rd_wdata (*r_wd1) >>
+        send out.instr1_pc (*r_cpc1) >>
+        send out.instr1_mem_addr (*sb_laddr[<(*r_cptr1)::logic[3]>]) >>
+        send out.instr1_mem_wmask (*sb_wmask[<(*r_cptr1)::logic[3]>]) >>
+        send out.instr1_mem_wdata (*sb_wdata[<(*r_cptr1)::logic[3]>]) >>
+        send out.instr1_mem_rmask (*sb_rmask[<(*r_cptr1)::logic[3]>]) >>
+        send out.instr1_mem_rdata (*r_cres1) >>
+        send out.instr1_rs1_rdata (*sb_rs1[<(*r_cptr1)::logic[3]>]) >>
+        send out.instr1_rs2_rdata (*sb_rs2[<(*r_cptr1)::logic[3]>]) >>
+
+        /* ITI outputs */
+        send out.iti_valid0 (*r_cack0) >>
+        send out.iti_valid1 (*r_cack1) >>
+        send out.iti_pc0 (*r_cpc0) >>
+        send out.iti_pc1 (*r_cpc1) >>
+        send out.iti_op0 (*r_cop0) >>
+        send out.iti_op1 (*r_cop1) >>
+        send out.iti_branch_valid0 (*sb_bv[<(*r_cptr0)::logic[3]>]) >>
+        send out.iti_branch_valid1 (*sb_bv[<(*r_cptr1)::logic[3]>]) >>
+        send out.iti_is_taken0 (*sb_bt[<(*r_cptr0)::logic[3]>]) >>
+        send out.iti_is_taken1 (*sb_bt[<(*r_cptr1)::logic[3]>]) >>
+        send out.iti_compressed0 (*sb_ic[<(*r_cptr0)::logic[3]>]) >>
+        send out.iti_compressed1 (*sb_ic[<(*r_cptr1)::logic[3]>]) >>
+        send out.iti_ex_valid (*r_exvalid) >>
+        send out.iti_cycles (*r_cyc) >>
+        send out.iti_cause (*r_excause) >>
+        send out.iti_tval (*r_tval) >>
+        send out.iti_priv_lvl (*r_priv) >>
+
+        /* CSR output stubbed to zero */
+        send out.csr_out (64'd0) >>
+        cycle 1
+    }
+}
