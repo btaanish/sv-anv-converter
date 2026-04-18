@@ -1,0 +1,99 @@
+/* Hand-written Anvil for cva6_altera_peripherals.sv (cva6_peripherals)
+   Intel FPGA peripheral wrapper: PLIC, UART (JTAG), SPI, Ethernet, GPIO, Timer.
+   Concrete params: AxiAddrWidth=64, AxiDataWidth=64, AxiIdWidth=5,
+   AxiUserWidth=1, InclUART=1, InclSPI=0, InclEthernet=0, InclGPIO=0,
+   InclTimer=1, NumSources=8, NumTargets=2, MaxPriority=7.
+   Submodule instantiations (axi2apb_64_32, apb_to_reg, plic_top,
+   cva6_intel_jtag_uart_0, interconnect_altera axi_to_avalon,
+   apb_spi_master, axi2mem, framing_top, iobuf, gpio_apb_wrap_intf,
+   apb_timer) modeled as opaque register stubs.
+   IRQ source routing is preserved.
+   Clock/reset implicit. */
+
+chan periph_in_ch {
+    left clk_200MHz_i : (logic@#1) @dyn - @dyn,
+    left rx_i : (logic@#1) @dyn - @dyn,
+    left eth_clk_i : (logic@#1) @dyn - @dyn,
+    left eth_rxck : (logic@#1) @dyn - @dyn,
+    left eth_rxctl : (logic@#1) @dyn - @dyn,
+    left eth_rxd : (logic[4]@#1) @dyn - @dyn,
+    left phy_tx_clk_i : (logic@#1) @dyn - @dyn,
+    left spi_miso : (logic@#1) @dyn - @dyn,
+    left sd_irq : (logic@#1) @dyn - @dyn,
+    left dip_switches_i : (logic[8]@#1) @dyn - @dyn
+}
+
+chan periph_out_ch {
+    left irq_o : (logic[2]@#1) @dyn - @dyn,
+    left tx_o : (logic@#1) @dyn - @dyn,
+    left eth_txck : (logic@#1) @dyn - @dyn,
+    left eth_txctl : (logic@#1) @dyn - @dyn,
+    left eth_txd : (logic[4]@#1) @dyn - @dyn,
+    left eth_rst_n : (logic@#1) @dyn - @dyn,
+    left eth_mdc : (logic@#1) @dyn - @dyn,
+    left spi_clk_o : (logic@#1) @dyn - @dyn,
+    left spi_mosi : (logic@#1) @dyn - @dyn,
+    left spi_ss : (logic@#1) @dyn - @dyn,
+    left leds_o : (logic[8]@#1) @dyn - @dyn
+}
+
+proc cva6_peripherals(
+    inp : left periph_in_ch,
+    out : right periph_out_ch
+) {
+    /* IRQ source register (8 sources: [0]=UART, [1]=SPI, [2]=Ethernet,
+       [6:3]=Timer, [7]=SD) */
+    reg irq_sources : logic[8];
+
+    /* Input staging registers */
+    reg r_clk_200MHz_i : logic;
+    reg r_rx_i : logic;
+    reg r_eth_clk_i : logic;
+    reg r_eth_rxck : logic;
+    reg r_eth_rxctl : logic;
+    reg r_eth_rxd : logic[4];
+    reg r_phy_tx_clk_i : logic;
+    reg r_spi_miso : logic;
+    reg r_sd_irq : logic;
+    reg r_dip_switches_i : logic[8];
+
+    /* Receive all inputs */
+    loop { let x = recv inp.clk_200MHz_i >> set r_clk_200MHz_i := x }
+    loop { let x = recv inp.rx_i >> set r_rx_i := x }
+    loop { let x = recv inp.eth_clk_i >> set r_eth_clk_i := x }
+    loop { let x = recv inp.eth_rxck >> set r_eth_rxck := x }
+    loop { let x = recv inp.eth_rxctl >> set r_eth_rxctl := x }
+    loop { let x = recv inp.eth_rxd >> set r_eth_rxd := x }
+    loop { let x = recv inp.phy_tx_clk_i >> set r_phy_tx_clk_i := x }
+    loop { let x = recv inp.spi_miso >> set r_spi_miso := x }
+    loop { let x = recv inp.sd_irq >> set r_sd_irq := x }
+    loop { let x = recv inp.dip_switches_i >> set r_dip_switches_i := x }
+
+    /* IRQ source routing:
+       irq_sources[7] = sd_irq (directly mapped)
+       irq_sources[NumSources-1:8] = 0 (unused)
+       Other sources driven by submodule stubs (default 0).
+       sd_irq goes to bit 7, shift left by 7. */
+    loop {
+        let sd_val = if *r_sd_irq { 8'b10000000 } else { 8'b00000000 };
+        set irq_sources := sd_val
+    }
+
+    /* Drive all outputs with stub defaults.
+       PLIC, UART, SPI, Ethernet, GPIO, Timer submodules are opaque.
+       SPI/Ethernet disabled by default (InclSPI=0, InclEthernet=0). */
+    loop {
+        send out.irq_o (2'b00) >>
+        send out.tx_o (1'b0) >>
+        send out.eth_txck (1'b0) >>
+        send out.eth_txctl (1'b0) >>
+        send out.eth_txd (4'b0000) >>
+        send out.eth_rst_n (1'b0) >>
+        send out.eth_mdc (1'b0) >>
+        send out.spi_clk_o (1'b0) >>
+        send out.spi_mosi (1'b0) >>
+        send out.spi_ss (1'b0) >>
+        send out.leds_o (8'b00000000) >>
+        cycle 1
+    }
+}
