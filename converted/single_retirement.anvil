@@ -1,0 +1,103 @@
+/* Hand-written Anvil for single_retirement.sv
+   Single retirement mode: produces iaddr, ilastsize, iretire for the encoder.
+   Each instruction retires independently (iretire always 1).
+   Concrete params: XLEN=64, CAUSE_LEN=5, ITYPE_LEN=3, IRETIRE_LEN=32.
+   itype constants: STANDARD=0, EXC=1, INT=2 */
+
+chan sr_in_ch {
+    left uop_valid : (logic@#1) @dyn - @dyn,
+    left uop_pc : (logic[64]@#1) @dyn - @dyn,
+    left uop_itype : (logic[3]@#1) @dyn - @dyn,
+    left uop_compressed : (logic@#1) @dyn - @dyn,
+    left uop_priv : (logic[2]@#1) @dyn - @dyn,
+    left uop_cycles : (logic[64]@#1) @dyn - @dyn,
+    left cause_i : (logic[5]@#1) @dyn - @dyn,
+    left tval_i : (logic[64]@#1) @dyn - @dyn
+}
+
+chan sr_out_ch {
+    left itt_valid : (logic@#1) @dyn - @dyn,
+    left itt_iretire : (logic[32]@#1) @dyn - @dyn,
+    left itt_itype : (logic[3]@#1) @dyn - @dyn,
+    left itt_ilastsize : (logic@#1) @dyn - @dyn,
+    left itt_iaddr : (logic[64]@#1) @dyn - @dyn,
+    left itt_priv : (logic[2]@#1) @dyn - @dyn,
+    left itt_cause : (logic[5]@#1) @dyn - @dyn,
+    left itt_tval : (logic[64]@#1) @dyn - @dyn,
+    left itt_cycles : (logic[64]@#1) @dyn - @dyn
+}
+
+proc single_retirement(
+    inp : left sr_in_ch,
+    out : right sr_out_ch
+) {
+    reg r_valid : logic;
+    reg r_pc : logic[64];
+    reg r_itype : logic[3];
+    reg r_compressed : logic;
+    reg r_priv : logic[2];
+    reg r_cycles : logic[64];
+    reg r_cause : logic[5];
+    reg r_tval : logic[64];
+
+    loop {
+        let v = recv inp.uop_valid >>
+        set r_valid := v >>
+        let pc = recv inp.uop_pc >>
+        set r_pc := pc >>
+        let it = recv inp.uop_itype >>
+        set r_itype := it >>
+        let c = recv inp.uop_compressed >>
+        set r_compressed := c >>
+        let p = recv inp.uop_priv >>
+        set r_priv := p >>
+        let cy = recv inp.uop_cycles >>
+        set r_cycles := cy >>
+        let ca = recv inp.cause_i >>
+        set r_cause := ca >>
+        let tv = recv inp.tval_i >>
+        set r_tval := tv >>
+
+        /* Default: all outputs zero */
+        let out_valid = *r_valid >>
+        let out_iretire = 32'd1 >>
+        let out_itype = *r_itype >>
+        let out_ilastsize = ~(*r_compressed) >>
+        let out_iaddr = *r_pc >>
+        let out_priv = *r_priv >>
+        let out_cycles = *r_cycles >>
+
+        /* exception (itype==1): cause from input, tval from input */
+        /* interrupt (itype==2): cause from input, tval = 0 */
+        /* otherwise: cause=0, tval=0 */
+        let is_exc = if (*r_itype == 3'd1) { 1'b1 } else { 1'b0 };
+        let is_int = if (*r_itype == 3'd2) { 1'b1 } else { 1'b0 };
+        let has_cause = is_exc | is_int;
+        let out_cause = if (has_cause == 1'b1) { *r_cause } else { 5'd0 } >>
+        let out_tval = if (is_exc == 1'b1) { *r_tval } else { 64'd0 } >>
+
+        if (*r_valid == 1'b1) {
+            send out.itt_valid (out_valid) >>
+            send out.itt_iretire (out_iretire) >>
+            send out.itt_itype (out_itype) >>
+            send out.itt_ilastsize (out_ilastsize) >>
+            send out.itt_iaddr (out_iaddr) >>
+            send out.itt_priv (out_priv) >>
+            send out.itt_cause (out_cause) >>
+            send out.itt_tval (out_tval) >>
+            send out.itt_cycles (out_cycles) >>
+            cycle 1
+        } else {
+            send out.itt_valid (1'b0) >>
+            send out.itt_iretire (32'd0) >>
+            send out.itt_itype (3'd0) >>
+            send out.itt_ilastsize (1'b0) >>
+            send out.itt_iaddr (64'd0) >>
+            send out.itt_priv (2'd0) >>
+            send out.itt_cause (5'd0) >>
+            send out.itt_tval (64'd0) >>
+            send out.itt_cycles (64'd0) >>
+            cycle 1
+        }
+    }
+}

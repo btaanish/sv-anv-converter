@@ -1,0 +1,146 @@
+/* Hand-written Anvil for block_retirement.sv
+   Systolic block retirement: determines iaddr, ilastsize, iretire for the encoder.
+   Accumulates retired instruction count in a counter and chains between commit ports.
+   Concrete params: XLEN=64, CAUSE_LEN=5, ITYPE_LEN=3, IRETIRE_LEN=32.
+   itype constants: STANDARD=0, EXC=1, INT=2
+   special_inst = itype not in {INT, EXC, STANDARD} */
+
+chan br_in_ch {
+    left uop_valid : (logic@#1) @dyn - @dyn,
+    left uop_pc : (logic[64]@#1) @dyn - @dyn,
+    left uop_itype : (logic[3]@#1) @dyn - @dyn,
+    left uop_compressed : (logic@#1) @dyn - @dyn,
+    left uop_priv : (logic[2]@#1) @dyn - @dyn,
+    left uop_cycles : (logic[64]@#1) @dyn - @dyn,
+    left cause_i : (logic[5]@#1) @dyn - @dyn,
+    left tval_i : (logic[64]@#1) @dyn - @dyn,
+    left counter_i : (logic[32]@#1) @dyn - @dyn,
+    left iaddr_i : (logic[64]@#1) @dyn - @dyn,
+    left was_special_i : (logic@#1) @dyn - @dyn
+}
+
+chan br_out_ch {
+    left itt_valid : (logic@#1) @dyn - @dyn,
+    left itt_iretire : (logic[32]@#1) @dyn - @dyn,
+    left itt_itype : (logic[3]@#1) @dyn - @dyn,
+    left itt_ilastsize : (logic@#1) @dyn - @dyn,
+    left itt_iaddr : (logic[64]@#1) @dyn - @dyn,
+    left itt_priv : (logic[2]@#1) @dyn - @dyn,
+    left itt_cause : (logic[5]@#1) @dyn - @dyn,
+    left itt_tval : (logic[64]@#1) @dyn - @dyn,
+    left itt_cycles : (logic[64]@#1) @dyn - @dyn,
+    left counter_o : (logic[32]@#1) @dyn - @dyn,
+    left iaddr_o : (logic[64]@#1) @dyn - @dyn,
+    left is_special_o : (logic@#1) @dyn - @dyn
+}
+
+proc block_retirement(
+    inp : left br_in_ch,
+    out : right br_out_ch
+) {
+    reg r_valid : logic;
+    reg r_pc : logic[64];
+    reg r_itype : logic[3];
+    reg r_compressed : logic;
+    reg r_priv : logic[2];
+    reg r_cycles : logic[64];
+    reg r_cause : logic[5];
+    reg r_tval : logic[64];
+    reg r_counter : logic[32];
+    reg r_iaddr : logic[64];
+    reg r_was_special : logic;
+
+    loop {
+        let v = recv inp.uop_valid >>
+        set r_valid := v >>
+        let pc = recv inp.uop_pc >>
+        set r_pc := pc >>
+        let it = recv inp.uop_itype >>
+        set r_itype := it >>
+        let c = recv inp.uop_compressed >>
+        set r_compressed := c >>
+        let p = recv inp.uop_priv >>
+        set r_priv := p >>
+        let cy = recv inp.uop_cycles >>
+        set r_cycles := cy >>
+        let ca = recv inp.cause_i >>
+        set r_cause := ca >>
+        let tv = recv inp.tval_i >>
+        set r_tval := tv >>
+        let cnt = recv inp.counter_i >>
+        set r_counter := cnt >>
+        let ia = recv inp.iaddr_i >>
+        set r_iaddr := ia >>
+        let ws = recv inp.was_special_i >>
+        set r_was_special := ws >>
+
+        /* special_inst: itype not in {INT(2), EXC(1), STANDARD(0)} and valid */
+        let is_std = if (*r_itype == 3'd0) { 1'b1 } else { 1'b0 };
+        let is_exc = if (*r_itype == 3'd1) { 1'b1 } else { 1'b0 };
+        let is_int = if (*r_itype == 3'd2) { 1'b1 } else { 1'b0 };
+        let is_normal = is_std | is_exc | is_int;
+        let special_inst = ~is_normal & *r_valid;
+
+        /* Default pass-through */
+        let cnt_out = *r_counter;
+        let addr_out = *r_iaddr;
+        let spc_out = *r_was_special >>
+
+        /* If valid: update counter and addr based on was_special */
+        let cnt_base = if (*r_valid == 1'b1 & *r_was_special == 1'b1) { 32'd0 } else { *r_counter };
+        let addr_base = if (*r_valid == 1'b1 & *r_was_special == 1'b1) { *r_pc } else { *r_iaddr };
+
+        /* Increment counter: +1 if compressed, +2 otherwise */
+        let cnt_inc = if (*r_valid == 1'b1) {
+            if (*r_compressed == 1'b1) { cnt_base + 32'd1 } else { cnt_base + 32'd2 }
+        } else { cnt_out };
+
+        let addr_final = if (*r_valid == 1'b1) { addr_base } else { addr_out };
+        let spc_final = if (*r_valid == 1'b1) {
+            if (*r_was_special == 1'b1) { 1'b0 } else { *r_was_special }
+        } else { spc_out } >>
+
+        /* Determine outputs */
+        let o_valid = if (*r_valid == 1'b1 & special_inst == 1'b1) { 1'b1 }
+                      else if (*r_valid == 1'b1 & is_int == 1'b1) { 1'b1 }
+                      else if (*r_valid == 1'b1 & is_exc == 1'b1) { 1'b1 }
+                      else { 1'b0 };
+
+        /* For special_inst: use accumulated counter and addr */
+        /* For interrupt/exception: iretire = 1 or 2 based on compressed, use pc directly */
+        let int_exc_retire = if (*r_compressed == 1'b1) { 32'd1 } else { 32'd2 };
+
+        let o_iretire = if (special_inst == 1'b1) { cnt_inc }
+                        else if (is_int == 1'b1) { int_exc_retire }
+                        else if (is_exc == 1'b1) { int_exc_retire }
+                        else { 32'd0 };
+
+        let o_iaddr = if (special_inst == 1'b1) { addr_final }
+                      else if (is_int == 1'b1) { *r_pc }
+                      else if (is_exc == 1'b1) { *r_pc }
+                      else { 64'd0 };
+
+        let o_cause = if (is_int == 1'b1) { *r_cause }
+                      else if (is_exc == 1'b1) { *r_cause }
+                      else { 5'd0 };
+
+        let o_tval = if (is_exc == 1'b1) { *r_tval } else { 64'd0 };
+
+        /* is_special_o: set to 1 if special/int/exc */
+        let spc_final2 = if (*r_valid == 1'b1 & o_valid == 1'b1) { 1'b1 } else { spc_final } >>
+
+        send out.itt_valid (o_valid) >>
+        send out.itt_iretire (o_iretire) >>
+        send out.itt_itype (*r_itype) >>
+        send out.itt_ilastsize (~(*r_compressed)) >>
+        send out.itt_iaddr (o_iaddr) >>
+        send out.itt_priv (*r_priv) >>
+        send out.itt_cause (o_cause) >>
+        send out.itt_tval (o_tval) >>
+        send out.itt_cycles (*r_cycles) >>
+        send out.counter_o (cnt_inc) >>
+        send out.iaddr_o (addr_final) >>
+        send out.is_special_o (spc_final2) >>
+        cycle 1
+    }
+}

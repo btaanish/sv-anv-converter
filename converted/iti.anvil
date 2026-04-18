@@ -1,0 +1,242 @@
+/* Hand-written Anvil for cva6_iti (iti.sv)
+   Instruction Trace Interface top-level module.
+   Inlines itype_detector and single_retirement logic for each commit port.
+   Concrete params: XLEN=64, NrCommitPorts=2, CAUSE_LEN=5,
+   ITYPE_LEN=3, IRETIRE_LEN=32, block_mode=0 (single retirement).
+   SV package types flattened. Clock/reset implicit.
+   Debug file logging (pragma translate_off) omitted.
+
+   fu_op constants: EQ=20, NE=21, LTS=22, GES=23, LTU=24, GEU=25,
+                    MRET=50, SRET=51, DRET=52, JALR=7
+   itype constants: STANDARD=0, EXC=1, INT=2, ERET=3,
+                    NON_TAKEN_BR=4, TAKEN_BR=5, UNINF_JMP=6 */
+
+chan iti_in_ch {
+    left valid_0 : (logic@#1) @dyn - @dyn,
+    left valid_1 : (logic@#1) @dyn - @dyn,
+    left cause : (logic[64]@#1) @dyn - @dyn,
+    left tval : (logic[64]@#1) @dyn - @dyn,
+    left ex_valid : (logic@#1) @dyn - @dyn,
+    left op_0 : (logic[8]@#1) @dyn - @dyn,
+    left op_1 : (logic[8]@#1) @dyn - @dyn,
+    left is_taken_0 : (logic@#1) @dyn - @dyn,
+    left is_taken_1 : (logic@#1) @dyn - @dyn,
+    left pc_0 : (logic[64]@#1) @dyn - @dyn,
+    left pc_1 : (logic[64]@#1) @dyn - @dyn,
+    left is_compressed_0 : (logic@#1) @dyn - @dyn,
+    left is_compressed_1 : (logic@#1) @dyn - @dyn,
+    left priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left cycles : (logic[64]@#1) @dyn - @dyn
+}
+
+chan iti_out_ch {
+    left valid_o_0 : (logic@#1) @dyn - @dyn,
+    left valid_o_1 : (logic@#1) @dyn - @dyn,
+    left enc_valid_0 : (logic@#1) @dyn - @dyn,
+    left enc_valid_1 : (logic@#1) @dyn - @dyn,
+    left enc_iretire_0 : (logic[32]@#1) @dyn - @dyn,
+    left enc_iretire_1 : (logic[32]@#1) @dyn - @dyn,
+    left enc_ilastsize_0 : (logic@#1) @dyn - @dyn,
+    left enc_ilastsize_1 : (logic@#1) @dyn - @dyn,
+    left enc_itype_0 : (logic[3]@#1) @dyn - @dyn,
+    left enc_itype_1 : (logic[3]@#1) @dyn - @dyn,
+    left enc_iaddr_0 : (logic[64]@#1) @dyn - @dyn,
+    left enc_iaddr_1 : (logic[64]@#1) @dyn - @dyn,
+    left enc_priv : (logic[2]@#1) @dyn - @dyn,
+    left enc_cause : (logic[5]@#1) @dyn - @dyn,
+    left enc_tval : (logic[64]@#1) @dyn - @dyn,
+    left enc_cycles : (logic[64]@#1) @dyn - @dyn
+}
+
+proc cva6_iti(
+    inp : left iti_in_ch,
+    out : right iti_out_ch
+) {
+    /* Input staging registers */
+    reg r_v0 : logic;
+    reg r_v1 : logic;
+    reg r_cause : logic[64];
+    reg r_tval : logic[64];
+    reg r_ex_valid : logic;
+    reg r_op0 : logic[8];
+    reg r_op1 : logic[8];
+    reg r_taken0 : logic;
+    reg r_taken1 : logic;
+    reg r_pc0 : logic[64];
+    reg r_pc1 : logic[64];
+    reg r_comp0 : logic;
+    reg r_comp1 : logic;
+    reg r_priv : logic[2];
+    reg r_cycles : logic[64];
+
+    /* Itype result registers */
+    reg itype0 : logic[3];
+    reg itype1 : logic[3];
+
+    /* Interrupt flag register */
+    reg r_interrupt : logic;
+
+    /* Output staging registers */
+    reg o_v0 : logic;
+    reg o_v1 : logic;
+    reg o_iretire0 : logic[32];
+    reg o_iretire1 : logic[32];
+    reg o_ilastsize0 : logic;
+    reg o_ilastsize1 : logic;
+    reg o_itype0 : logic[3];
+    reg o_itype1 : logic[3];
+    reg o_iaddr0 : logic[64];
+    reg o_iaddr1 : logic[64];
+    reg o_priv : logic[2];
+    reg o_cause : logic[5];
+    reg o_tval : logic[64];
+    reg o_cycles : logic[64];
+
+    /* Loop 1: Receive all inputs */
+    loop {
+        let i0 = recv inp.valid_0 >>
+        set r_v0 := i0 >>
+        let i1 = recv inp.valid_1 >>
+        set r_v1 := i1 >>
+        let i2 = recv inp.cause >>
+        set r_cause := i2 >>
+        let i3 = recv inp.tval >>
+        set r_tval := i3 >>
+        let i4 = recv inp.ex_valid >>
+        set r_ex_valid := i4 >>
+        let i5 = recv inp.op_0 >>
+        set r_op0 := i5 >>
+        let i6 = recv inp.op_1 >>
+        set r_op1 := i6 >>
+        let i7 = recv inp.is_taken_0 >>
+        set r_taken0 := i7 >>
+        let i8 = recv inp.is_taken_1 >>
+        set r_taken1 := i8 >>
+        let i9 = recv inp.pc_0 >>
+        set r_pc0 := i9 >>
+        let i10 = recv inp.pc_1 >>
+        set r_pc1 := i10 >>
+        let i11 = recv inp.is_compressed_0 >>
+        set r_comp0 := i11 >>
+        let i12 = recv inp.is_compressed_1 >>
+        set r_comp1 := i12 >>
+        let i13 = recv inp.priv_lvl >>
+        set r_priv := i13 >>
+        let i14 = recv inp.cycles >>
+        set r_cycles := i14 >>
+        cycle 1
+    }
+
+    /* Loop 2: Compute itype for port 0 */
+    loop {
+        /* interrupt = cause bit 63 */
+        let cause_hi = *r_cause >> 64'd63 >>
+        set r_interrupt := <(cause_hi)::logic> >>
+
+        /* Port 0 itype detection */
+        let is_mret = if (*r_op0 == 8'd50) { 1'b1 } else { 1'b0 };
+        let is_sret = if (*r_op0 == 8'd51) { 1'b1 } else { 1'b0 };
+        let is_dret = if (*r_op0 == 8'd52) { 1'b1 } else { 1'b0 };
+        let eret = is_mret | is_sret | is_dret;
+        let br_eq = if (*r_op0 == 8'd20) { 1'b1 } else { 1'b0 };
+        let br_ne = if (*r_op0 == 8'd21) { 1'b1 } else { 1'b0 };
+        let br_lts = if (*r_op0 == 8'd22) { 1'b1 } else { 1'b0 };
+        let br_ges = if (*r_op0 == 8'd23) { 1'b1 } else { 1'b0 };
+        let br_ltu = if (*r_op0 == 8'd24) { 1'b1 } else { 1'b0 };
+        let br_geu = if (*r_op0 == 8'd25) { 1'b1 } else { 1'b0 };
+        let is_br = br_eq | br_ne | br_lts | br_ges | br_ltu | br_geu;
+        let ntbr = is_br & ~(*r_taken0);
+        let tbr = is_br & *r_taken0;
+        let updis = if (*r_op0 == 8'd7) { 1'b1 } else { 1'b0 } >>
+
+        let it0 = if (*r_ex_valid == 1'b1) { 3'd1 }
+                  else if (*r_interrupt == 1'b1) { 3'd2 }
+                  else if (*r_v0 == 1'b1) {
+                      if (eret == 1'b1) { 3'd3 }
+                      else if (ntbr == 1'b1) { 3'd4 }
+                      else if (tbr == 1'b1) { 3'd5 }
+                      else if (updis == 1'b1) { 3'd6 }
+                      else { 3'd0 }
+                  } else { 3'd0 } >>
+        set itype0 := it0
+    }
+
+    /* Loop 3: Compute itype for port 1 */
+    loop {
+        let is_mret = if (*r_op1 == 8'd50) { 1'b1 } else { 1'b0 };
+        let is_sret = if (*r_op1 == 8'd51) { 1'b1 } else { 1'b0 };
+        let is_dret = if (*r_op1 == 8'd52) { 1'b1 } else { 1'b0 };
+        let eret = is_mret | is_sret | is_dret;
+        let br_eq = if (*r_op1 == 8'd20) { 1'b1 } else { 1'b0 };
+        let br_ne = if (*r_op1 == 8'd21) { 1'b1 } else { 1'b0 };
+        let br_lts = if (*r_op1 == 8'd22) { 1'b1 } else { 1'b0 };
+        let br_ges = if (*r_op1 == 8'd23) { 1'b1 } else { 1'b0 };
+        let br_ltu = if (*r_op1 == 8'd24) { 1'b1 } else { 1'b0 };
+        let br_geu = if (*r_op1 == 8'd25) { 1'b1 } else { 1'b0 };
+        let is_br = br_eq | br_ne | br_lts | br_ges | br_ltu | br_geu;
+        let ntbr = is_br & ~(*r_taken1);
+        let tbr = is_br & *r_taken1;
+        let updis = if (*r_op1 == 8'd7) { 1'b1 } else { 1'b0 } >>
+
+        let it1 = if (*r_ex_valid == 1'b1) { 3'd1 }
+                  else if (*r_interrupt == 1'b1) { 3'd2 }
+                  else if (*r_v1 == 1'b1) {
+                      if (eret == 1'b1) { 3'd3 }
+                      else if (ntbr == 1'b1) { 3'd4 }
+                      else if (tbr == 1'b1) { 3'd5 }
+                      else if (updis == 1'b1) { 3'd6 }
+                      else { 3'd0 }
+                  } else { 3'd0 } >>
+        set itype1 := it1
+    }
+
+    /* Loop 4: Single retirement + output assembly */
+    loop {
+        /* Port 0: cause_itt[0] = cause[4:0], tval_itt[0] = tval */
+        let cause_low = <(*r_cause)::logic[5]> >>
+        let is_exc0 = if (*itype0 == 3'd1) { 1'b1 } else { 1'b0 };
+        let is_int0 = if (*itype0 == 3'd2) { 1'b1 } else { 1'b0 };
+        let has_cause0 = is_exc0 | is_int0 >>
+        let c0 = if (has_cause0 == 1'b1) { cause_low } else { 5'd0 };
+        let t0 = if (is_exc0 == 1'b1) { *r_tval } else { 64'd0 } >>
+
+        /* Port 1: cause_itt[1]=0, tval_itt[1]=0 (exception/interrupt only port 0) */
+
+        /* Encoder output assembly */
+        set o_v0 := *r_v0;
+        set o_v1 := *r_v1;
+        set o_iretire0 := 32'd1;
+        set o_iretire1 := 32'd1;
+        set o_ilastsize0 := ~(*r_comp0);
+        set o_ilastsize1 := ~(*r_comp1);
+        set o_itype0 := *itype0;
+        set o_itype1 := *itype1;
+        set o_iaddr0 := *r_pc0;
+        set o_iaddr1 := *r_pc1;
+        set o_priv := *r_priv;
+        set o_cause := c0;
+        set o_tval := t0;
+        set o_cycles := *r_cycles
+    }
+
+    /* Loop 5: Send outputs */
+    loop {
+        send out.valid_o_0 (*o_v0) >>
+        send out.valid_o_1 (*o_v1) >>
+        send out.enc_valid_0 (*o_v0) >>
+        send out.enc_valid_1 (*o_v1) >>
+        send out.enc_iretire_0 (*o_iretire0) >>
+        send out.enc_iretire_1 (*o_iretire1) >>
+        send out.enc_ilastsize_0 (*o_ilastsize0) >>
+        send out.enc_ilastsize_1 (*o_ilastsize1) >>
+        send out.enc_itype_0 (*o_itype0) >>
+        send out.enc_itype_1 (*o_itype1) >>
+        send out.enc_iaddr_0 (*o_iaddr0) >>
+        send out.enc_iaddr_1 (*o_iaddr1) >>
+        send out.enc_priv (*o_priv) >>
+        send out.enc_cause (*o_cause) >>
+        send out.enc_tval (*o_tval) >>
+        send out.enc_cycles (*o_cycles) >>
+        cycle 1
+    }
+}
