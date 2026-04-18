@@ -1,0 +1,244 @@
+/* Hand-written Anvil for id_stage.sv
+   Instruction decode stage: decodes fetched instructions, handles
+   compressed expansion (RVC/ZCMP/ZCMT/CVXIF), and pipelines decoded
+   instructions to the issue stage.
+   Concrete: NrIssuePorts=1, XLEN=64, VLEN=64, RVC=1,
+   RVZCMP=0, RVZCMT=0, CvxifEn=0, SuperscalarEn=0, FpgaAlteraEn=0.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): ~5 (signal names)
+     Manually written/fixed lines: ~130
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] Compressed decoder submodule modelled as opaque reg
+       - [MANUAL-CLEANUP-NEEDED] Decoder submodule modelled as opaque reg
+       - [MANUAL-CLEANUP-NEEDED] ZCMP/ZCMT/CVXIF paths omitted (config disabled)
+       - [MANUAL-CLEANUP-NEEDED] SuperscalarEn path omitted (config disabled)
+       - [MANUAL-CLEANUP-NEEDED] scoreboard_entry_t flattened to logic[64]
+*/
+
+// [MANUAL] Channel for decode-stage inputs
+chan id_in_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left debug_req : (logic@#1) @dyn - @dyn,
+    left fetch_entry : (logic[64]@#1) @dyn - @dyn,
+    left fetch_entry_valid : (logic@#1) @dyn - @dyn,
+    left issue_instr_ack : (logic@#1) @dyn - @dyn,
+    left priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left v : (logic@#1) @dyn - @dyn,
+    left fs : (logic[2]@#1) @dyn - @dyn,
+    left vfs : (logic[2]@#1) @dyn - @dyn,
+    left frm : (logic[3]@#1) @dyn - @dyn,
+    left vs : (logic[2]@#1) @dyn - @dyn,
+    left irq : (logic[2]@#1) @dyn - @dyn,
+    left irq_ctrl : (logic[64]@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn,
+    left tvm : (logic@#1) @dyn - @dyn,
+    left tw : (logic@#1) @dyn - @dyn,
+    left vtw : (logic@#1) @dyn - @dyn,
+    left tsr : (logic@#1) @dyn - @dyn,
+    left hu : (logic@#1) @dyn - @dyn,
+    left mcbie : (logic[2]@#1) @dyn - @dyn,
+    left scbie : (logic[2]@#1) @dyn - @dyn,
+    left hcbie : (logic[2]@#1) @dyn - @dyn,
+    left mcbcfe : (logic@#1) @dyn - @dyn,
+    left scbcfe : (logic@#1) @dyn - @dyn,
+    left hcbcfe : (logic@#1) @dyn - @dyn,
+    left hart_id : (logic[64]@#1) @dyn - @dyn,
+    left compressed_ready : (logic@#1) @dyn - @dyn,
+    left jvt : (logic[64]@#1) @dyn - @dyn,
+    left compressed_resp : (logic[64]@#1) @dyn - @dyn,
+    left debug_from_trigger : (logic@#1) @dyn - @dyn,
+    left dcache_req_ports : (logic[64]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for decode-stage outputs
+chan id_out_ch {
+    left fetch_entry_ready : (logic@#1) @dyn - @dyn,
+    left issue_entry : (logic[64]@#1) @dyn - @dyn,
+    left issue_entry_prev : (logic[64]@#1) @dyn - @dyn,
+    left orig_instr : (logic[32]@#1) @dyn - @dyn,
+    left issue_entry_valid : (logic@#1) @dyn - @dyn,
+    left is_ctrl_flow : (logic@#1) @dyn - @dyn,
+    left rvfi_is_compressed : (logic@#1) @dyn - @dyn,
+    left compressed_valid : (logic@#1) @dyn - @dyn,
+    left compressed_req : (logic[64]@#1) @dyn - @dyn,
+    left dcache_req_ports_o : (logic[64]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Main proc
+proc id_stage(
+    inp : left id_in_ch,
+    out : right id_out_ch
+) {
+    // [MANUAL] Input staging registers
+    reg r_flush : logic;
+    reg r_debug_req : logic;
+    reg r_fetch_entry : logic[64];
+    reg r_fetch_entry_valid : logic;
+    reg r_issue_instr_ack : logic;
+    reg r_priv_lvl : logic[2];
+    reg r_v : logic;
+    reg r_fs : logic[2];
+    reg r_vfs : logic[2];
+    reg r_frm : logic[3];
+    reg r_vs : logic[2];
+    reg r_irq : logic[2];
+    reg r_irq_ctrl : logic[64];
+    reg r_debug_mode : logic;
+    reg r_tvm : logic;
+    reg r_tw : logic;
+    reg r_vtw : logic;
+    reg r_tsr : logic;
+    reg r_hu : logic;
+    reg r_mcbie : logic[2];
+    reg r_scbie : logic[2];
+    reg r_hcbie : logic[2];
+    reg r_mcbcfe : logic;
+    reg r_scbcfe : logic;
+    reg r_hcbcfe : logic;
+    reg r_hart_id : logic[64];
+    reg r_compressed_ready : logic;
+    reg r_jvt : logic[64];
+    reg r_compressed_resp : logic[64];
+    reg r_debug_from_trigger : logic;
+    reg r_dcache_req_ports : logic[64];
+
+    // [MANUAL] Pipeline register (issue_q): packed {valid, sbe, orig_instr, is_ctrl_flow}
+    // [MANUAL-CLEANUP-NEEDED] Flattened to individual registers
+    reg iq_valid : logic;
+    reg iq_sbe : logic[64];
+    reg iq_orig_instr : logic[32];
+    reg iq_is_ctrl_flow : logic;
+
+    // [MANUAL] Opaque submodule output registers
+    // [MANUAL-CLEANUP-NEEDED] compressed_decoder + decoder modelled as opaque regs
+    reg decoded_instr_r : logic[64];
+    reg orig_instr_r : logic[32];
+    reg is_ctrl_flow_r : logic;
+    reg is_compressed_r : logic;
+
+    // [MANUAL] Snapshot registers to avoid borrow conflicts
+    reg snap_valid : logic;
+    reg snap_sbe : logic[64];
+    reg snap_orig : logic[32];
+    reg snap_ctrl : logic;
+
+    // [MANUAL] Recv loop: stage all inputs
+    loop {
+        let a1 = recv inp.flush >>
+        set r_flush := a1 >>
+        let a2 = recv inp.debug_req >>
+        set r_debug_req := a2 >>
+        let a3 = recv inp.fetch_entry >>
+        set r_fetch_entry := a3 >>
+        let a4 = recv inp.fetch_entry_valid >>
+        set r_fetch_entry_valid := a4 >>
+        let a5 = recv inp.issue_instr_ack >>
+        set r_issue_instr_ack := a5 >>
+        let a6 = recv inp.priv_lvl >>
+        set r_priv_lvl := a6 >>
+        let a7 = recv inp.v >>
+        set r_v := a7 >>
+        let a8 = recv inp.fs >>
+        set r_fs := a8 >>
+        let a9 = recv inp.vfs >>
+        set r_vfs := a9 >>
+        let a10 = recv inp.frm >>
+        set r_frm := a10 >>
+        let a11 = recv inp.vs >>
+        set r_vs := a11 >>
+        let a12 = recv inp.irq >>
+        set r_irq := a12 >>
+        let a13 = recv inp.irq_ctrl >>
+        set r_irq_ctrl := a13 >>
+        let a14 = recv inp.debug_mode >>
+        set r_debug_mode := a14 >>
+        let a15 = recv inp.tvm >>
+        set r_tvm := a15 >>
+        let a16 = recv inp.tw >>
+        set r_tw := a16 >>
+        let a17 = recv inp.vtw >>
+        set r_vtw := a17 >>
+        let a18 = recv inp.tsr >>
+        set r_tsr := a18 >>
+        let a19 = recv inp.hu >>
+        set r_hu := a19 >>
+        let a20 = recv inp.mcbie >>
+        set r_mcbie := a20 >>
+        let a21 = recv inp.scbie >>
+        set r_scbie := a21 >>
+        let a22 = recv inp.hcbie >>
+        set r_hcbie := a22 >>
+        let a23 = recv inp.mcbcfe >>
+        set r_mcbcfe := a23 >>
+        let a24 = recv inp.scbcfe >>
+        set r_scbcfe := a24 >>
+        let a25 = recv inp.hcbcfe >>
+        set r_hcbcfe := a25 >>
+        let a26 = recv inp.hart_id >>
+        set r_hart_id := a26 >>
+        let a27 = recv inp.compressed_ready >>
+        set r_compressed_ready := a27 >>
+        let a28 = recv inp.jvt >>
+        set r_jvt := a28 >>
+        let a29 = recv inp.compressed_resp >>
+        set r_compressed_resp := a29 >>
+        let a30 = recv inp.debug_from_trigger >>
+        set r_debug_from_trigger := a30 >>
+        let a31 = recv inp.dcache_req_ports >>
+        set r_dcache_req_ports := a31
+    }
+
+    // [MANUAL] Snapshot loop: capture pipeline reg state for other loops
+    loop {
+        set snap_valid := *iq_valid;
+        set snap_sbe := *iq_sbe;
+        set snap_orig := *iq_orig_instr;
+        set snap_ctrl := *iq_is_ctrl_flow
+    }
+
+    // [MANUAL] Pipeline register update loop (always_ff)
+    // Single-issue path (SuperscalarEn=0):
+    //   if ack, clear valid; if space and fetch valid, latch decoded instr
+    loop {
+        let cur_valid = *snap_valid >>
+        let ack = *r_issue_instr_ack >>
+        let cleared = cur_valid & ~ack >>
+        // [MANUAL] decoded_instruction_valid = 1 (RVZCMT=0, CvxifEn=0 => no stall conditions)
+        let fetch_v = *r_fetch_entry_valid >>
+        // [MANUAL] If space and fetch valid, latch new instruction
+        // stall_instr_fetch[0] = 0 (RVZCMP=0, RVZCMT=0, CvxifEn=0)
+        let new_valid = if cleared == 1'b0 { fetch_v } else { cleared } >>
+        let new_sbe = if cleared == 1'b0 { if fetch_v == 1'b1 { *decoded_instr_r } else { *snap_sbe } } else { *snap_sbe } >>
+        let new_orig = if cleared == 1'b0 { if fetch_v == 1'b1 { *orig_instr_r } else { *snap_orig } } else { *snap_orig } >>
+        let new_ctrl = if cleared == 1'b0 { if fetch_v == 1'b1 { *is_ctrl_flow_r } else { *snap_ctrl } } else { *snap_ctrl } >>
+        // [MANUAL] Flush invalidates pipeline register
+        let final_valid = if *r_flush == 1'b1 { 1'b0 } else { new_valid } >>
+        set iq_valid := final_valid >>
+        set iq_sbe := new_sbe >>
+        set iq_orig_instr := new_orig >>
+        set iq_is_ctrl_flow := new_ctrl
+    }
+
+    // [MANUAL] Output loop: drive outputs from pipeline register snapshots
+    loop {
+        // [MANUAL] fetch_entry_ready = ~stall_instr_fetch[0] when space available
+        // stall_instr_fetch=0 for this config, so ready = !iq_valid after ack or empty
+        let ack_clr = *snap_valid & ~(*r_issue_instr_ack) >>
+        let rdy = if ack_clr == 1'b0 { *r_fetch_entry_valid } else { 1'b0 } >>
+        send out.fetch_entry_ready (rdy) >>
+        send out.issue_entry (*snap_sbe) >>
+        // [MANUAL-CLEANUP-NEEDED] issue_entry_prev = 0 (FpgaAlteraEn=0)
+        send out.issue_entry_prev (64'd0) >>
+        send out.orig_instr (*snap_orig) >>
+        send out.issue_entry_valid (*snap_valid) >>
+        send out.is_ctrl_flow (*snap_ctrl) >>
+        send out.rvfi_is_compressed (*is_compressed_r) >>
+        // [MANUAL-CLEANUP-NEEDED] CVXIF compressed interface disabled
+        send out.compressed_valid (1'b0) >>
+        send out.compressed_req (64'd0) >>
+        // [MANUAL-CLEANUP-NEEDED] dcache_req_ports_o only used with RVZCMT
+        send out.dcache_req_ports_o (64'd0) >>
+        cycle 1
+    }
+}

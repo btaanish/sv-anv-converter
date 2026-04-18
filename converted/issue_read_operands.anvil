@@ -1,0 +1,320 @@
+/* Hand-written Anvil for issue_read_operands.sv
+   Issues instructions from the scoreboard and fetches operands.
+   Handles forwarding logic, FU busy arbitration, RAW hazard
+   detection, register file reads, and pipeline register (ID->EX).
+   Concrete: NrIssuePorts=1, XLEN=64, VLEN=64, NrCommitPorts=2,
+   TRANS_ID_BITS=3, NR_SB_ENTRIES=8, NrRgprPorts=2,
+   OPERANDS_PER_INSTR=2, FpPresent=1, FLen=64,
+   SuperscalarEn=0, ALUBypass=0, CvxifEn=0, RVH=0,
+   RVZCMT=0, ZKN=0, FpgaEn=0, FpgaAlteraEn=0.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): ~10 (signal names)
+     Manually written/fixed lines: ~250
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] raw_checker submodules modelled as opaque regs
+       - [MANUAL-CLEANUP-NEEDED] ariane_regfile submodules modelled as opaque regs
+       - [MANUAL-CLEANUP-NEEDED] cvxif_issue_register_commit_if_driver omitted (CvxifEn=0)
+       - [MANUAL-CLEANUP-NEEDED] Forwarding logic simplified to opaque regs
+       - [MANUAL-CLEANUP-NEEDED] FU busy logic simplified to opaque reg
+       - [MANUAL-CLEANUP-NEEDED] fu_data_t flattened to logic[64]
+       - [MANUAL-CLEANUP-NEEDED] scoreboard_entry_t flattened to logic[64]
+       - [MANUAL-CLEANUP-NEEDED] is_alu_bypass hardcoded to 0 (ALUBypass=0)
+       - [MANUAL-CLEANUP-NEEDED] SuperscalarEn paths omitted
+*/
+
+// [MANUAL] Channel for issue_read_operands inputs
+chan iro_in_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left stall : (logic@#1) @dyn - @dyn,
+    left issue_instr : (logic[64]@#1) @dyn - @dyn,
+    left issue_instr_prev : (logic[64]@#1) @dyn - @dyn,
+    left orig_instr : (logic[32]@#1) @dyn - @dyn,
+    left issue_instr_valid : (logic@#1) @dyn - @dyn,
+    left fwd : (logic[64]@#1) @dyn - @dyn,
+    left flu_ready : (logic@#1) @dyn - @dyn,
+    left lsu_ready : (logic@#1) @dyn - @dyn,
+    left fpu_ready : (logic@#1) @dyn - @dyn,
+    left fpu_early_valid : (logic@#1) @dyn - @dyn,
+    left cvxif_ready : (logic@#1) @dyn - @dyn,
+    left hart_id : (logic[64]@#1) @dyn - @dyn,
+    left x_issue_ready : (logic@#1) @dyn - @dyn,
+    left x_issue_resp : (logic[64]@#1) @dyn - @dyn,
+    left x_register_ready : (logic@#1) @dyn - @dyn,
+    left waddr : (logic[10]@#1) @dyn - @dyn,
+    left wdata : (logic[128]@#1) @dyn - @dyn,
+    left we_gpr : (logic[2]@#1) @dyn - @dyn,
+    left we_fpr : (logic[2]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for main outputs
+chan iro_out_ch {
+    left issue_ack : (logic@#1) @dyn - @dyn,
+    left fu_data : (logic[64]@#1) @dyn - @dyn,
+    left alu_bypass : (logic[64]@#1) @dyn - @dyn,
+    left rs1_forwarding : (logic[64]@#1) @dyn - @dyn,
+    left rs2_forwarding : (logic[64]@#1) @dyn - @dyn,
+    left pc : (logic[64]@#1) @dyn - @dyn,
+    left is_zcmt : (logic@#1) @dyn - @dyn,
+    left is_compressed_instr : (logic@#1) @dyn - @dyn,
+    left alu_valid : (logic@#1) @dyn - @dyn,
+    left aes_valid : (logic@#1) @dyn - @dyn,
+    left branch_valid : (logic@#1) @dyn - @dyn,
+    left tinst : (logic[32]@#1) @dyn - @dyn,
+    left branch_predict : (logic[64]@#1) @dyn - @dyn,
+    left lsu_valid : (logic@#1) @dyn - @dyn,
+    left mult_valid : (logic@#1) @dyn - @dyn,
+    left fpu_valid : (logic@#1) @dyn - @dyn,
+    left fpu_fmt : (logic[2]@#1) @dyn - @dyn,
+    left fpu_rm : (logic[3]@#1) @dyn - @dyn,
+    left alu2_valid : (logic@#1) @dyn - @dyn,
+    left csr_valid : (logic@#1) @dyn - @dyn,
+    left cvxif_valid : (logic@#1) @dyn - @dyn,
+    left cvxif_off_instr : (logic[32]@#1) @dyn - @dyn,
+    left x_issue_valid : (logic@#1) @dyn - @dyn,
+    left x_issue_req : (logic[64]@#1) @dyn - @dyn,
+    left x_register_valid : (logic@#1) @dyn - @dyn,
+    left x_register : (logic[64]@#1) @dyn - @dyn,
+    left x_commit_valid : (logic@#1) @dyn - @dyn,
+    left x_commit : (logic[64]@#1) @dyn - @dyn,
+    left x_transaction_accepted : (logic@#1) @dyn - @dyn,
+    left x_transaction_rejected : (logic@#1) @dyn - @dyn,
+    left x_issue_writeback : (logic@#1) @dyn - @dyn,
+    left x_id : (logic[3]@#1) @dyn - @dyn,
+    left stall_issue : (logic@#1) @dyn - @dyn,
+    left rvfi_rs1 : (logic[64]@#1) @dyn - @dyn,
+    left rvfi_rs2 : (logic[64]@#1) @dyn - @dyn,
+    left orig_instr_aes_bits : (logic[6]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Main proc
+proc issue_read_operands(
+    inp : left iro_in_ch,
+    out : right iro_out_ch
+) {
+    // [MANUAL] Input staging registers
+    reg r_flush : logic;
+    reg r_stall : logic;
+    reg r_issue_instr : logic[64];
+    reg r_issue_instr_prev : logic[64];
+    reg r_orig_instr : logic[32];
+    reg r_issue_instr_valid : logic;
+    reg r_fwd : logic[64];
+    reg r_flu_ready : logic;
+    reg r_lsu_ready : logic;
+    reg r_fpu_ready : logic;
+    reg r_fpu_early_valid : logic;
+    reg r_cvxif_ready : logic;
+    reg r_hart_id : logic[64];
+    reg r_x_issue_ready : logic;
+    reg r_x_issue_resp : logic[64];
+    reg r_x_register_ready : logic;
+    reg r_waddr : logic[10];
+    reg r_wdata : logic[128];
+    reg r_we_gpr : logic[2];
+    reg r_we_fpr : logic[2];
+
+    // [MANUAL] Pipeline output registers (ID -> EX, always_ff)
+    reg fu_data_q : logic[64];
+    reg alu_bypass_q : logic[64];
+    reg pc_q : logic[64];
+    reg is_zcmt_q : logic;
+    reg is_compressed_q : logic;
+    reg branch_predict_q : logic[64];
+    reg x_trans_rejected_q : logic;
+
+    // [MANUAL] FU valid registers (always_ff)
+    reg alu_valid_q : logic;
+    reg aes_valid_q : logic;
+    reg mult_valid_q : logic;
+    reg fpu_valid_q : logic;
+    reg fpu_fmt_q : logic[2];
+    reg fpu_rm_q : logic[3];
+    reg alu2_valid_q : logic;
+    reg lsu_valid_q : logic;
+    reg csr_valid_q : logic;
+    reg branch_valid_q : logic;
+
+    // [MANUAL-CLEANUP-NEEDED] Opaque registers for submodule outputs
+    // RAW hazard detection, forwarding, FU busy, regfile reads
+    reg stall_raw_r : logic;
+    reg fu_busy_r : logic;
+    reg issue_ack_r : logic;
+    reg fu_data_n_r : logic[64];
+    reg rs1_fwd_r : logic[64];
+    reg rs2_fwd_r : logic[64];
+    reg rvfi_rs1_r : logic[64];
+    reg rvfi_rs2_r : logic[64];
+
+    // [MANUAL] Snapshot registers for pipeline output regs
+    reg snap_fu_data : logic[64];
+    reg snap_alu_bypass : logic[64];
+    reg snap_pc : logic[64];
+    reg snap_is_zcmt : logic;
+    reg snap_is_compressed : logic;
+    reg snap_branch_predict : logic[64];
+    reg snap_x_trans_rejected : logic;
+    reg snap_alu_valid : logic;
+    reg snap_aes_valid : logic;
+    reg snap_mult_valid : logic;
+    reg snap_fpu_valid : logic;
+    reg snap_fpu_fmt : logic[2];
+    reg snap_fpu_rm : logic[3];
+    reg snap_alu2_valid : logic;
+    reg snap_lsu_valid : logic;
+    reg snap_csr_valid : logic;
+    reg snap_branch_valid : logic;
+
+    // [MANUAL] Recv loop: stage all inputs
+    loop {
+        let a1 = recv inp.flush >>
+        set r_flush := a1 >>
+        let a2 = recv inp.stall >>
+        set r_stall := a2 >>
+        let a3 = recv inp.issue_instr >>
+        set r_issue_instr := a3 >>
+        let a4 = recv inp.issue_instr_prev >>
+        set r_issue_instr_prev := a4 >>
+        let a5 = recv inp.orig_instr >>
+        set r_orig_instr := a5 >>
+        let a6 = recv inp.issue_instr_valid >>
+        set r_issue_instr_valid := a6 >>
+        let a7 = recv inp.fwd >>
+        set r_fwd := a7 >>
+        let a8 = recv inp.flu_ready >>
+        set r_flu_ready := a8 >>
+        let a9 = recv inp.lsu_ready >>
+        set r_lsu_ready := a9 >>
+        let a10 = recv inp.fpu_ready >>
+        set r_fpu_ready := a10 >>
+        let a11 = recv inp.fpu_early_valid >>
+        set r_fpu_early_valid := a11 >>
+        let a12 = recv inp.cvxif_ready >>
+        set r_cvxif_ready := a12 >>
+        let a13 = recv inp.hart_id >>
+        set r_hart_id := a13 >>
+        let a14 = recv inp.x_issue_ready >>
+        set r_x_issue_ready := a14 >>
+        let a15 = recv inp.x_issue_resp >>
+        set r_x_issue_resp := a15 >>
+        let a16 = recv inp.x_register_ready >>
+        set r_x_register_ready := a16 >>
+        let a17 = recv inp.waddr >>
+        set r_waddr := a17 >>
+        let a18 = recv inp.wdata >>
+        set r_wdata := a18 >>
+        let a19 = recv inp.we_gpr >>
+        set r_we_gpr := a19 >>
+        let a20 = recv inp.we_fpr >>
+        set r_we_fpr := a20
+    }
+
+    // [MANUAL] Snapshot loop: capture pipeline output register state
+    loop {
+        set snap_fu_data := *fu_data_q;
+        set snap_alu_bypass := *alu_bypass_q;
+        set snap_pc := *pc_q;
+        set snap_is_zcmt := *is_zcmt_q;
+        set snap_is_compressed := *is_compressed_q;
+        set snap_branch_predict := *branch_predict_q;
+        set snap_x_trans_rejected := *x_trans_rejected_q;
+        set snap_alu_valid := *alu_valid_q;
+        set snap_aes_valid := *aes_valid_q;
+        set snap_mult_valid := *mult_valid_q;
+        set snap_fpu_valid := *fpu_valid_q;
+        set snap_fpu_fmt := *fpu_fmt_q;
+        set snap_fpu_rm := *fpu_rm_q;
+        set snap_alu2_valid := *alu2_valid_q;
+        set snap_lsu_valid := *lsu_valid_q;
+        set snap_csr_valid := *csr_valid_q;
+        set snap_branch_valid := *branch_valid_q
+    }
+
+    // [MANUAL] Pipeline register update loop (always_ff @posedge clk)
+    // [MANUAL-CLEANUP-NEEDED] fu_data_n computed by opaque forwarding logic
+    loop {
+        set fu_data_q := *fu_data_n_r >>
+        // [MANUAL] alu_bypass_n = 0 (ALUBypass=0, SuperscalarEn=0)
+        set alu_bypass_q := 64'd0 >>
+        // [MANUAL] pc, is_compressed, branch_predict come from issue_instr_i[0]
+        // [MANUAL-CLEANUP-NEEDED] These should come from actual instruction fields
+        set pc_q := *snap_pc >>
+        set is_compressed_q := *snap_is_compressed >>
+        set branch_predict_q := *snap_branch_predict >>
+        // [MANUAL] is_zcmt: RVZCMT=0 => always 0
+        set is_zcmt_q := 1'b0 >>
+        // [MANUAL] x_transaction_rejected: CvxifEn=0 => always 0
+        set x_trans_rejected_q := 1'b0
+    }
+
+    // [MANUAL] FU valid register update loop (always_ff)
+    // [MANUAL-CLEANUP-NEEDED] FU selection logic simplified — needs full fu_op decode
+    loop {
+        // [MANUAL] Default: clear all valid signals
+        // Actual logic: if valid instruction acknowledged, set corresponding FU valid
+        // On flush, all valids go to 0
+        let flush = *r_flush >>
+        let alu_v = if flush == 1'b1 { 1'b0 } else { 1'b0 } >>
+        let aes_v = if flush == 1'b1 { 1'b0 } else { 1'b0 } >>
+        let mult_v = if flush == 1'b1 { 1'b0 } else { 1'b0 } >>
+        let fpu_v = if flush == 1'b1 { 1'b0 } else { 1'b0 } >>
+        let lsu_v = if flush == 1'b1 { 1'b0 } else { 1'b0 } >>
+        let csr_v = if flush == 1'b1 { 1'b0 } else { 1'b0 } >>
+        let branch_v = if flush == 1'b1 { 1'b0 } else { 1'b0 } >>
+        let alu2_v = if flush == 1'b1 { 1'b0 } else { 1'b0 } >>
+        set alu_valid_q := alu_v >>
+        set aes_valid_q := aes_v >>
+        set mult_valid_q := mult_v >>
+        set fpu_valid_q := fpu_v >>
+        set fpu_fmt_q := 2'd0 >>
+        set fpu_rm_q := 3'd0 >>
+        set alu2_valid_q := alu2_v >>
+        set lsu_valid_q := lsu_v >>
+        set csr_valid_q := csr_v >>
+        set branch_valid_q := branch_v
+    }
+
+    // [MANUAL] Output loop: send all outputs
+    loop {
+        send out.issue_ack (*issue_ack_r) >>
+        send out.fu_data (*snap_fu_data) >>
+        send out.alu_bypass (*snap_alu_bypass) >>
+        send out.rs1_forwarding (*rs1_fwd_r) >>
+        send out.rs2_forwarding (*rs2_fwd_r) >>
+        send out.pc (*snap_pc) >>
+        send out.is_zcmt (*snap_is_zcmt) >>
+        send out.is_compressed_instr (*snap_is_compressed) >>
+        send out.alu_valid (*snap_alu_valid) >>
+        send out.aes_valid (*snap_aes_valid) >>
+        send out.branch_valid (*snap_branch_valid) >>
+        // [MANUAL-CLEANUP-NEEDED] tinst = 0 (RVH=0)
+        send out.tinst (32'd0) >>
+        send out.branch_predict (*snap_branch_predict) >>
+        send out.lsu_valid (*snap_lsu_valid) >>
+        send out.mult_valid (*snap_mult_valid) >>
+        send out.fpu_valid (*snap_fpu_valid) >>
+        send out.fpu_fmt (*snap_fpu_fmt) >>
+        send out.fpu_rm (*snap_fpu_rm) >>
+        send out.alu2_valid (*snap_alu2_valid) >>
+        send out.csr_valid (*snap_csr_valid) >>
+        // [MANUAL-CLEANUP-NEEDED] CvxifEn=0 => cvxif outputs all zero
+        send out.cvxif_valid (1'b0) >>
+        send out.cvxif_off_instr (32'd0) >>
+        send out.x_issue_valid (1'b0) >>
+        send out.x_issue_req (64'd0) >>
+        send out.x_register_valid (1'b0) >>
+        send out.x_register (64'd0) >>
+        send out.x_commit_valid (1'b0) >>
+        send out.x_commit (64'd0) >>
+        send out.x_transaction_accepted (1'b0) >>
+        send out.x_transaction_rejected (*snap_x_trans_rejected) >>
+        send out.x_issue_writeback (1'b0) >>
+        send out.x_id (3'd0) >>
+        send out.stall_issue (*stall_raw_r) >>
+        send out.rvfi_rs1 (*rvfi_rs1_r) >>
+        send out.rvfi_rs2 (*rvfi_rs2_r) >>
+        // [MANUAL-CLEANUP-NEEDED] ZKN=0 => orig_instr_aes_bits always 0
+        send out.orig_instr_aes_bits (6'd0) >>
+        cycle 1
+    }
+}
