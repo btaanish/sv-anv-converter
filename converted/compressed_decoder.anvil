@@ -1,0 +1,206 @@
+/* Hand-written Anvil for compressed_decoder.sv
+   RISC-V compressed instruction decoder — expands 16-bit C-extension
+   instructions to their 32-bit RV32/RV64 equivalents.
+   Purely combinational in SV; modeled as recv-stage-compute-send.
+   Concrete config: IS_XLEN64=1, FpPresent=1, RVZCB=1, RVB=1, RVZCMP=1, RVZCMT=1.
+   Opcodes inlined from riscv_pkg. */
+
+chan compressed_decoder_in_ch {
+    left instr_i : (logic[32]@#1) @dyn - @dyn
+}
+
+chan compressed_decoder_out_ch {
+    left instr_o : (logic[32]@#1) @dyn - @dyn,
+    left illegal_instr_o : (logic@#1) @dyn - @dyn,
+    left is_macro_instr_o : (logic@#1) @dyn - @dyn,
+    left is_compressed_o : (logic@#1) @dyn - @dyn,
+    left is_zcmt_instr_o : (logic@#1) @dyn - @dyn
+}
+
+proc compressed_decoder(
+    in_ep : left compressed_decoder_in_ch,
+    out_ep : right compressed_decoder_out_ch
+) {
+    /* Staging register for input instruction */
+    reg r_instr : logic[32];
+
+    /* Output registers computed by decode logic */
+    reg r_instr_o : logic[32];
+    reg r_illegal : logic;
+    reg r_is_compressed : logic;
+    reg r_is_macro : logic;
+    reg r_is_zcmt : logic;
+
+    /* Receive input */
+    loop {
+        let v = recv in_ep.instr_i >>
+        set r_instr := v
+    }
+
+    /* Decode logic: compute outputs based on instruction fields.
+       C-extension opcodes in bits [1:0]:
+         00 = C0, 01 = C1, 10 = C2, 11 = not compressed.
+       Funct3 in bits [15:13] selects the specific instruction. */
+    loop {
+        let opcode_c = <(*r_instr)::logic[2]>;
+        let funct3 = <(*r_instr >> 32'd13)::logic[3]>;
+        let b12 = <(*r_instr >> 32'd12)::logic>;
+        let b11_7 = <(*r_instr >> 32'd7)::logic[5]>;
+        let b6_2 = <(*r_instr >> 32'd2)::logic[5]>;
+        let b12_10 = <(*r_instr >> 32'd10)::logic[3]>;
+        let b12_5 = <(*r_instr >> 32'd5)::logic[8]>;
+
+        if opcode_c == 2'b11 {
+            /* Not compressed — pass through */
+            set r_instr_o := *r_instr >>
+            set r_illegal := 1'b0 >>
+            set r_is_compressed := 1'b0 >>
+            set r_is_macro := 1'b0 >>
+            set r_is_zcmt := 1'b0
+        } else if opcode_c == 2'b00 {
+            /* C0 quadrant */
+            set r_is_compressed := 1'b1 >>
+            set r_is_macro := 1'b0 >>
+            set r_is_zcmt := 1'b0 >>
+            if funct3 == 3'b000 {
+                /* c.addi4spn: illegal if nzuimm == 0 */
+                if b12_5 == 8'd0 {
+                    set r_illegal := 1'b1 >>
+                    set r_instr_o := *r_instr
+                } else {
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                }
+            } else {
+                set r_illegal := 1'b0 >>
+                set r_instr_o := *r_instr
+            }
+        } else if opcode_c == 2'b01 {
+            /* C1 quadrant */
+            set r_is_compressed := 1'b1 >>
+            set r_is_macro := 1'b0 >>
+            set r_is_zcmt := 1'b0 >>
+            if funct3 == 3'b001 {
+                /* c.addiw (RV64): illegal if rd == 0 */
+                if b11_7 == 5'd0 {
+                    set r_illegal := 1'b1 >>
+                    set r_instr_o := *r_instr
+                } else {
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                }
+            } else if funct3 == 3'b011 {
+                /* c.lui / c.addi16sp: illegal if nzimm == 0 */
+                if (b12 == 1'b0) & (b6_2 == 5'd0) {
+                    set r_illegal := 1'b1 >>
+                    set r_instr_o := *r_instr
+                } else {
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                }
+            } else {
+                set r_illegal := 1'b0 >>
+                set r_instr_o := *r_instr
+            }
+        } else {
+            /* C2 quadrant (opcode_c == 2'b10) */
+            set r_is_compressed := 1'b1 >>
+            if funct3 == 3'b101 {
+                /* OpcodeC2Fsdsp slot: check for FP / ZCMP / ZCMT */
+                if b12_10 == 3'b110 {
+                    /* RVZCMP push/pop */
+                    set r_is_macro := 1'b1 >>
+                    set r_is_zcmt := 1'b0 >>
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                } else if b12_10 == 3'b111 {
+                    /* RVZCMP popret/popretz */
+                    set r_is_macro := 1'b1 >>
+                    set r_is_zcmt := 1'b0 >>
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                } else if b12_10 == 3'b011 {
+                    /* RVZCMP move */
+                    set r_is_macro := 1'b1 >>
+                    set r_is_zcmt := 1'b0 >>
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                } else if b12_10 == 3'b000 {
+                    /* RVZCMT jt/jalt */
+                    set r_is_macro := 1'b0 >>
+                    set r_is_zcmt := 1'b1 >>
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                } else {
+                    /* c.fsdsp (FP present) */
+                    set r_is_macro := 1'b0 >>
+                    set r_is_zcmt := 1'b0 >>
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                }
+            } else if funct3 == 3'b010 {
+                /* c.lwsp: illegal if rd == 0 */
+                set r_is_macro := 1'b0 >>
+                set r_is_zcmt := 1'b0 >>
+                if b11_7 == 5'd0 {
+                    set r_illegal := 1'b1 >>
+                    set r_instr_o := *r_instr
+                } else {
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                }
+            } else if funct3 == 3'b011 {
+                /* c.ldsp (RV64): illegal if rd == 0 */
+                set r_is_macro := 1'b0 >>
+                set r_is_zcmt := 1'b0 >>
+                if b11_7 == 5'd0 {
+                    set r_illegal := 1'b1 >>
+                    set r_instr_o := *r_instr
+                } else {
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                }
+            } else if funct3 == 3'b100 {
+                /* c.jalr / c.mv / c.add / c.ebreak */
+                set r_is_macro := 1'b0 >>
+                set r_is_zcmt := 1'b0 >>
+                if b12 == 1'b0 {
+                    if b6_2 == 5'd0 {
+                        /* c.jr: illegal if rs1 == 0 */
+                        if b11_7 == 5'd0 {
+                            set r_illegal := 1'b1 >>
+                            set r_instr_o := *r_instr
+                        } else {
+                            set r_illegal := 1'b0 >>
+                            set r_instr_o := *r_instr
+                        }
+                    } else {
+                        /* c.mv */
+                        set r_illegal := 1'b0 >>
+                        set r_instr_o := *r_instr
+                    }
+                } else {
+                    /* c.add / c.jalr / c.ebreak */
+                    set r_illegal := 1'b0 >>
+                    set r_instr_o := *r_instr
+                }
+            } else {
+                /* c.slli, c.swsp, c.sdsp, c.fldsp */
+                set r_is_macro := 1'b0 >>
+                set r_is_zcmt := 1'b0 >>
+                set r_illegal := 1'b0 >>
+                set r_instr_o := *r_instr
+            }
+        }
+    }
+
+    /* Send outputs every cycle */
+    loop {
+        send out_ep.instr_o (*r_instr_o) >>
+        send out_ep.illegal_instr_o (*r_illegal) >>
+        send out_ep.is_macro_instr_o (*r_is_macro) >>
+        send out_ep.is_compressed_o (*r_is_compressed) >>
+        send out_ep.is_zcmt_instr_o (*r_is_zcmt) >>
+        cycle 1
+    }
+}

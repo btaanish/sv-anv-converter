@@ -1,0 +1,274 @@
+/* Hand-written Anvil for macro_decoder.sv
+   Zcmp extension macro decoder for CVA6 — decodes cm.push, cm.pop,
+   cm.popret, cm.popretz, cm.mvsa01, cm.mva01s instructions.
+   Has FSM with states: IDLE(0), INIT(1), PUSH_ADDI(2), POPRETZ_1(3), MOVE(4), PUSH_POP_INSTR_2(5).
+   Concrete config: XLEN=64.
+   Opcodes inlined from riscv_pkg. */
+
+chan macro_decoder_in_ch {
+    left instr_i : (logic[32]@#1) @dyn - @dyn,
+    left is_macro_instr_i : (logic@#1) @dyn - @dyn,
+    left illegal_instr_i : (logic@#1) @dyn - @dyn,
+    left is_compressed_i : (logic@#1) @dyn - @dyn,
+    left issue_ack_i : (logic@#1) @dyn - @dyn
+}
+
+chan macro_decoder_out_ch {
+    left instr_o : (logic[32]@#1) @dyn - @dyn,
+    left illegal_instr_o : (logic@#1) @dyn - @dyn,
+    left is_compressed_o : (logic@#1) @dyn - @dyn,
+    left fetch_stall_o : (logic@#1) @dyn - @dyn,
+    left is_last_macro_instr_o : (logic@#1) @dyn - @dyn,
+    left is_double_rd_macro_instr_o : (logic@#1) @dyn - @dyn
+}
+
+proc macro_decoder(
+    in_ep : left macro_decoder_in_ch,
+    out_ep : right macro_decoder_out_ch
+) {
+    /* Input staging registers */
+    reg r_instr : logic[32];
+    reg r_is_macro : logic;
+    reg r_illegal_in : logic;
+    reg r_is_compressed : logic;
+    reg r_issue_ack : logic;
+
+    /* FSM state register: 0=IDLE,1=INIT,2=PUSH_ADDI,3=POPRETZ_1,4=MOVE,5=PUSH_POP_INSTR_2 */
+    reg state : logic[3];
+
+    /* Working registers */
+    reg reg_numbers_q : logic[4];
+    reg store_reg_q : logic[5];
+    reg popretz_inst_q : logic[2];
+    reg offset_q : logic[12];
+
+    /* Output registers */
+    reg r_instr_o : logic[32];
+    reg r_illegal_o : logic;
+    reg r_is_compressed_o : logic;
+    reg r_fetch_stall : logic;
+    reg r_is_last_macro : logic;
+    reg r_is_double_rd : logic;
+
+    /* Receive all inputs into staging registers */
+    loop {
+        let v0 = recv in_ep.instr_i >>
+        set r_instr := v0
+    }
+    loop {
+        let v1 = recv in_ep.is_macro_instr_i >>
+        set r_is_macro := v1
+    }
+    loop {
+        let v2 = recv in_ep.illegal_instr_i >>
+        set r_illegal_in := v2
+    }
+    loop {
+        let v3 = recv in_ep.is_compressed_i >>
+        set r_is_compressed := v3
+    }
+    loop {
+        let v4 = recv in_ep.issue_ack_i >>
+        set r_issue_ack := v4
+    }
+
+    /* Non-macro pass-through: when not a macro, just forward inputs */
+    loop {
+        if *r_is_macro == 1'b0 {
+            set r_instr_o := *r_instr >>
+            set r_illegal_o := *r_illegal_in >>
+            set r_is_compressed_o := *r_is_compressed >>
+            set r_fetch_stall := 1'b0 >>
+            set r_is_last_macro := 1'b0 >>
+            set r_is_double_rd := 1'b0
+        } else {
+            cycle 1
+        }
+    }
+
+    /* Macro FSM: when is_macro, run the state machine */
+    loop {
+        if *r_is_macro == 1'b1 {
+            set r_is_compressed_o := 1'b1 >>
+
+            let b12_10 = <(*r_instr >> 32'd10)::logic[3]>;
+            let b9_8 = <(*r_instr >> 32'd8)::logic[2]>;
+            let b6_5 = <(*r_instr >> 32'd5)::logic[2]>;
+
+            /* Macro type: 0=PUSH,1=POP,2=POPRETZ,3=POPRET,4=MVA01S,5=MVSA01,7=invalid */
+            let mtype = if b12_10 == 3'b110 {
+                    if b9_8 == 2'b00 { 3'd0 } else if b9_8 == 2'b10 { 3'd1 } else { 3'd7 }
+                } else if b12_10 == 3'b111 {
+                    if b9_8 == 2'b00 { 3'd2 } else if b9_8 == 2'b10 { 3'd3 } else { 3'd7 }
+                } else if b12_10 == 3'b011 {
+                    if b6_5 == 2'b01 { 3'd5 } else if b6_5 == 2'b11 { 3'd4 } else { 3'd7 }
+                } else { 3'd7 } >>
+
+            if *state == 3'd0 {
+                /* IDLE: first cycle of macro */
+                if (mtype == 3'd5) | (mtype == 3'd4) {
+                    /* MVSA01 or MVA01S */
+                    set r_fetch_stall := 1'b1 >>
+                    set r_is_double_rd := 1'b1 >>
+                    set r_illegal_o := 1'b0 >>
+                    set r_is_last_macro := 1'b0 >>
+                    set r_instr_o := *r_instr >>
+                    set state := 3'd4
+                } else if mtype == 3'd7 {
+                    /* Invalid */
+                    set r_illegal_o := 1'b1 >>
+                    set r_instr_o := *r_instr >>
+                    set r_fetch_stall := 1'b0 >>
+                    set r_is_last_macro := 1'b0 >>
+                    set r_is_double_rd := 1'b0
+                } else {
+                    /* PUSH/POP/POPRET/POPRETZ */
+                    set r_fetch_stall := 1'b1 >>
+                    set r_illegal_o := 1'b0 >>
+                    set r_is_double_rd := 1'b0 >>
+                    set r_is_last_macro := 1'b0 >>
+                    set r_instr_o := *r_instr >>
+                    if *r_issue_ack == 1'b1 {
+                        set state := 3'd1
+                    } else {
+                        set state := 3'd0
+                    }
+                }
+            } else if *state == 3'd1 {
+                /* INIT: expanding store/load */
+                set r_fetch_stall := 1'b1 >>
+                set r_illegal_o := 1'b0 >>
+                set r_is_double_rd := 1'b0 >>
+                set r_is_last_macro := 1'b0 >>
+                set r_instr_o := *r_instr >>
+                if *r_issue_ack == 1'b1 {
+                    if *reg_numbers_q <= 4'd1 {
+                        if mtype == 3'd2 {
+                            set state := 3'd3
+                        } else {
+                            set state := 3'd2
+                        }
+                    } else {
+                        set reg_numbers_q := *reg_numbers_q - 4'd1 >>
+                        set store_reg_q := *store_reg_q - 5'd1 >>
+                        set offset_q := *offset_q + 12'hFFC
+                    }
+                } else {
+                    cycle 1
+                }
+            } else if *state == 3'd2 {
+                /* PUSH_ADDI: emit stack adjust */
+                set r_illegal_o := 1'b0 >>
+                set r_is_double_rd := 1'b0 >>
+                set r_instr_o := *r_instr >>
+                if *r_issue_ack == 1'b1 {
+                    if (mtype == 3'd2) | (mtype == 3'd3) {
+                        set r_fetch_stall := 1'b1 >>
+                        set r_is_last_macro := 1'b0 >>
+                        set state := 3'd3
+                    } else {
+                        set r_fetch_stall := 1'b0 >>
+                        set r_is_last_macro := 1'b1 >>
+                        set state := 3'd0
+                    }
+                } else {
+                    set r_fetch_stall := 1'b1 >>
+                    set r_is_last_macro := 1'b0 >>
+                    cycle 1
+                }
+            } else if *state == 3'd3 {
+                /* POPRETZ_1: emit lui/addi/ret */
+                set r_illegal_o := 1'b0 >>
+                set r_is_double_rd := 1'b0 >>
+                set r_instr_o := *r_instr >>
+                if *popretz_inst_q == 2'b01 {
+                    if *r_issue_ack == 1'b1 {
+                        set r_fetch_stall := 1'b0 >>
+                        set r_is_last_macro := 1'b1 >>
+                        set state := 3'd0 >>
+                        set popretz_inst_q := *popretz_inst_q - 2'd1
+                    } else {
+                        set r_fetch_stall := 1'b0 >>
+                        set r_is_last_macro := 1'b0 >>
+                        cycle 1
+                    }
+                } else if *popretz_inst_q == 2'b10 {
+                    if *r_issue_ack == 1'b1 {
+                        set r_fetch_stall := 1'b1 >>
+                        set r_is_last_macro := 1'b0 >>
+                        set popretz_inst_q := *popretz_inst_q - 2'd1 >>
+                        set state := 3'd2
+                    } else {
+                        set r_fetch_stall := 1'b1 >>
+                        set r_is_last_macro := 1'b0 >>
+                        cycle 1
+                    }
+                } else if *popretz_inst_q == 2'b11 {
+                    if *r_issue_ack == 1'b1 {
+                        set r_fetch_stall := 1'b1 >>
+                        set r_is_last_macro := 1'b0 >>
+                        set popretz_inst_q := *popretz_inst_q - 2'd1
+                    } else {
+                        set r_fetch_stall := 1'b1 >>
+                        set r_is_last_macro := 1'b0 >>
+                        cycle 1
+                    }
+                } else {
+                    set r_fetch_stall := 1'b0 >>
+                    set r_is_last_macro := 1'b0 >>
+                    cycle 1
+                }
+            } else if *state == 3'd4 {
+                /* MOVE: second move instruction */
+                set r_illegal_o := 1'b0 >>
+                set r_instr_o := *r_instr >>
+                if *r_issue_ack == 1'b1 {
+                    set r_fetch_stall := 1'b0 >>
+                    set r_is_last_macro := 1'b1 >>
+                    set r_is_double_rd := 1'b1 >>
+                    set state := 3'd0
+                } else {
+                    set r_fetch_stall := 1'b1 >>
+                    set r_is_last_macro := 1'b0 >>
+                    set r_is_double_rd := 1'b1 >>
+                    cycle 1
+                }
+            } else if *state == 3'd5 {
+                /* PUSH_POP_INSTR_2: 12-reg extra step */
+                set r_fetch_stall := 1'b1 >>
+                set r_illegal_o := 1'b0 >>
+                set r_is_double_rd := 1'b0 >>
+                set r_is_last_macro := 1'b0 >>
+                set r_instr_o := *r_instr >>
+                if *r_issue_ack == 1'b1 {
+                    set offset_q := *offset_q + 12'hFFC >>
+                    set store_reg_q := *store_reg_q - 5'd1 >>
+                    set state := 3'd1
+                } else {
+                    cycle 1
+                }
+            } else {
+                /* Default: reset to IDLE */
+                set r_fetch_stall := 1'b0 >>
+                set r_illegal_o := 1'b0 >>
+                set r_is_double_rd := 1'b0 >>
+                set r_is_last_macro := 1'b0 >>
+                set r_instr_o := *r_instr >>
+                set state := 3'd0
+            }
+        } else {
+            cycle 1
+        }
+    }
+
+    /* Send outputs every cycle */
+    loop {
+        send out_ep.instr_o (*r_instr_o) >>
+        send out_ep.illegal_instr_o (*r_illegal_o) >>
+        send out_ep.is_compressed_o (*r_is_compressed_o) >>
+        send out_ep.fetch_stall_o (*r_fetch_stall) >>
+        send out_ep.is_last_macro_instr_o (*r_is_last_macro) >>
+        send out_ep.is_double_rd_macro_instr_o (*r_is_double_rd) >>
+        cycle 1
+    }
+}
