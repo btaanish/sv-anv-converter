@@ -1,0 +1,72 @@
+/* Hand-written Anvil for sram.sv
+   SRAM wrapper — aligns data to 64-bit boundaries and instantiates
+   tc_sram_wrapper instances in a generate loop. Optional user-data
+   path when USER_EN > 0.
+   Concrete params: DATA_WIDTH=64, USER_WIDTH=1, USER_EN=0,
+   NUM_WORDS=1024, OUT_REGS=0.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~75
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] Parametric DATA_WIDTH alignment logic hardcoded to 64-bit case
+       - [MANUAL-CLEANUP-NEEDED] Generate loop for tc_sram_wrapper flattened to single instance
+       - [MANUAL-CLEANUP-NEEDED] USER_EN path stubbed (USER_EN=0 assumed)
+       - [MANUAL-CLEANUP-NEEDED] tc_sram_wrapper modeled as opaque register (no spawn)
+       - [MANUAL-CLEANUP-NEEDED] be_i byte-enable width hardcoded to 8
+*/
+
+// [MANUAL] Channel for SRAM request inputs
+chan sram_req_ch {
+    left req   : (logic@#1) @dyn - @dyn,
+    left we    : (logic@#1) @dyn - @dyn,
+    left addr  : (logic[10]@#1) @dyn - @dyn,
+    left wdata : (logic[64]@#1) @dyn - @dyn,
+    left wuser : (logic@#1) @dyn - @dyn,
+    left be    : (logic[8]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for SRAM read outputs
+chan sram_resp_ch {
+    left rdata : (logic[64]@#1) @dyn - @dyn,
+    left ruser : (logic@#1) @dyn - @dyn
+}
+
+proc sram(
+    req_in  : left sram_req_ch,        // [MANUAL] input ports
+    resp_out : right sram_resp_ch      // [MANUAL] output ports
+) {
+    // [MANUAL] Input staging registers
+    reg r_req   : logic;
+    reg r_we    : logic;
+    reg r_addr  : logic[10];
+    reg r_wdata : logic[64];
+    reg r_be    : logic[8];
+
+    // [MANUAL] SRAM storage modeled as opaque register
+    // [MANUAL-CLEANUP-NEEDED] tc_sram_wrapper not instantiated — modeled as register
+    reg r_rdata : logic[64];
+
+    // [MANUAL] Recv loop — stage all inputs
+    loop {
+        let v_req = recv req_in.req >>
+        set r_req := v_req >>
+        let v_we = recv req_in.we >>
+        set r_we := v_we >>
+        let v_addr = recv req_in.addr >>
+        set r_addr := v_addr >>
+        let v_wdata = recv req_in.wdata >>
+        set r_wdata := v_wdata >>
+        let v_wuser = recv req_in.wuser >>
+        let v_be = recv req_in.be >>
+        set r_be := v_be
+    }
+
+    // [MANUAL] Output loop — drive rdata and ruser
+    loop {
+        // [MANUAL-CLEANUP-NEEDED] USER_EN=0: ruser is always 0
+        send resp_out.rdata (*r_rdata) >>
+        send resp_out.ruser (1'b0) >>
+        cycle 1
+    }
+}

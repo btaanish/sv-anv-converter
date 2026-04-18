@@ -1,0 +1,65 @@
+/* Hand-written Anvil for hpdcache_sram_wbyteenable_1rw.sv
+   HPDcache SRAM with byte-enable — selects SyncSpRamBeNx64 or
+   SyncSpRamBeNx32 based on DATA_SIZE parameter. 128-bit case
+   splits into two 64-bit banks.
+   Concrete params: ADDR_SIZE=8, DATA_SIZE=64, DEPTH=256.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~65
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] Only DATA_SIZE=64 path modeled (128/32 paths omitted)
+       - [MANUAL-CLEANUP-NEEDED] SyncSpRamBeNx64 modeled as opaque register
+       - [MANUAL-CLEANUP-NEEDED] Byte-enable wbyteenable width hardcoded to 8
+       - [MANUAL-CLEANUP-NEEDED] clk/rst_n port names differ from standard clk_i/rst_ni
+*/
+
+// [MANUAL] Channel for HPDcache SRAM request inputs
+chan hpdcache_sram_req_ch {
+    left cs         : (logic@#1) @dyn - @dyn,
+    left we         : (logic@#1) @dyn - @dyn,
+    left addr       : (logic[8]@#1) @dyn - @dyn,
+    left wdata      : (logic[64]@#1) @dyn - @dyn,
+    left wbyteenable : (logic[8]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for HPDcache SRAM read output
+chan hpdcache_sram_resp_ch {
+    left rdata : (logic[64]@#1) @dyn - @dyn
+}
+
+proc hpdcache_sram_wbyteenable_1rw(
+    req_in   : left hpdcache_sram_req_ch,   // [MANUAL] input ports
+    resp_out : right hpdcache_sram_resp_ch  // [MANUAL] output port
+) {
+    // [MANUAL] Input staging registers
+    reg r_cs          : logic;
+    reg r_we          : logic;
+    reg r_addr        : logic[8];
+    reg r_wdata       : logic[64];
+    reg r_wbyteenable : logic[8];
+
+    // [MANUAL] SRAM storage modeled as opaque register
+    // [MANUAL-CLEANUP-NEEDED] SyncSpRamBeNx64 not instantiated — modeled as register
+    reg r_rdata : logic[64];
+
+    // [MANUAL] Recv loop — stage all inputs
+    loop {
+        let v_cs = recv req_in.cs >>
+        set r_cs := v_cs >>
+        let v_we = recv req_in.we >>
+        set r_we := v_we >>
+        let v_addr = recv req_in.addr >>
+        set r_addr := v_addr >>
+        let v_wdata = recv req_in.wdata >>
+        set r_wdata := v_wdata >>
+        let v_be = recv req_in.wbyteenable >>
+        set r_wbyteenable := v_be
+    }
+
+    // [MANUAL] Output loop — drive rdata
+    loop {
+        send resp_out.rdata (*r_rdata) >>
+        cycle 1
+    }
+}

@@ -1,0 +1,91 @@
+/* Hand-written Anvil for ariane.sv
+   Ariane top-level wrapper — instantiates cva6 core and optionally
+   a cvxif_example_coprocessor. Wires CVXIF request/response between
+   the core and coprocessor. Passes through all I/O signals.
+   Concrete params: CVA6Cfg=cva6_cfg_empty, CvxifEn=0,
+   AxiAddrWidth=64, AxiDataWidth=64, AxiIdWidth=4.
+
+   Conversion summary:
+     Auto-generated lines (kept from scaffold): 0
+     Manually written/fixed lines: ~100
+     Items needing further review:
+       - [MANUAL-CLEANUP-NEEDED] CVXIF types (readregflags_t, etc.) not expressible — omitted
+       - [MANUAL-CLEANUP-NEEDED] CvxifEn=0 assumed — coprocessor path stubbed
+       - [MANUAL-CLEANUP-NEEDED] cva6 sub-module modeled as opaque registers
+       - [MANUAL-CLEANUP-NEEDED] AXI type parameters flattened to fixed widths
+       - [MANUAL-CLEANUP-NEEDED] rvfi_probes_t struct parameter not expressible
+       - [MANUAL-CLEANUP-NEEDED] Package imports (ariane_pkg, config_pkg) have no Anvil equivalent
+*/
+
+// [MANUAL] Channel for Ariane input signals
+chan ariane_in_ch {
+    left boot_addr : (logic[64]@#1) @dyn - @dyn,
+    left hart_id   : (logic[64]@#1) @dyn - @dyn,
+    left irq       : (logic[2]@#1) @dyn - @dyn,
+    left ipi       : (logic@#1) @dyn - @dyn,
+    left time_irq  : (logic@#1) @dyn - @dyn,
+    left debug_req : (logic@#1) @dyn - @dyn,
+    left noc_resp  : (logic[128]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for Ariane output signals
+chan ariane_out_ch {
+    left rvfi_probes : (logic[128]@#1) @dyn - @dyn,
+    left noc_req     : (logic[128]@#1) @dyn - @dyn
+}
+
+// [MANUAL] Channel for internal CVXIF request/response
+// [MANUAL-CLEANUP-NEEDED] Actual CVXIF types are complex structs — flattened to fixed width
+chan cvxif_internal_ch {
+    left cvxif_req  : (logic[128]@#1) @dyn - @dyn,
+    left cvxif_resp : (logic[128]@#1) @dyn - @dyn
+}
+
+proc ariane(
+    inp  : left ariane_in_ch,     // [MANUAL] input ports
+    out  : right ariane_out_ch    // [MANUAL] output ports
+) {
+    // [MANUAL] Input staging registers
+    reg r_boot_addr : logic[64];
+    reg r_hart_id   : logic[64];
+    reg r_irq       : logic[2];
+    reg r_ipi       : logic;
+    reg r_time_irq  : logic;
+    reg r_debug_req : logic;
+    reg r_noc_resp  : logic[128];
+
+    // [MANUAL] Internal registers for cva6 core outputs
+    // [MANUAL-CLEANUP-NEEDED] cva6 sub-module modeled as opaque registers
+    reg r_rvfi_probes : logic[128];
+    reg r_noc_req     : logic[128];
+
+    // [MANUAL] Internal CVXIF wiring registers
+    // [MANUAL-CLEANUP-NEEDED] CvxifEn=0: cvxif_resp tied to zero
+    reg r_cvxif_resp : logic[128];
+
+    // [MANUAL] Recv loop — stage all inputs
+    loop {
+        let v_boot = recv inp.boot_addr >>
+        set r_boot_addr := v_boot >>
+        let v_hart = recv inp.hart_id >>
+        set r_hart_id := v_hart >>
+        let v_irq = recv inp.irq >>
+        set r_irq := v_irq >>
+        let v_ipi = recv inp.ipi >>
+        set r_ipi := v_ipi >>
+        let v_tirq = recv inp.time_irq >>
+        set r_time_irq := v_tirq >>
+        let v_dbg = recv inp.debug_req >>
+        set r_debug_req := v_dbg >>
+        let v_noc = recv inp.noc_resp >>
+        set r_noc_resp := v_noc
+    }
+
+    // [MANUAL] Output loop — drive rvfi_probes and noc_req
+    // [MANUAL-CLEANUP-NEEDED] In SV these come from cva6 core instance
+    loop {
+        send out.rvfi_probes (*r_rvfi_probes) >>
+        send out.noc_req (*r_noc_req) >>
+        cycle 1
+    }
+}
