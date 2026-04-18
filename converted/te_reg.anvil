@@ -1,0 +1,408 @@
+/* Hand-written Anvil for te_reg.sv
+   Trace encoder register/CSR module with APB interface.
+   Manages filter settings, trace management, and packet emitter config.
+   Concrete: XLEN=32, PRIV_LEN=2 (32-bit arch, no TE_ARCH64).
+   APB address constants from te_pkg (8-bit offsets). */
+
+chan te_reg_in_ch {
+    left trace_req_off : (logic@#1) @dyn - @dyn,
+    left trace_req_on : (logic@#1) @dyn - @dyn,
+    left encapsulator_ready : (logic@#1) @dyn - @dyn,
+    left paddr : (logic[32]@#1) @dyn - @dyn,
+    left pwrite : (logic@#1) @dyn - @dyn,
+    left psel : (logic@#1) @dyn - @dyn,
+    left penable : (logic@#1) @dyn - @dyn,
+    left pwdata : (logic[32]@#1) @dyn - @dyn
+}
+
+chan te_reg_out_ch {
+    left cause_filter : (logic@#1) @dyn - @dyn,
+    left upper_cause : (logic[32]@#1) @dyn - @dyn,
+    left lower_cause : (logic[32]@#1) @dyn - @dyn,
+    left match_cause : (logic[32]@#1) @dyn - @dyn,
+    left cause_mode : (logic@#1) @dyn - @dyn,
+    left tvec_filter : (logic@#1) @dyn - @dyn,
+    left upper_tvec : (logic[32]@#1) @dyn - @dyn,
+    left lower_tvec : (logic[32]@#1) @dyn - @dyn,
+    left match_tvec : (logic[32]@#1) @dyn - @dyn,
+    left tvec_mode : (logic@#1) @dyn - @dyn,
+    left tval_filter : (logic@#1) @dyn - @dyn,
+    left upper_tval : (logic[32]@#1) @dyn - @dyn,
+    left lower_tval : (logic[32]@#1) @dyn - @dyn,
+    left match_tval : (logic[32]@#1) @dyn - @dyn,
+    left tval_mode : (logic@#1) @dyn - @dyn,
+    left priv_lvl_filter : (logic@#1) @dyn - @dyn,
+    left upper_priv : (logic[2]@#1) @dyn - @dyn,
+    left lower_priv : (logic[2]@#1) @dyn - @dyn,
+    left match_priv : (logic[2]@#1) @dyn - @dyn,
+    left priv_lvl_mode : (logic@#1) @dyn - @dyn,
+    left iaddr_filter : (logic@#1) @dyn - @dyn,
+    left upper_iaddr : (logic[32]@#1) @dyn - @dyn,
+    left lower_iaddr : (logic[32]@#1) @dyn - @dyn,
+    left match_iaddr : (logic[32]@#1) @dyn - @dyn,
+    left iaddr_mode : (logic@#1) @dyn - @dyn,
+    left trace_enable : (logic@#1) @dyn - @dyn,
+    left trace_activated : (logic@#1) @dyn - @dyn,
+    left nocontext : (logic@#1) @dyn - @dyn,
+    left notime : (logic@#1) @dyn - @dyn,
+    left encoder_mode : (logic@#1) @dyn - @dyn,
+    left delta_address_en : (logic@#1) @dyn - @dyn,
+    left full_address_en : (logic@#1) @dyn - @dyn,
+    left implicit_exception_en : (logic@#1) @dyn - @dyn,
+    left sijump_en : (logic@#1) @dyn - @dyn,
+    left implicit_return_en : (logic@#1) @dyn - @dyn,
+    left branch_prediction_en : (logic@#1) @dyn - @dyn,
+    left jump_target_cache_en : (logic@#1) @dyn - @dyn,
+    left lossless_trace : (logic@#1) @dyn - @dyn,
+    left shallow_trace : (logic@#1) @dyn - @dyn,
+    left clk_gated : (logic@#1) @dyn - @dyn,
+    left pready : (logic@#1) @dyn - @dyn,
+    left prdata : (logic[32]@#1) @dyn - @dyn
+}
+
+proc te_reg(
+    inp : left te_reg_in_ch,
+    out : right te_reg_out_ch
+) {
+    /* State registers */
+    reg r_cause_filter : logic;
+    reg r_upper_cause : logic[32];
+    reg r_lower_cause : logic[32];
+    reg r_match_cause : logic[32];
+    reg r_cause_mode : logic;
+    reg r_tvec_filter : logic;
+    reg r_upper_tvec : logic[32];
+    reg r_lower_tvec : logic[32];
+    reg r_match_tvec : logic[32];
+    reg r_tvec_mode : logic;
+    reg r_tval_filter : logic;
+    reg r_upper_tval : logic[32];
+    reg r_lower_tval : logic[32];
+    reg r_match_tval : logic[32];
+    reg r_tval_mode : logic;
+    reg r_priv_filter : logic;
+    reg r_upper_priv : logic[2];
+    reg r_lower_priv : logic[2];
+    reg r_match_priv : logic[2];
+    reg r_priv_mode : logic;
+    reg r_iaddr_filter : logic;
+    reg r_upper_iaddr : logic[32];
+    reg r_lower_iaddr : logic[32];
+    reg r_match_iaddr : logic[32];
+    reg r_iaddr_mode : logic;
+    reg r_trace_enable : logic;
+    reg r_trace_activated : logic;
+    reg r_nocontext : logic;
+    reg r_notime : logic;
+    reg r_lossless : logic;
+    reg r_shallow : logic;
+    reg r_delta_addr : logic;
+    reg r_full_addr : logic;
+    reg r_impl_exc : logic;
+    reg r_sijump : logic;
+    reg r_impl_ret : logic;
+    reg r_branch_pred : logic;
+    reg r_jtc : logic;
+    reg r_setup : logic;
+    reg r_prev_req_on : logic;
+    reg r_prev_req_off : logic;
+
+    /* Snapshot registers — avoid borrow conflicts */
+    reg s_cf : logic;
+    reg s_uc : logic[32];
+    reg s_lc : logic[32];
+    reg s_mc : logic[32];
+    reg s_cm : logic;
+    reg s_tf : logic;
+    reg s_ut : logic[32];
+    reg s_lt : logic[32];
+    reg s_mt : logic[32];
+    reg s_tm : logic;
+    reg s_vf : logic;
+    reg s_uv : logic[32];
+    reg s_lv : logic[32];
+    reg s_mv : logic[32];
+    reg s_vm : logic;
+    reg s_pf : logic;
+    reg s_up : logic[2];
+    reg s_lp : logic[2];
+    reg s_mp : logic[2];
+    reg s_pm : logic;
+    reg s_iaf : logic;
+    reg s_ui : logic[32];
+    reg s_li : logic[32];
+    reg s_mi : logic[32];
+    reg s_iam : logic;
+    reg s_te : logic;
+    reg s_ta : logic;
+    reg s_nc : logic;
+    reg s_nt : logic;
+    reg s_ll : logic;
+    reg s_sh : logic;
+    reg s_da : logic;
+    reg s_fa : logic;
+    reg s_ie : logic;
+    reg s_sj : logic;
+    reg s_ir : logic;
+    reg s_bp : logic;
+    reg s_jt : logic;
+    reg s_setup : logic;
+    reg s_prev_on : logic;
+    reg s_prev_off : logic;
+
+    /* Input staging registers */
+    reg r_req_off : logic;
+    reg r_req_on : logic;
+    reg r_enc_ready : logic;
+    reg r_paddr : logic[32];
+    reg r_pwrite : logic;
+    reg r_psel : logic;
+    reg r_penable : logic;
+    reg r_pwdata : logic[32];
+
+    loop {
+        /* Snapshot all state registers */
+        set s_cf := *r_cause_filter;
+        set s_uc := *r_upper_cause;
+        set s_lc := *r_lower_cause;
+        set s_mc := *r_match_cause;
+        set s_cm := *r_cause_mode;
+        set s_tf := *r_tvec_filter;
+        set s_ut := *r_upper_tvec;
+        set s_lt := *r_lower_tvec;
+        set s_mt := *r_match_tvec;
+        set s_tm := *r_tvec_mode;
+        set s_vf := *r_tval_filter;
+        set s_uv := *r_upper_tval;
+        set s_lv := *r_lower_tval;
+        set s_mv := *r_match_tval;
+        set s_vm := *r_tval_mode;
+        set s_pf := *r_priv_filter;
+        set s_up := *r_upper_priv;
+        set s_lp := *r_lower_priv;
+        set s_mp := *r_match_priv;
+        set s_pm := *r_priv_mode;
+        set s_iaf := *r_iaddr_filter;
+        set s_ui := *r_upper_iaddr;
+        set s_li := *r_lower_iaddr;
+        set s_mi := *r_match_iaddr;
+        set s_iam := *r_iaddr_mode;
+        set s_te := *r_trace_enable;
+        set s_ta := *r_trace_activated;
+        set s_nc := *r_nocontext;
+        set s_nt := *r_notime;
+        set s_ll := *r_lossless;
+        set s_sh := *r_shallow;
+        set s_da := *r_delta_addr;
+        set s_fa := *r_full_addr;
+        set s_ie := *r_impl_exc;
+        set s_sj := *r_sijump;
+        set s_ir := *r_impl_ret;
+        set s_bp := *r_branch_pred;
+        set s_jt := *r_jtc;
+        set s_setup := *r_setup;
+        set s_prev_on := *r_prev_req_on;
+        set s_prev_off := *r_prev_req_off >>
+
+        /* Receive and stage all inputs */
+        let v0 = recv inp.trace_req_off >>
+        set r_req_off := v0 >>
+        let v1 = recv inp.trace_req_on >>
+        set r_req_on := v1 >>
+        let v2 = recv inp.encapsulator_ready >>
+        set r_enc_ready := v2 >>
+        let v3 = recv inp.paddr >>
+        set r_paddr := v3 >>
+        let v4 = recv inp.pwrite >>
+        set r_pwrite := v4 >>
+        let v5 = recv inp.psel >>
+        set r_psel := v5 >>
+        let v6 = recv inp.penable >>
+        set r_penable := v6 >>
+        let v7 = recv inp.pwdata >>
+        set r_pwdata := v7 >>
+
+        /* Edge detection — rising edge of trace_req_on/off */
+        let re_on = (*r_req_on == 1'b1) & (*s_prev_on == 1'b0);
+        let re_off = (*r_req_off == 1'b1) & (*s_prev_off == 1'b0);
+
+        /* Trace enable logic */
+        let turn_on = (*s_te == 1'b0) & (re_on == 1'b1);
+        let turn_off = (*s_te == 1'b1) & (re_off == 1'b1);
+        let trace_en_next = if (turn_on == 1'b1) | (turn_off == 1'b1) {
+            ~(*s_te)
+        } else { *s_te };
+
+        /* APB protocol decode */
+        let setup_val = (*r_psel == 1'b1) & (*r_penable == 1'b0);
+        let pready_val = (*s_setup == 1'b1) & (*r_psel == 1'b1) & (*r_penable == 1'b1);
+        let read_access = (pready_val == 1'b1) & (*r_pwrite == 1'b0);
+        let write_access = (pready_val == 1'b1) & (*r_pwrite == 1'b1);
+
+        /* Address and write data */
+        let addr = <(*r_paddr)::logic[8]>;
+        let wdata = *r_pwdata;
+
+        /* Compute next register values — write decode (reads from snapshots) */
+        let cf_next = if (write_access == 1'b1) & (addr == 8'd0) { <(wdata)::logic> } else { *s_cf };
+        let cm_next = if (write_access == 1'b1) & (addr == 8'd0) { <(wdata >> 32'd1)::logic> } else { *s_cm };
+        let tf_next = if (write_access == 1'b1) & (addr == 8'd1) { <(wdata)::logic> } else { *s_tf };
+        let tm_next = if (write_access == 1'b1) & (addr == 8'd1) { <(wdata >> 32'd1)::logic> } else { *s_tm };
+        let vf_next = if (write_access == 1'b1) & (addr == 8'd2) { <(wdata)::logic> } else { *s_vf };
+        let vm_next = if (write_access == 1'b1) & (addr == 8'd2) { <(wdata >> 32'd1)::logic> } else { *s_vm };
+        let pf_next = if (write_access == 1'b1) & (addr == 8'd3) { <(wdata)::logic> } else { *s_pf };
+        let pm_next = if (write_access == 1'b1) & (addr == 8'd3) { <(wdata >> 32'd1)::logic> } else { *s_pm };
+        let iaf_next = if (write_access == 1'b1) & (addr == 8'd4) { <(wdata)::logic> } else { *s_iaf };
+        let iam_next = if (write_access == 1'b1) & (addr == 8'd4) { <(wdata >> 32'd1)::logic> } else { *s_iam };
+        let uc_next = if (write_access == 1'b1) & (addr == 8'd5) { wdata } else { *s_uc };
+        let lc_next = if (write_access == 1'b1) & (addr == 8'd6) { wdata } else { *s_lc };
+        let mc_next = if (write_access == 1'b1) & (addr == 8'd7) { wdata } else { *s_mc };
+        let ut_next = if (write_access == 1'b1) & (addr == 8'd8) { wdata } else { *s_ut };
+        let lt_next = if (write_access == 1'b1) & (addr == 8'd10) { wdata } else { *s_lt };
+        let mt_next = if (write_access == 1'b1) & (addr == 8'd12) { wdata } else { *s_mt };
+        let uv_next = if (write_access == 1'b1) & (addr == 8'd14) { wdata } else { *s_uv };
+        let lv_next = if (write_access == 1'b1) & (addr == 8'd16) { wdata } else { *s_lv };
+        let mv_next = if (write_access == 1'b1) & (addr == 8'd18) { wdata } else { *s_mv };
+        let lp_next = if (write_access == 1'b1) & (addr == 8'd20) { <(wdata)::logic[2]> } else { *s_lp };
+        let up_next = if (write_access == 1'b1) & (addr == 8'd20) { <(wdata >> 32'd2)::logic[2]> } else { *s_up };
+        let mp_next = if (write_access == 1'b1) & (addr == 8'd21) { <(wdata)::logic[2]> } else { *s_mp };
+        let ui_next = if (write_access == 1'b1) & (addr == 8'd22) { wdata } else { *s_ui };
+        let li_next = if (write_access == 1'b1) & (addr == 8'd24) { wdata } else { *s_li };
+        let mi_next = if (write_access == 1'b1) & (addr == 8'd26) { wdata } else { *s_mi };
+        let ta_next = if (write_access == 1'b1) & (addr == 8'd28) { <(wdata)::logic> } else { *s_ta };
+        let ll_next = if (write_access == 1'b1) & (addr == 8'd29) { <(wdata)::logic> } else { *s_ll };
+        let sh_next = if (write_access == 1'b1) & (addr == 8'd30) { <(wdata)::logic> } else { *s_sh };
+        let nt_next = if (write_access == 1'b1) & (addr == 8'd31) { <(wdata)::logic> } else { *s_nt };
+        let nc_next = if (write_access == 1'b1) & (addr == 8'd32) { <(wdata)::logic> } else { *s_nc };
+        let da_next = if (write_access == 1'b1) & (addr == 8'd33) { <(wdata)::logic> } else { *s_da };
+        let fa_next = if (write_access == 1'b1) & (addr == 8'd34) { <(wdata)::logic> } else { *s_fa };
+        let ie_next = if (write_access == 1'b1) & (addr == 8'd35) { <(wdata)::logic> } else { *s_ie };
+        let sj_next = if (write_access == 1'b1) & (addr == 8'd36) { <(wdata)::logic> } else { *s_sj };
+        let ir_next = if (write_access == 1'b1) & (addr == 8'd37) { <(wdata)::logic> } else { *s_ir };
+        let bp_next = if (write_access == 1'b1) & (addr == 8'd38) { <(wdata)::logic> } else { *s_bp };
+        let jt_next = if (write_access == 1'b1) & (addr == 8'd39) { <(wdata)::logic> } else { *s_jt };
+
+        /* APB read data — address decode (reads from snapshots) */
+        let prdata_val =
+            if read_access == 1'b0 { 32'd0 }
+            else if addr == 8'd0 { <(*s_cf)::logic[32]> | (<(*s_cm)::logic[32]> << 32'd1) }
+            else if addr == 8'd1 { <(*s_tf)::logic[32]> | (<(*s_tm)::logic[32]> << 32'd1) }
+            else if addr == 8'd2 { <(*s_vf)::logic[32]> | (<(*s_vm)::logic[32]> << 32'd1) }
+            else if addr == 8'd3 { <(*s_pf)::logic[32]> | (<(*s_pm)::logic[32]> << 32'd1) }
+            else if addr == 8'd4 { <(*s_iaf)::logic[32]> | (<(*s_iam)::logic[32]> << 32'd1) }
+            else if addr == 8'd5 { *s_uc }
+            else if addr == 8'd6 { *s_lc }
+            else if addr == 8'd7 { *s_mc }
+            else if addr == 8'd8 { *s_ut }
+            else if addr == 8'd10 { *s_lt }
+            else if addr == 8'd12 { *s_mt }
+            else if addr == 8'd14 { *s_uv }
+            else if addr == 8'd16 { *s_lv }
+            else if addr == 8'd18 { *s_mv }
+            else if addr == 8'd20 { <(*s_lp)::logic[32]> | (<(*s_up)::logic[32]> << 32'd2) }
+            else if addr == 8'd21 { <(*s_mp)::logic[32]> }
+            else if addr == 8'd22 { *s_ui }
+            else if addr == 8'd24 { *s_li }
+            else if addr == 8'd26 { *s_mi }
+            else if addr == 8'd28 { <(*s_ta)::logic[32]> }
+            else if addr == 8'd29 { <(*s_ll)::logic[32]> }
+            else if addr == 8'd30 { <(*s_sh)::logic[32]> }
+            else if addr == 8'd31 { <(*s_nt)::logic[32]> }
+            else if addr == 8'd32 { <(*s_nc)::logic[32]> }
+            else if addr == 8'd33 { <(*s_da)::logic[32]> }
+            else if addr == 8'd34 { <(*s_fa)::logic[32]> }
+            else if addr == 8'd35 { <(*s_ie)::logic[32]> }
+            else if addr == 8'd36 { <(*s_sj)::logic[32]> }
+            else if addr == 8'd37 { <(*s_ir)::logic[32]> }
+            else if addr == 8'd38 { <(*s_bp)::logic[32]> }
+            else if addr == 8'd39 { <(*s_jt)::logic[32]> }
+            else { 32'd0 };
+
+        /* Send all outputs (from snapshots for current values) */
+        send out.cause_filter (*s_cf);
+        send out.upper_cause (*s_uc);
+        send out.lower_cause (*s_lc);
+        send out.match_cause (*s_mc);
+        send out.cause_mode (*s_cm);
+        send out.tvec_filter (*s_tf);
+        send out.upper_tvec (*s_ut);
+        send out.lower_tvec (*s_lt);
+        send out.match_tvec (*s_mt);
+        send out.tvec_mode (*s_tm);
+        send out.tval_filter (*s_vf);
+        send out.upper_tval (*s_uv);
+        send out.lower_tval (*s_lv);
+        send out.match_tval (*s_mv);
+        send out.tval_mode (*s_vm);
+        send out.priv_lvl_filter (*s_pf);
+        send out.upper_priv (*s_up);
+        send out.lower_priv (*s_lp);
+        send out.match_priv (*s_mp);
+        send out.priv_lvl_mode (*s_pm);
+        send out.iaddr_filter (*s_iaf);
+        send out.upper_iaddr (*s_ui);
+        send out.lower_iaddr (*s_li);
+        send out.match_iaddr (*s_mi);
+        send out.iaddr_mode (*s_iam);
+        send out.trace_enable (trace_en_next);
+        send out.trace_activated (*s_ta);
+        send out.nocontext (*s_nc);
+        send out.notime (*s_nt);
+        send out.encoder_mode (1'b0);
+        send out.delta_address_en (*s_da);
+        send out.full_address_en (*s_fa);
+        send out.implicit_exception_en (*s_ie);
+        send out.sijump_en (*s_sj);
+        send out.implicit_return_en (*s_ir);
+        send out.branch_prediction_en (*s_bp);
+        send out.jump_target_cache_en (*s_jt);
+        send out.lossless_trace (*s_ll);
+        send out.shallow_trace (*s_sh);
+        send out.clk_gated (*s_ta);
+        send out.pready (pready_val);
+        send out.prdata (prdata_val) >>
+
+        /* Update all state registers */
+        set r_trace_enable := trace_en_next;
+        set r_cause_filter := cf_next;
+        set r_cause_mode := cm_next;
+        set r_upper_cause := uc_next;
+        set r_lower_cause := lc_next;
+        set r_match_cause := mc_next;
+        set r_tvec_filter := tf_next;
+        set r_tvec_mode := tm_next;
+        set r_upper_tvec := ut_next;
+        set r_lower_tvec := lt_next;
+        set r_match_tvec := mt_next;
+        set r_tval_filter := vf_next;
+        set r_tval_mode := vm_next;
+        set r_upper_tval := uv_next;
+        set r_lower_tval := lv_next;
+        set r_match_tval := mv_next;
+        set r_priv_filter := pf_next;
+        set r_priv_mode := pm_next;
+        set r_upper_priv := up_next;
+        set r_lower_priv := lp_next;
+        set r_match_priv := mp_next;
+        set r_iaddr_filter := iaf_next;
+        set r_iaddr_mode := iam_next;
+        set r_upper_iaddr := ui_next;
+        set r_lower_iaddr := li_next;
+        set r_match_iaddr := mi_next;
+        set r_trace_activated := ta_next;
+        set r_nocontext := nc_next;
+        set r_notime := nt_next;
+        set r_delta_addr := da_next;
+        set r_full_addr := fa_next;
+        set r_impl_exc := ie_next;
+        set r_sijump := sj_next;
+        set r_impl_ret := ir_next;
+        set r_branch_pred := bp_next;
+        set r_jtc := jt_next;
+        set r_lossless := ll_next;
+        set r_shallow := sh_next;
+        set r_setup := setup_val;
+        set r_prev_req_on := *r_req_on;
+        set r_prev_req_off := *r_req_off
+    }
+}
