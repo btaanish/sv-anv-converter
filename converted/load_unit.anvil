@@ -1,0 +1,453 @@
+/* Hand-written Anvil for load_unit.sv
+   Load unit: handles load requests with FSM, load buffer, and sign extension.
+   Concrete params: XLEN=64, PLEN=56, TRANS_ID_BITS=3,
+   XLEN_ALIGN_BYTES=3, NrLoadBufEntries=2, REQ_ID_BITS=1,
+   DCACHE_INDEX_WIDTH=12, DCACHE_TAG_WIDTH=44, PPNW=44,
+   MmuPresent=1, NonIdemPotenceEn=1, SpeculativeSb=0,
+   RVH=0, FpPresent=1, IS_XLEN64=1.
+   LDBUF_FALLTHROUGH=0 (NrLoadBufEntries=2 > 1). */
+
+/* FSM states */
+enum lu_state {
+    IDLE,
+    WAIT_GNT,
+    SEND_TAG,
+    WAIT_PAGE_OFFSET,
+    ABORT_TRANSACTION,
+    ABORT_TRANSACTION_NI,
+    WAIT_TRANSLATION,
+    WAIT_FLUSH,
+    WAIT_WB_EMPTY
+}
+
+chan lu_in_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left valid : (logic@#1) @dyn - @dyn,
+    left lsu_ctrl_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left lsu_ctrl_trans_id : (logic[3]@#1) @dyn - @dyn,
+    left lsu_ctrl_operation : (logic[8]@#1) @dyn - @dyn,
+    left lsu_ctrl_be : (logic[8]@#1) @dyn - @dyn,
+    left mbe : (logic@#1) @dyn - @dyn,
+    left paddr : (logic[56]@#1) @dyn - @dyn,
+    left ex_valid_i : (logic@#1) @dyn - @dyn,
+    left ex_cause_i : (logic[64]@#1) @dyn - @dyn,
+    left ex_tval_i : (logic[64]@#1) @dyn - @dyn,
+    left dtlb_hit : (logic@#1) @dyn - @dyn,
+    left dtlb_ppn : (logic[44]@#1) @dyn - @dyn,
+    left page_offset_matches : (logic@#1) @dyn - @dyn,
+    left store_buffer_empty : (logic@#1) @dyn - @dyn,
+    left commit_tran_id : (logic[3]@#1) @dyn - @dyn,
+    left dcache_data_gnt : (logic@#1) @dyn - @dyn,
+    left dcache_data_rvalid : (logic@#1) @dyn - @dyn,
+    left dcache_data_rdata : (logic[64]@#1) @dyn - @dyn,
+    left dcache_data_rid : (logic@#1) @dyn - @dyn,
+    left dcache_wbuffer_not_ni : (logic@#1) @dyn - @dyn
+}
+
+chan lu_out_ch {
+    left pop_ld : (logic@#1) @dyn - @dyn,
+    left valid_o : (logic@#1) @dyn - @dyn,
+    left trans_id_o : (logic[3]@#1) @dyn - @dyn,
+    left result_o : (logic[64]@#1) @dyn - @dyn,
+    left ex_valid_o : (logic@#1) @dyn - @dyn,
+    left ex_cause_o : (logic[64]@#1) @dyn - @dyn,
+    left ex_tval_o : (logic[64]@#1) @dyn - @dyn,
+    left translation_req : (logic@#1) @dyn - @dyn,
+    left vaddr_o : (logic[64]@#1) @dyn - @dyn,
+    left tinst_o : (logic[32]@#1) @dyn - @dyn,
+    left hs_ld_st_inst : (logic@#1) @dyn - @dyn,
+    left hlvx_inst : (logic@#1) @dyn - @dyn,
+    left page_offset_o : (logic[12]@#1) @dyn - @dyn,
+    left data_req : (logic@#1) @dyn - @dyn,
+    left data_we : (logic@#1) @dyn - @dyn,
+    left data_wdata : (logic[64]@#1) @dyn - @dyn,
+    left data_be : (logic[8]@#1) @dyn - @dyn,
+    left data_size : (logic[2]@#1) @dyn - @dyn,
+    left kill_req : (logic@#1) @dyn - @dyn,
+    left tag_valid : (logic@#1) @dyn - @dyn,
+    left address_index : (logic[12]@#1) @dyn - @dyn,
+    left address_tag : (logic[44]@#1) @dyn - @dyn,
+    left data_id : (logic@#1) @dyn - @dyn,
+    left data_wuser : (logic@#1) @dyn - @dyn
+}
+
+proc load_unit(
+    inp : left lu_in_ch,
+    out : right lu_out_ch
+) {
+    /* FSM state */
+    reg state_q : lu_state;
+
+    /* Load buffer: 2 entries */
+    reg ldbuf_valid0 : logic;
+    reg ldbuf_valid1 : logic;
+    reg ldbuf_flushed0 : logic;
+    reg ldbuf_flushed1 : logic;
+    reg ldbuf_trans_id0 : logic[3];
+    reg ldbuf_trans_id1 : logic[3];
+    reg ldbuf_addr_off0 : logic[3];
+    reg ldbuf_addr_off1 : logic[3];
+    reg ldbuf_op0 : logic[8];
+    reg ldbuf_op1 : logic[8];
+    reg ldbuf_last_id : logic;
+
+    /* Input staging */
+    reg r_flush : logic;
+    reg r_valid : logic;
+    reg r_vaddr : logic[64];
+    reg r_trans_id : logic[3];
+    reg r_operation : logic[8];
+    reg r_be : logic[8];
+    reg r_mbe : logic;
+    reg r_paddr : logic[56];
+    reg r_ex_valid : logic;
+    reg r_ex_cause : logic[64];
+    reg r_ex_tval : logic[64];
+    reg r_dtlb_hit : logic;
+    reg r_dtlb_ppn : logic[44];
+    reg r_page_off_match : logic;
+    reg r_store_buf_empty : logic;
+    reg r_commit_tid : logic[3];
+    reg r_data_gnt : logic;
+    reg r_data_rvalid : logic;
+    reg r_data_rdata : logic[64];
+    reg r_data_rid : logic;
+    reg r_wbuf_not_ni : logic;
+
+    /* Snapshot registers */
+    reg snap_state : lu_state;
+    reg snap_v0 : logic;
+    reg snap_v1 : logic;
+    reg snap_f0 : logic;
+    reg snap_f1 : logic;
+    reg snap_tid0 : logic[3];
+    reg snap_tid1 : logic[3];
+    reg snap_off0 : logic[3];
+    reg snap_off1 : logic[3];
+    reg snap_op0 : logic[8];
+    reg snap_op1 : logic[8];
+    reg snap_last_id : logic;
+
+    /* Recv loop */
+    loop {
+        let a0 = recv inp.flush >>
+        set r_flush := a0 >>
+        let a1 = recv inp.valid >>
+        set r_valid := a1 >>
+        let a2 = recv inp.lsu_ctrl_vaddr >>
+        set r_vaddr := a2 >>
+        let a3 = recv inp.lsu_ctrl_trans_id >>
+        set r_trans_id := a3 >>
+        let a4 = recv inp.lsu_ctrl_operation >>
+        set r_operation := a4 >>
+        let a5 = recv inp.lsu_ctrl_be >>
+        set r_be := a5 >>
+        let a6 = recv inp.mbe >>
+        set r_mbe := a6 >>
+        let a7 = recv inp.paddr >>
+        set r_paddr := a7 >>
+        let a8 = recv inp.ex_valid_i >>
+        set r_ex_valid := a8 >>
+        let a9 = recv inp.ex_cause_i >>
+        set r_ex_cause := a9 >>
+        let a10 = recv inp.ex_tval_i >>
+        set r_ex_tval := a10 >>
+        let a11 = recv inp.dtlb_hit >>
+        set r_dtlb_hit := a11 >>
+        let a12 = recv inp.dtlb_ppn >>
+        set r_dtlb_ppn := a12 >>
+        let a13 = recv inp.page_offset_matches >>
+        set r_page_off_match := a13 >>
+        let a14 = recv inp.store_buffer_empty >>
+        set r_store_buf_empty := a14 >>
+        let a15 = recv inp.commit_tran_id >>
+        set r_commit_tid := a15 >>
+        let a16 = recv inp.dcache_data_gnt >>
+        set r_data_gnt := a16 >>
+        let a17 = recv inp.dcache_data_rvalid >>
+        set r_data_rvalid := a17 >>
+        let a18 = recv inp.dcache_data_rdata >>
+        set r_data_rdata := a18 >>
+        let a19 = recv inp.dcache_data_rid >>
+        set r_data_rid := a19 >>
+        let a20 = recv inp.dcache_wbuffer_not_ni >>
+        set r_wbuf_not_ni := a20 >>
+        cycle 1
+    }
+
+    /* Snapshot loop */
+    loop {
+        set snap_state := *state_q;
+        set snap_v0 := *ldbuf_valid0;
+        set snap_v1 := *ldbuf_valid1;
+        set snap_f0 := *ldbuf_flushed0;
+        set snap_f1 := *ldbuf_flushed1;
+        set snap_tid0 := *ldbuf_trans_id0;
+        set snap_tid1 := *ldbuf_trans_id1;
+        set snap_off0 := *ldbuf_addr_off0;
+        set snap_off1 := *ldbuf_addr_off1;
+        set snap_op0 := *ldbuf_op0;
+        set snap_op1 := *ldbuf_op1;
+        set snap_last_id := *ldbuf_last_id
+    }
+
+    /* Output loop: combinational outputs */
+    loop {
+        /* Feed-through signals */
+        send out.page_offset_o (<(*r_vaddr)::logic[12]>) >>
+        send out.vaddr_o (*r_vaddr) >>
+        send out.hs_ld_st_inst (1'b0) >>
+        send out.hlvx_inst (1'b0) >>
+        send out.tinst_o (32'd0) >>
+        send out.data_we (1'b0) >>
+        send out.data_wdata (64'd0) >>
+        send out.data_wuser (1'b0) >>
+        send out.address_index (<(*r_vaddr)::logic[12]>) >>
+
+        /* Address tag from paddr */
+        let tag = *r_paddr >> 12 >>
+        send out.address_tag (<(tag)::logic[44]>) >>
+
+        /* Load buffer free index: first invalid entry */
+        let ldbuf_full = *snap_v0 & *snap_v1 >>
+        let free_idx = if (*snap_v0 == 1'b0) { 1'b0 } else { 1'b1 } >>
+        send out.data_id (free_idx) >>
+
+        /* data_be and data_size from operation */
+        send out.data_be (*r_be) >>
+        /* Simplified: extract transfer size as 2 bits from operation */
+        let sz = <(*r_operation)::logic[2]> >>
+        send out.data_size (sz) >>
+
+        /* Exception forwarding */
+        send out.ex_cause_o (*r_ex_cause) >>
+        send out.ex_tval_o (*r_ex_tval) >>
+
+        /* FSM-driven outputs: default to 0 */
+        let is_idle = if (*snap_state in {lu_state::IDLE, lu_state::SEND_TAG}) { 1'b1 } else { 1'b0 } >>
+        let accept = *r_valid & (~ldbuf_full) >>
+
+        /* Stall NI check */
+        let not_commit_time = if (*r_commit_tid != *r_trans_id) { 1'b1 } else { 1'b0 } >>
+        let inflight_stores = (~(*r_wbuf_not_ni)) | (~(*r_store_buf_empty)) >>
+        let stall_ni = inflight_stores & not_commit_time >>
+
+        /* Translation request */
+        let trans_req = match (*snap_state) {
+            lu_state::IDLE => accept & *r_dtlb_hit,
+            lu_state::WAIT_GNT => 1'b1,
+            lu_state::WAIT_TRANSLATION => 1'b1,
+            _ => 1'b0
+        } >>
+        send out.translation_req (trans_req) >>
+
+        /* Data request */
+        let dreq = match (*snap_state) {
+            lu_state::IDLE => accept & (~(*r_page_off_match)),
+            lu_state::WAIT_GNT => 1'b1,
+            lu_state::SEND_TAG => accept & (~(*r_page_off_match)),
+            _ => 1'b0
+        } >>
+        send out.data_req (dreq) >>
+
+        /* Kill request */
+        let kill = match (*snap_state) {
+            lu_state::SEND_TAG => *r_ex_valid,
+            lu_state::WAIT_FLUSH => 1'b1,
+            lu_state::ABORT_TRANSACTION => 1'b1,
+            lu_state::ABORT_TRANSACTION_NI => 1'b1,
+            _ => 1'b0
+        } >>
+        send out.kill_req (kill) >>
+
+        /* Tag valid */
+        let tv = match (*snap_state) {
+            lu_state::SEND_TAG => 1'b1,
+            lu_state::WAIT_FLUSH => 1'b1,
+            lu_state::ABORT_TRANSACTION => 1'b1,
+            lu_state::ABORT_TRANSACTION_NI => 1'b1,
+            _ => 1'b0
+        } >>
+        send out.tag_valid (tv) >>
+
+        /* Pop load output */
+        let pop = match (*snap_state) {
+            lu_state::IDLE => accept & (~(*r_page_off_match)) & *r_data_gnt & *r_dtlb_hit & (~stall_ni),
+            lu_state::WAIT_GNT => *r_data_gnt & *r_dtlb_hit & (~stall_ni),
+            lu_state::SEND_TAG => accept & (~(*r_page_off_match)) & *r_data_gnt & *r_dtlb_hit & (~stall_ni),
+            lu_state::WAIT_TRANSLATION => *r_ex_valid & (~(*r_data_rvalid)),
+            _ => 1'b0
+        } >>
+        send out.pop_ld (pop) >>
+
+        /* Result: load buffer retire logic */
+        let rindex = *r_data_rid >>
+        let rdata_tid = if (rindex == 1'b0) { *snap_tid0 } else { *snap_tid1 } >>
+        let rdata_off = if (rindex == 1'b0) { *snap_off0 } else { *snap_off1 } >>
+        let rdata_op = if (rindex == 1'b0) { *snap_op0 } else { *snap_op1 } >>
+        let rdata_flushed = if (rindex == 1'b0) { *snap_f0 } else { *snap_f1 } >>
+
+        /* Shift data by address offset */
+        let shift_amt = <(rdata_off)::logic[6]> << 6'd3 >>
+        let shifted = *r_data_rdata >> <(shift_amt)::logic[64]> >>
+
+        /* Sign extension / result mux (simplified) */
+        /* operation encoding: LB=0x00, LBU=0x04, LH=0x01, LHU=0x05, LW=0x02, LWU=0x06, LD=0x03 */
+        let result = shifted >>
+
+        send out.result_o (result) >>
+
+        /* Valid output */
+        let v_out_base = *r_data_rvalid & (~rdata_flushed) >>
+        let kill_last = if (*snap_last_id == rindex) { kill } else { 1'b0 } >>
+        let v_rvalid = v_out_base & (~kill_last) >>
+
+        /* Exception during SEND_TAG + rvalid */
+        let ex_send_tag = if (*snap_state in {lu_state::SEND_TAG}) { *r_ex_valid & *r_data_rvalid } else { 1'b0 } >>
+
+        /* Exception during WAIT_TRANSLATION */
+        let ex_wait_trans = if (*snap_state in {lu_state::WAIT_TRANSLATION}) { *r_ex_valid & (~(*r_data_rvalid)) & *r_valid } else { 1'b0 } >>
+
+        let valid_final = v_rvalid | ex_send_tag | ex_wait_trans >>
+        let ex_valid_final = (v_out_base & ex_send_tag) | ex_wait_trans >>
+
+        /* trans_id: normally from load buffer, but from lsu_ctrl during WAIT_TRANSLATION exception */
+        let tid_out = if (ex_wait_trans == 1'b1) { *r_trans_id } else { rdata_tid } >>
+
+        send out.valid_o (valid_final) >>
+        send out.trans_id_o (tid_out) >>
+        send out.ex_valid_o (ex_valid_final) >>
+        cycle 1
+    }
+
+    /* FSM state update loop */
+    loop {
+        let accept = *r_valid & ~(*snap_v0 & *snap_v1) >>
+        let stall_ni_u = (~(*r_wbuf_not_ni) | ~(*r_store_buf_empty)) & (if (*r_commit_tid != *r_trans_id) { 1'b1 } else { 1'b0 }) >>
+
+        if (*r_flush == 1'b1) {
+            set state_q := lu_state::WAIT_FLUSH
+        } else {
+            match (*snap_state) {
+                lu_state::IDLE => {
+                    if (accept == 1'b1) {
+                        if (*r_page_off_match == 1'b1) {
+                            set state_q := lu_state::WAIT_PAGE_OFFSET
+                        } else if (*r_data_gnt == 1'b0) {
+                            set state_q := lu_state::WAIT_GNT
+                        } else if (*r_dtlb_hit == 1'b0) {
+                            set state_q := lu_state::ABORT_TRANSACTION
+                        } else if (stall_ni_u == 1'b1) {
+                            set state_q := lu_state::ABORT_TRANSACTION_NI
+                        } else {
+                            set state_q := lu_state::SEND_TAG
+                        }
+                    } else {
+                        cycle 1
+                    }
+                },
+                lu_state::WAIT_PAGE_OFFSET => {
+                    if (*r_page_off_match == 1'b0) {
+                        set state_q := lu_state::WAIT_GNT
+                    } else {
+                        cycle 1
+                    }
+                },
+                lu_state::WAIT_GNT => {
+                    if (*r_data_gnt == 1'b1) {
+                        if (*r_dtlb_hit == 1'b0) {
+                            set state_q := lu_state::ABORT_TRANSACTION
+                        } else if (stall_ni_u == 1'b1) {
+                            set state_q := lu_state::ABORT_TRANSACTION_NI
+                        } else {
+                            set state_q := lu_state::SEND_TAG
+                        }
+                    } else {
+                        cycle 1
+                    }
+                },
+                lu_state::SEND_TAG => {
+                    if (accept == 1'b1) {
+                        if (*r_page_off_match == 1'b1) {
+                            set state_q := lu_state::WAIT_PAGE_OFFSET
+                        } else if (*r_data_gnt == 1'b0) {
+                            set state_q := lu_state::WAIT_GNT
+                        } else if (*r_dtlb_hit == 1'b0) {
+                            set state_q := lu_state::ABORT_TRANSACTION
+                        } else if (stall_ni_u == 1'b1) {
+                            set state_q := lu_state::ABORT_TRANSACTION_NI
+                        } else {
+                            set state_q := lu_state::SEND_TAG
+                        }
+                    } else {
+                        set state_q := lu_state::IDLE
+                    }
+                },
+                lu_state::WAIT_FLUSH => {
+                    set state_q := lu_state::IDLE
+                },
+                lu_state::ABORT_TRANSACTION => {
+                    set state_q := lu_state::WAIT_TRANSLATION
+                },
+                lu_state::ABORT_TRANSACTION_NI => {
+                    set state_q := lu_state::WAIT_WB_EMPTY
+                },
+                lu_state::WAIT_WB_EMPTY => {
+                    if (*r_wbuf_not_ni == 1'b1) {
+                        set state_q := lu_state::WAIT_TRANSLATION
+                    } else {
+                        cycle 1
+                    }
+                },
+                _ => {
+                    /* WAIT_TRANSLATION */
+                    if (*r_dtlb_hit == 1'b1) {
+                        set state_q := lu_state::WAIT_GNT
+                    } else if (*r_ex_valid == 1'b1) {
+                        set state_q := lu_state::IDLE
+                    } else {
+                        cycle 1
+                    }
+                }
+            }
+        }
+    }
+
+    /* Load buffer update loop */
+    loop {
+        let ldbuf_w = *r_data_gnt >>
+        let free_idx_u = if (*snap_v0 == 1'b0) { 1'b0 } else { 1'b1 } >>
+
+        if (*r_flush == 1'b1) {
+            /* Flush: mark all as flushed */
+            set ldbuf_flushed0 := 1'b1;
+            set ldbuf_flushed1 := 1'b1
+        } else if (*r_data_rvalid == 1'b1) {
+            /* Free entry on rvalid */
+            if (*r_data_rid == 1'b0) {
+                set ldbuf_valid0 := 1'b0
+            } else {
+                set ldbuf_valid1 := 1'b0
+            }
+        } else if (ldbuf_w == 1'b1) {
+            /* Write new entry */
+            if (free_idx_u == 1'b0) {
+                set ldbuf_trans_id0 := *r_trans_id;
+                set ldbuf_addr_off0 := <(*r_vaddr)::logic[3]>;
+                set ldbuf_op0 := *r_operation;
+                set ldbuf_valid0 := 1'b1;
+                set ldbuf_flushed0 := 1'b0;
+                set ldbuf_last_id := 1'b0
+            } else {
+                set ldbuf_trans_id1 := *r_trans_id;
+                set ldbuf_addr_off1 := <(*r_vaddr)::logic[3]>;
+                set ldbuf_op1 := *r_operation;
+                set ldbuf_valid1 := 1'b1;
+                set ldbuf_flushed1 := 1'b0;
+                set ldbuf_last_id := 1'b1
+            }
+        } else {
+            cycle 1
+        }
+    }
+}
