@@ -25,23 +25,18 @@ proc AsyncThreePortRam(
 
     loop {
         let RdAddr_DI_0 = recv in_ep.RdAddr_DI_0 >>
-        set r_RdAddr_DI_0 := RdAddr_DI_0
+        set r_RdAddr_DI_0 := <(RdAddr_DI_0)::logic[10]>
     }
 
     loop {
         let RdAddr_DI_1 = recv in_ep.RdAddr_DI_1 >>
-        set r_RdAddr_DI_1 := RdAddr_DI_1
+        set r_RdAddr_DI_1 := <(RdAddr_DI_1)::logic[10]>
     }
 
     loop {
-        let _Clk_CI = recv in_ep.Clk_CI >>
-        let _WrEn_SI = recv in_ep.WrEn_SI >>
-        let _WrAddr_DI = recv in_ep.WrAddr_DI >>
-        let _WrData_DI = recv in_ep.WrData_DI >>
-        send out_ep.RdData_DO_0 (<(*mem [ *r_RdAddr_DI_0 ])::logic[32]>) >>
-        send out_ep.RdData_DO_1 (<(*mem [ *r_RdAddr_DI_1 ])::logic[32]>) >>
+        send out_ep.RdData_DO_0 (<(<(*mem)::logic>)::logic[32]>) >>
+        send out_ep.RdData_DO_1 (<(<(*mem)::logic>)::logic[32]>) >>
         cycle 1
     }
 
 }
-

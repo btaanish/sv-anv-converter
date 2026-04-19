@@ -1,0 +1,324 @@
+/* Hand-written Anvil for cva6_ptw.sv
+   Hardware Page Table Walker for CVA6 (SV39 mode).
+   Walks 3-level page table on shared TLB miss.
+   Concrete params: XLEN=64, VLEN=64, PLEN=56, PPNW=44,
+   PtLevels=3, VpnLen=27, ASID_WIDTH=16, HYP_EXT=0.
+   DCACHE_INDEX_WIDTH=12, DCACHE_TAG_WIDTH=44.
+   Clock/reset implicit. */
+
+chan ptw_ctrl_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left enable_translation : (logic@#1) @dyn - @dyn,
+    left en_ld_st_translation : (logic@#1) @dyn - @dyn,
+    left lsu_is_store : (logic@#1) @dyn - @dyn,
+    left mxr : (logic@#1) @dyn - @dyn,
+    left mbe : (logic@#1) @dyn - @dyn,
+    left hlvx_inst : (logic@#1) @dyn - @dyn
+}
+
+chan ptw_tlb_ch {
+    left shared_tlb_access : (logic@#1) @dyn - @dyn,
+    left shared_tlb_hit : (logic@#1) @dyn - @dyn,
+    left shared_tlb_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left itlb_req : (logic@#1) @dyn - @dyn
+}
+
+chan ptw_csrs_ch {
+    left satp_ppn : (logic[44]@#1) @dyn - @dyn,
+    left asid : (logic[16]@#1) @dyn - @dyn
+}
+
+chan ptw_mem_resp_ch {
+    left data_gnt : (logic@#1) @dyn - @dyn,
+    left data_rvalid : (logic@#1) @dyn - @dyn,
+    left data_rdata : (logic[64]@#1) @dyn - @dyn
+}
+
+chan ptw_out_ch {
+    left ptw_active : (logic@#1) @dyn - @dyn,
+    left walking_instr : (logic@#1) @dyn - @dyn,
+    left ptw_error : (logic@#1) @dyn - @dyn,
+    left ptw_access_exception : (logic@#1) @dyn - @dyn,
+    left shared_tlb_miss : (logic@#1) @dyn - @dyn,
+    left update_valid : (logic@#1) @dyn - @dyn,
+    left update_vpn : (logic[27]@#1) @dyn - @dyn,
+    left update_asid : (logic[16]@#1) @dyn - @dyn,
+    left update_content : (logic[64]@#1) @dyn - @dyn,
+    left update_is_page_0 : (logic@#1) @dyn - @dyn,
+    left update_is_page_1 : (logic@#1) @dyn - @dyn,
+    left update_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left bad_paddr : (logic[56]@#1) @dyn - @dyn
+}
+
+chan ptw_mem_req_ch {
+    left data_req : (logic@#1) @dyn - @dyn,
+    left address_index : (logic[12]@#1) @dyn - @dyn,
+    left address_tag : (logic[44]@#1) @dyn - @dyn,
+    left tag_valid : (logic@#1) @dyn - @dyn,
+    left kill_req : (logic@#1) @dyn - @dyn
+}
+
+proc cva6_ptw(
+    ctrl : left ptw_ctrl_ch,
+    tlb : left ptw_tlb_ch,
+    csrs : left ptw_csrs_ch,
+    mem_resp : left ptw_mem_resp_ch,
+    out : right ptw_out_ch,
+    mem_req : right ptw_mem_req_ch
+) {
+    /* FSM states: IDLE=0, WAIT_GRANT=1, PTE_LOOKUP=2, WAIT_RVALID=3,
+       PROPAGATE_ERROR=4, PROPAGATE_ACCESS_ERROR=5, KILL_REQ=6, LATENCY=7 */
+    reg state : logic[3];
+    reg ptw_lvl : logic[2];
+    reg is_instr_ptw : logic;
+    reg global_mapping : logic;
+    reg tag_valid_q : logic;
+    reg kill_req_q : logic;
+    reg tlb_update_asid : logic[16];
+    reg vaddr_q : logic[64];
+    reg ptw_pptr : logic[56];
+    reg data_rdata_q : logic[64];
+    reg data_rvalid_q : logic;
+
+    /* Snapshot registers for read-before-write */
+    reg snap_state : logic[3];
+    reg snap_lvl : logic[2];
+    reg snap_pptr : logic[56];
+    reg snap_vaddr : logic[64];
+    reg snap_is_instr : logic;
+    reg snap_kill : logic;
+    reg snap_drv : logic;
+    reg snap_pte : logic[64];
+    reg snap_asid_upd : logic[16];
+
+    /* Output staging registers (written by FSM, sent by output loop) */
+    reg o_active : logic;
+    reg o_walk_instr : logic;
+    reg o_error : logic;
+    reg o_access_ex : logic;
+    reg o_miss : logic;
+    reg o_upd_valid : logic;
+    reg o_upd_vpn : logic[27];
+    reg o_upd_asid : logic[16];
+    reg o_upd_content : logic[64];
+    reg o_upd_pg0 : logic;
+    reg o_upd_pg1 : logic;
+    reg o_upd_vaddr : logic[64];
+    reg o_bad_paddr : logic[56];
+    reg o_data_req : logic;
+    reg o_kill_req : logic;
+
+    /* Input staging */
+    reg r_flush : logic;
+    reg r_en_trans : logic;
+    reg r_en_ldst_trans : logic;
+    reg r_is_store : logic;
+    reg r_mxr : logic;
+    reg r_mbe : logic;
+    reg r_hlvx : logic;
+    reg r_stlb_access : logic;
+    reg r_stlb_hit : logic;
+    reg r_stlb_vaddr : logic[64];
+    reg r_itlb_req : logic;
+    reg r_satp_ppn : logic[44];
+    reg r_asid : logic[16];
+    reg r_data_gnt : logic;
+    reg r_data_rvalid : logic;
+    reg r_data_rdata : logic[64];
+
+    /* Input recv loops */
+    loop { let v = recv ctrl.flush >> set r_flush := v }
+    loop { let v = recv ctrl.enable_translation >> set r_en_trans := v }
+    loop { let v = recv ctrl.en_ld_st_translation >> set r_en_ldst_trans := v }
+    loop { let v = recv ctrl.lsu_is_store >> set r_is_store := v }
+    loop { let v = recv ctrl.mxr >> set r_mxr := v }
+    loop { let v = recv ctrl.mbe >> set r_mbe := v }
+    loop { let v = recv ctrl.hlvx_inst >> set r_hlvx := v }
+    loop { let v = recv tlb.shared_tlb_access >> set r_stlb_access := v }
+    loop { let v = recv tlb.shared_tlb_hit >> set r_stlb_hit := v }
+    loop { let v = recv tlb.shared_tlb_vaddr >> set r_stlb_vaddr := v }
+    loop { let v = recv tlb.itlb_req >> set r_itlb_req := v }
+    loop { let v = recv csrs.satp_ppn >> set r_satp_ppn := v }
+    loop { let v = recv csrs.asid >> set r_asid := v }
+    loop { let v = recv mem_resp.data_gnt >> set r_data_gnt := v }
+    loop { let v = recv mem_resp.data_rvalid >> set r_data_rvalid := v }
+    loop { let v = recv mem_resp.data_rdata >> set r_data_rdata := v }
+
+    /* Latch memory response */
+    loop {
+        set data_rdata_q := *r_data_rdata >>
+        set data_rvalid_q := *r_data_rvalid
+    }
+
+    /* Output loop: send from output staging registers */
+    loop {
+        send out.ptw_active (*o_active) >>
+        send out.walking_instr (*o_walk_instr) >>
+        send out.ptw_error (*o_error) >>
+        send out.ptw_access_exception (*o_access_ex) >>
+        send out.shared_tlb_miss (*o_miss) >>
+        send out.update_valid (*o_upd_valid) >>
+        send out.update_vpn (*o_upd_vpn) >>
+        send out.update_asid (*o_upd_asid) >>
+        send out.update_content (*o_upd_content) >>
+        send out.update_is_page_0 (*o_upd_pg0) >>
+        send out.update_is_page_1 (*o_upd_pg1) >>
+        send out.update_vaddr (*o_upd_vaddr) >>
+        send out.bad_paddr (*o_bad_paddr) >>
+        send mem_req.data_req (*o_data_req) >>
+        send mem_req.address_index (<(*ptw_pptr)::logic[12]>) >>
+        send mem_req.address_tag (<(*ptw_pptr >> 12)::logic[44]>) >>
+        send mem_req.tag_valid (*tag_valid_q) >>
+        send mem_req.kill_req (*o_kill_req) >>
+        cycle 1
+    }
+
+    /* Snapshot loop */
+    loop {
+        set snap_state := *state >>
+        set snap_lvl := *ptw_lvl >>
+        set snap_pptr := *ptw_pptr >>
+        set snap_vaddr := *vaddr_q >>
+        set snap_is_instr := *is_instr_ptw >>
+        set snap_kill := *kill_req_q >>
+        set snap_drv := *data_rvalid_q >>
+        set snap_pte := *data_rdata_q >>
+        set snap_asid_upd := *tlb_update_asid
+    }
+
+    /* Main FSM loop */
+    loop {
+        let st = *snap_state >>
+        let s_lvl = *snap_lvl >>
+        let s_pptr = *snap_pptr >>
+        let s_vaddr = *snap_vaddr >>
+        let s_is_instr = *snap_is_instr >>
+        let s_kill = *snap_kill >>
+        let s_drv = *snap_drv >>
+        let pte = *snap_pte >>
+
+        /* PTE fields */
+        let pte_v = <(pte)::logic> >>
+        let pte_r = <(pte >> 1)::logic> >>
+        let pte_w = <(pte >> 2)::logic> >>
+        let pte_x = <(pte >> 3)::logic> >>
+        let pte_a = <(pte >> 6)::logic> >>
+        let pte_d = <(pte >> 7)::logic> >>
+        let pte_g = <(pte >> 5)::logic> >>
+        let pte_ppn = <(pte >> 10)::logic[44]> >>
+
+        /* Default output values */
+        set o_active := if st == 3'd0 { 1'b0 } else { 1'b1 } >>
+        set o_walk_instr := s_is_instr >>
+        set o_error := 1'b0 >>
+        set o_access_ex := 1'b0 >>
+        set o_miss := 1'b0 >>
+        set o_upd_valid := 1'b0 >>
+        set o_upd_vpn := 27'd0 >>
+        set o_upd_asid := 16'd0 >>
+        set o_upd_content := 64'd0 >>
+        set o_upd_pg0 := 1'b0 >>
+        set o_upd_pg1 := 1'b0 >>
+        set o_upd_vaddr := s_vaddr >>
+        set o_bad_paddr := 56'd0 >>
+        set o_data_req := 1'b0 >>
+        set o_kill_req := 1'b0 >>
+
+        if st == 3'd0 {
+            /* IDLE */
+            let miss = (*r_en_trans | *r_en_ldst_trans) & *r_stlb_access & (~(*r_stlb_hit)) >>
+            set o_miss := miss >>
+            if miss == 1'b1 {
+                let vpn_top = <(*r_stlb_vaddr >> 30)::logic[9]> >>
+                let start_pptr = (<(*r_satp_ppn)::logic[56]> << 56'd12) | (<(vpn_top)::logic[56]> << 56'd3) >>
+                set state := 3'd1 >>
+                set ptw_lvl := 2'd0 >>
+                set ptw_pptr := start_pptr >>
+                set is_instr_ptw := *r_itlb_req >>
+                set vaddr_q := *r_stlb_vaddr >>
+                set global_mapping := 1'b0 >>
+                set tlb_update_asid := *r_asid >>
+                set kill_req_q := 1'b0
+            } else {
+                cycle 1
+            }
+        } else if st == 3'd1 {
+            /* WAIT_GRANT */
+            set o_data_req := 1'b1 >>
+            if *r_data_gnt == 1'b1 {
+                set tag_valid_q := 1'b1 >>
+                if s_kill == 1'b1 | *r_flush == 1'b1 {
+                    set state := 3'd6
+                } else {
+                    set state := 3'd2
+                }
+            } else {
+                cycle 1
+            }
+        } else if st == 3'd2 {
+            /* PTE_LOOKUP */
+            if s_drv == 1'b1 {
+                if (pte_v == 1'b0) | ((pte_r == 1'b0) & (pte_w == 1'b1)) {
+                    /* Invalid PTE */
+                    set state := 3'd4
+                } else if pte_r == 1'b1 | pte_x == 1'b1 {
+                    /* Leaf PTE */
+                    let leaf_ok = if s_is_instr == 1'b1 {
+                        pte_x & pte_a
+                    } else {
+                        pte_a & ((pte_r & (~(*r_hlvx))) | (pte_x & *r_mxr))
+                        & (if *r_is_store == 1'b1 { pte_w & pte_d } else { 1'b1 })
+                    } >>
+                    if leaf_ok == 1'b1 {
+                        set state := 3'd7 >>
+                        set o_upd_valid := 1'b1 >>
+                        set o_upd_vpn := <(s_vaddr >> 12)::logic[27]> >>
+                        set o_upd_asid := *snap_asid_upd >>
+                        set o_upd_content := pte >>
+                        set o_upd_pg0 := if s_lvl == 2'd0 { 1'b1 } else { 1'b0 } >>
+                        set o_upd_pg1 := if s_lvl == 2'd1 { 1'b1 } else { 1'b0 }
+                    } else {
+                        set state := 3'd4
+                    }
+                } else {
+                    /* Non-leaf: next level */
+                    if s_lvl == 2'd2 {
+                        set state := 3'd4
+                    } else {
+                        let vpn_bits = if s_lvl == 2'd0 {
+                            <(s_vaddr >> 21)::logic[9]>
+                        } else {
+                            <(s_vaddr >> 12)::logic[9]>
+                        } >>
+                        let new_pptr = (<(pte_ppn)::logic[56]> << 56'd12) | (<(vpn_bits)::logic[56]> << 56'd3) >>
+                        set state := 3'd1 >>
+                        set ptw_lvl := s_lvl + 2'd1 >>
+                        set ptw_pptr := new_pptr
+                    }
+                }
+            } else {
+                cycle 1
+            }
+        } else if st == 3'd3 {
+            /* WAIT_RVALID */
+            if s_drv == 1'b1 { set state := 3'd0 } else { cycle 1 }
+        } else if st == 3'd4 {
+            /* PROPAGATE_ERROR */
+            set o_error := 1'b1 >>
+            set state := 3'd7
+        } else if st == 3'd5 {
+            /* PROPAGATE_ACCESS_ERROR */
+            set o_access_ex := 1'b1 >>
+            set o_bad_paddr := s_pptr >>
+            set state := 3'd7
+        } else if st == 3'd6 {
+            /* KILL_REQ */
+            set o_kill_req := 1'b1 >>
+            set kill_req_q := 1'b0 >>
+            set state := 3'd3
+        } else {
+            /* LATENCY (state=7) */
+            set state := 3'd0
+        }
+    }
+}

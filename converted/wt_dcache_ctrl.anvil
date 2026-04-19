@@ -1,0 +1,192 @@
+/* Hand-written Anvil for wt_dcache_ctrl.sv
+   DCache controller for read port (write-through cache).
+   FSM: IDLE=0, READ=1, MISS_REQ=2, MISS_WAIT=3, KILL_MISS=4,
+        KILL_MISS_ACK=5, REPLAY_REQ=6, REPLAY_READ=7.
+   Concrete params: XLEN=64, PLEN=56, DCACHE_TAG_WIDTH=44,
+   DCACHE_SET_ASSOC=8, MEM_TID_WIDTH=2, DcacheIdWidth=3.
+   Clock/reset implicit. */
+
+chan wt_ctrl_in_ch {
+    left cache_en : (logic@#1) @dyn - @dyn,
+    left dreq : (logic@#1) @dyn - @dyn,
+    left kill : (logic@#1) @dyn - @dyn,
+    left tag_valid : (logic@#1) @dyn - @dyn,
+    left vaddr : (logic[64]@#1) @dyn - @dyn,
+    left idx : (logic[12]@#1) @dyn - @dyn,
+    left sz : (logic[2]@#1) @dyn - @dyn,
+    left rid : (logic[3]@#1) @dyn - @dyn,
+    left miss_ack : (logic@#1) @dyn - @dyn,
+    left miss_replay : (logic@#1) @dyn - @dyn,
+    left miss_rtrn : (logic@#1) @dyn - @dyn,
+    left wr_cl_vld : (logic@#1) @dyn - @dyn,
+    left rd_ack : (logic@#1) @dyn - @dyn,
+    left rd_data : (logic[64]@#1) @dyn - @dyn,
+    left rd_vld_bits : (logic[8]@#1) @dyn - @dyn,
+    left rd_hit_oh : (logic[8]@#1) @dyn - @dyn
+}
+
+chan wt_ctrl_out_ch {
+    left data_gnt : (logic@#1) @dyn - @dyn,
+    left data_rvalid : (logic@#1) @dyn - @dyn,
+    left data_rdata : (logic[64]@#1) @dyn - @dyn,
+    left data_rid : (logic[3]@#1) @dyn - @dyn,
+    left miss_req : (logic@#1) @dyn - @dyn,
+    left miss_we : (logic@#1) @dyn - @dyn,
+    left miss_paddr : (logic[56]@#1) @dyn - @dyn,
+    left miss_nc : (logic@#1) @dyn - @dyn,
+    left miss_size : (logic[3]@#1) @dyn - @dyn,
+    left miss_id : (logic[2]@#1) @dyn - @dyn,
+    left rd_tag : (logic[44]@#1) @dyn - @dyn,
+    left rd_idx : (logic[9]@#1) @dyn - @dyn,
+    left rd_off : (logic[3]@#1) @dyn - @dyn,
+    left rd_req : (logic@#1) @dyn - @dyn,
+    left rd_tag_only : (logic@#1) @dyn - @dyn
+}
+
+proc wt_dcache_ctrl(
+    inp : left wt_ctrl_in_ch,
+    out : right wt_ctrl_out_ch
+) {
+    reg state : logic[3];
+    reg addr_tag : logic[44];
+    reg addr_idx : logic[9];
+    reg addr_off : logic[3];
+    reg id_q : logic[3];
+    reg vld_data : logic[8];
+    reg data_size : logic[2];
+
+    /* Staging registers for inputs */
+    reg r_dreq : logic;
+    reg r_kill : logic;
+    reg r_vaddr : logic[64];
+    reg r_idx : logic[12];
+    reg r_sz : logic[2];
+    reg r_rid : logic[3];
+    reg r_mack : logic;
+    reg r_mrep : logic;
+    reg r_mrv : logic;
+    reg r_wcv : logic;
+    reg r_rdat : logic[64];
+    reg r_rvb : logic[8];
+    reg r_rho : logic[8];
+
+    /* Input recv loops */
+    loop { let v = recv inp.cache_en >> cycle 1 }
+    loop { let v = recv inp.dreq >> set r_dreq := v }
+    loop { let v = recv inp.kill >> set r_kill := v }
+    loop { let v = recv inp.tag_valid >> cycle 1 }
+    loop { let v = recv inp.vaddr >> set r_vaddr := v }
+    loop { let v = recv inp.idx >> set r_idx := v }
+    loop { let v = recv inp.sz >> set r_sz := v }
+    loop { let v = recv inp.rid >> set r_rid := v }
+    loop { let v = recv inp.miss_ack >> set r_mack := v }
+    loop { let v = recv inp.miss_replay >> set r_mrep := v }
+    loop { let v = recv inp.miss_rtrn >> set r_mrv := v }
+    loop { let v = recv inp.wr_cl_vld >> set r_wcv := v }
+    loop { let v = recv inp.rd_ack >> cycle 1 }
+    loop { let v = recv inp.rd_data >> set r_rdat := v }
+    loop { let v = recv inp.rd_vld_bits >> set r_rvb := v }
+    loop { let v = recv inp.rd_hit_oh >> set r_rho := v }
+
+    /* Output and FSM loop */
+    loop {
+        let is_hit = *r_rho != 8'd0 >>
+
+        let gnt = if *state == 3'd0 {
+            if *r_dreq == 1'b1 {
+                if *r_wcv == 1'b0 { 1'b1 } else { 1'b0 }
+            } else { 1'b0 }
+        } else if *state == 3'd1 {
+            if is_hit {
+                if *r_dreq == 1'b1 {
+                    if *r_wcv == 1'b0 { 1'b1 } else { 1'b0 }
+                } else { 1'b0 }
+            } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        let rvalid = if *state == 3'd1 {
+            if is_hit { 1'b1 } else { 1'b0 }
+        } else if *state == 3'd3 {
+            *r_mrv
+        } else { 1'b0 } >>
+
+        let mreq = if *state == 3'd2 { 1'b1 }
+                   else if *state == 3'd6 { 1'b1 }
+                   else { 1'b0 } >>
+
+        let rreq = if *state == 3'd0 {
+            if *r_dreq == 1'b1 {
+                if *r_wcv == 1'b0 { 1'b1 } else { 1'b0 }
+            } else { 1'b0 }
+        } else if *state == 3'd1 {
+            if is_hit {
+                if *r_dreq == 1'b1 {
+                    if *r_wcv == 1'b0 { 1'b1 } else { 1'b0 }
+                } else { 1'b0 }
+            } else { 1'b0 }
+        } else if *state == 3'd6 { 1'b1 }
+        else { 1'b0 } >>
+
+        send out.data_gnt (gnt) >>
+        send out.data_rvalid (rvalid) >>
+        send out.data_rdata (*r_rdat) >>
+        send out.data_rid (*id_q) >>
+        send out.miss_req (mreq) >>
+        send out.miss_we (1'b0) >>
+        send out.miss_paddr (56'd0) >>
+        send out.miss_nc (1'b0) >>
+        send out.miss_size (<(*data_size)::logic[3]>) >>
+        send out.miss_id (2'd1) >>
+        send out.rd_tag (*addr_tag) >>
+        send out.rd_idx (*addr_idx) >>
+        send out.rd_off (*addr_off) >>
+        send out.rd_req (rreq) >>
+        send out.rd_tag_only (1'b0) >>
+
+        let nstate = if *r_kill == 1'b1 {
+            if *state == 3'd2 { 3'd4 }
+            else if *state == 3'd3 { 3'd4 }
+            else { 3'd0 }
+        } else if *state == 3'd0 {
+            if *r_dreq == 1'b1 {
+                if *r_wcv == 1'b0 { 3'd1 } else { 3'd0 }
+            } else { 3'd0 }
+        } else if *state == 3'd1 {
+            if is_hit {
+                if *r_dreq == 1'b1 {
+                    if *r_wcv == 1'b0 { 3'd1 } else { 3'd0 }
+                } else { 3'd0 }
+            } else { 3'd2 }
+        } else if *state == 3'd2 {
+            if *r_mack == 1'b1 { 3'd3 } else { 3'd2 }
+        } else if *state == 3'd3 {
+            if *r_mrv == 1'b1 {
+                if *r_mrep == 1'b1 { 3'd6 } else { 3'd0 }
+            } else { 3'd3 }
+        } else if *state == 3'd4 {
+            if *r_mack == 1'b1 { 3'd5 } else { 3'd4 }
+        } else if *state == 3'd5 {
+            if *r_mrv == 1'b1 { 3'd0 } else { 3'd5 }
+        } else if *state == 3'd6 {
+            if *r_mack == 1'b1 { 3'd7 } else { 3'd6 }
+        } else {
+            3'd1
+        } >>
+
+        set state := nstate >>
+
+        if gnt == 1'b1 {
+            set addr_tag := <(*r_vaddr)::logic[44]> >>
+            set addr_idx := <(*r_idx)::logic[9]> >>
+            set addr_off := <(*r_vaddr)::logic[3]> >>
+            set id_q := *r_rid >>
+            set data_size := *r_sz
+        } else {
+            if *state == 3'd1 {
+                set vld_data := *r_rvb
+            } else {
+                cycle 1
+            }
+        }
+    }
+}

@@ -22,17 +22,12 @@ proc AsyncDpRam(
 
     loop {
         let RdAddr_DI = recv in_ep.RdAddr_DI >>
-        set r_RdAddr_DI := RdAddr_DI
+        set r_RdAddr_DI := <(RdAddr_DI)::logic[10]>
     }
 
     loop {
-        let _Clk_CI = recv in_ep.Clk_CI >>
-        let _WrEn_SI = recv in_ep.WrEn_SI >>
-        let _WrAddr_DI = recv in_ep.WrAddr_DI >>
-        let _WrData_DI = recv in_ep.WrData_DI >>
-        send out_ep.RdData_DO (<(*mem [ *r_RdAddr_DI ])::logic[32]>) >>
+        send out_ep.RdData_DO (<(<(*mem)::logic>)::logic[32]>) >>
         cycle 1
     }
 
 }
-

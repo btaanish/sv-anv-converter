@@ -1,0 +1,252 @@
+/* Hand-written Anvil for axi_adapter.sv
+   Manages communication with AXI bus for cache subsystem.
+   FSM states (4-bit): IDLE=0, WAIT_B_VALID=1, WAIT_AW_READY=2,
+   WAIT_LAST_W_READY=3, WAIT_LAST_W_READY_AW_READY=4,
+   WAIT_AW_READY_BURST=5, WAIT_R_VALID=6, WAIT_R_VALID_MULTIPLE=7,
+   COMPLETE_READ=8, WAIT_AMO_R_VALID=9.
+   Concrete params: DATA_WIDTH=256, AxiDataWidth=64,
+   BURST_SIZE=3 (256/64-1), ADDR_INDEX=2, AxiIdWidth=4,
+   XLEN=64. Clock/reset implicit. */
+
+chan axi_adap_in_ch {
+    left req : (logic@#1) @dyn - @dyn,
+    left req_type : (logic[2]@#1) @dyn - @dyn,
+    left amo : (logic[4]@#1) @dyn - @dyn,
+    left addr : (logic[64]@#1) @dyn - @dyn,
+    left we : (logic@#1) @dyn - @dyn,
+    left wdata : (logic[256]@#1) @dyn - @dyn,
+    left be : (logic[32]@#1) @dyn - @dyn,
+    left size : (logic[2]@#1) @dyn - @dyn,
+    left id : (logic[4]@#1) @dyn - @dyn,
+    left axi_aw_ready : (logic@#1) @dyn - @dyn,
+    left axi_ar_ready : (logic@#1) @dyn - @dyn,
+    left axi_w_ready : (logic@#1) @dyn - @dyn,
+    left axi_b_valid : (logic@#1) @dyn - @dyn,
+    left axi_b_id : (logic[4]@#1) @dyn - @dyn,
+    left axi_r_valid : (logic@#1) @dyn - @dyn,
+    left axi_r_data : (logic[64]@#1) @dyn - @dyn,
+    left axi_r_last : (logic@#1) @dyn - @dyn,
+    left axi_r_id : (logic[4]@#1) @dyn - @dyn
+}
+
+chan axi_adap_out_ch {
+    left gnt : (logic@#1) @dyn - @dyn,
+    left valid : (logic@#1) @dyn - @dyn,
+    left rdata : (logic[256]@#1) @dyn - @dyn,
+    left id_out : (logic[4]@#1) @dyn - @dyn,
+    left crit_word : (logic[64]@#1) @dyn - @dyn,
+    left crit_word_valid : (logic@#1) @dyn - @dyn,
+    left axi_aw_valid : (logic@#1) @dyn - @dyn,
+    left axi_ar_valid : (logic@#1) @dyn - @dyn,
+    left axi_w_valid : (logic@#1) @dyn - @dyn,
+    left axi_w_last : (logic@#1) @dyn - @dyn,
+    left axi_b_ready : (logic@#1) @dyn - @dyn,
+    left axi_r_ready : (logic@#1) @dyn - @dyn
+}
+
+proc axi_adapter(
+    inp : left axi_adap_in_ch,
+    out : right axi_adap_out_ch
+) {
+    /* FSM state */
+    reg state : logic[4];
+    /* Transfer counter */
+    reg cnt : logic[2];
+    /* Cached read data (4 x 64-bit = 256 bits stored as 4 regs) */
+    reg cache_line0 : logic[64];
+    reg cache_line1 : logic[64];
+    reg cache_line2 : logic[64];
+    reg cache_line3 : logic[64];
+    /* Address offset for read alignment */
+    reg addr_offset : logic[4];
+    /* Saved ID */
+    reg id_q : logic[4];
+    /* Saved AMO and size */
+    reg amo_q : logic[4];
+    reg size_q : logic[2];
+    /* Outstanding AW counter */
+    reg ow_cnt : logic[4];
+
+    /* Input staging registers */
+    reg r_req : logic;
+    reg r_type : logic[2];
+    reg r_amo : logic[4];
+    reg r_addr : logic[64];
+    reg r_we : logic;
+    reg r_wdata : logic[256];
+    reg r_be : logic[32];
+    reg r_size : logic[2];
+    reg r_id : logic[4];
+    reg r_aw_rdy : logic;
+    reg r_ar_rdy : logic;
+    reg r_w_rdy : logic;
+    reg r_b_val : logic;
+    reg r_b_id : logic[4];
+    reg r_r_val : logic;
+    reg r_r_data : logic[64];
+    reg r_r_last : logic;
+    reg r_r_id : logic[4];
+
+    /* Input recv loops */
+    loop { let v = recv inp.req >> set r_req := v }
+    loop { let v = recv inp.req_type >> set r_type := v }
+    loop { let v = recv inp.amo >> set r_amo := v }
+    loop { let v = recv inp.addr >> set r_addr := v }
+    loop { let v = recv inp.we >> set r_we := v }
+    loop { let v = recv inp.wdata >> set r_wdata := v }
+    loop { let v = recv inp.be >> set r_be := v }
+    loop { let v = recv inp.size >> set r_size := v }
+    loop { let v = recv inp.id >> set r_id := v }
+    loop { let v = recv inp.axi_aw_ready >> set r_aw_rdy := v }
+    loop { let v = recv inp.axi_ar_ready >> set r_ar_rdy := v }
+    loop { let v = recv inp.axi_w_ready >> set r_w_rdy := v }
+    loop { let v = recv inp.axi_b_valid >> set r_b_val := v }
+    loop { let v = recv inp.axi_b_id >> set r_b_id := v }
+    loop { let v = recv inp.axi_r_valid >> set r_r_val := v }
+    loop { let v = recv inp.axi_r_data >> set r_r_data := v }
+    loop { let v = recv inp.axi_r_last >> set r_r_last := v }
+    loop { let v = recv inp.axi_r_id >> set r_r_id := v }
+
+    /* Main FSM and output loop */
+    loop {
+        /* Default output computation based on state */
+        let gnt_v = if *state == 4'd0 {
+            /* IDLE: grant new request */
+            if *r_req == 1'b1 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        let valid_v = if *state == 4'd8 { 1'b1 }
+                      else if *state == 4'd1 {
+                          if *r_b_val == 1'b1 { 1'b1 } else { 1'b0 }
+                      } else { 1'b0 } >>
+
+        let aw_val = if *state == 4'd0 {
+            if *r_req == 1'b1 {
+                if *r_we == 1'b1 { 1'b1 } else { 1'b0 }
+            } else { 1'b0 }
+        } else if *state == 4'd2 { 1'b1 }
+        else if *state == 4'd4 { 1'b1 }
+        else if *state == 4'd5 { 1'b1 }
+        else { 1'b0 } >>
+
+        let ar_val = if *state == 4'd0 {
+            if *r_req == 1'b1 {
+                if *r_we == 1'b0 { 1'b1 } else { 1'b0 }
+            } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        let w_val = if *state == 4'd0 {
+            if *r_req == 1'b1 {
+                if *r_we == 1'b1 { 1'b1 } else { 1'b0 }
+            } else { 1'b0 }
+        } else if *state == 4'd3 { 1'b1 }
+        else if *state == 4'd4 { 1'b1 }
+        else { 1'b0 } >>
+
+        let w_last_v = if *state == 4'd3 {
+            if *cnt == 2'd0 { 1'b1 } else { 1'b0 }
+        } else if *state == 4'd4 {
+            if *cnt == 2'd0 { 1'b1 } else { 1'b0 }
+        } else { 1'b1 } >>
+
+        let cw_valid = if *state == 4'd6 {
+            *r_r_val
+        } else if *state == 4'd7 {
+            *r_r_val
+        } else { 1'b0 } >>
+
+        send out.gnt (gnt_v) >>
+        send out.valid (valid_v) >>
+        send out.rdata (*r_wdata) >>
+        send out.id_out (*id_q) >>
+        send out.crit_word (*r_r_data) >>
+        send out.crit_word_valid (cw_valid) >>
+        send out.axi_aw_valid (aw_val) >>
+        send out.axi_ar_valid (ar_val) >>
+        send out.axi_w_valid (w_val) >>
+        send out.axi_w_last (w_last_v) >>
+        send out.axi_b_ready (1'b1) >>
+        send out.axi_r_ready (1'b1) >>
+
+        /* Next state logic */
+        let ns = if *state == 4'd0 {
+            /* IDLE */
+            if *r_req == 1'b1 {
+                if *r_we == 1'b1 {
+                    /* Write path */
+                    if *r_aw_rdy == 1'b1 {
+                        if *r_w_rdy == 1'b1 { 4'd1 }
+                        else { 4'd3 }
+                    } else {
+                        if *r_w_rdy == 1'b1 { 4'd2 }
+                        else { 4'd4 }
+                    }
+                } else {
+                    /* Read path */
+                    if *r_ar_rdy == 1'b1 {
+                        if *r_type == 2'd0 { 4'd6 }
+                        else { 4'd7 }
+                    } else { 4'd0 }
+                }
+            } else { 4'd0 }
+        } else if *state == 4'd1 {
+            /* WAIT_B_VALID */
+            if *r_b_val == 1'b1 { 4'd0 } else { 4'd1 }
+        } else if *state == 4'd2 {
+            /* WAIT_AW_READY */
+            if *r_aw_rdy == 1'b1 { 4'd1 } else { 4'd2 }
+        } else if *state == 4'd3 {
+            /* WAIT_LAST_W_READY */
+            if *r_w_rdy == 1'b1 {
+                if *cnt == 2'd0 { 4'd1 } else { 4'd3 }
+            } else { 4'd3 }
+        } else if *state == 4'd4 {
+            /* WAIT_LAST_W_READY_AW_READY */
+            if *r_aw_rdy == 1'b1 {
+                if *r_w_rdy == 1'b1 {
+                    if *cnt == 2'd0 { 4'd1 } else { 4'd3 }
+                } else { 4'd3 }
+            } else {
+                if *r_w_rdy == 1'b1 {
+                    if *cnt == 2'd0 { 4'd2 } else { 4'd4 }
+                } else { 4'd4 }
+            }
+        } else if *state == 4'd5 {
+            /* WAIT_AW_READY_BURST */
+            if *r_aw_rdy == 1'b1 { 4'd3 } else { 4'd5 }
+        } else if *state == 4'd6 {
+            /* WAIT_R_VALID (single) */
+            if *r_r_val == 1'b1 { 4'd8 } else { 4'd6 }
+        } else if *state == 4'd7 {
+            /* WAIT_R_VALID_MULTIPLE */
+            if *r_r_val == 1'b1 {
+                if *r_r_last == 1'b1 { 4'd8 } else { 4'd7 }
+            } else { 4'd7 }
+        } else if *state == 4'd8 {
+            /* COMPLETE_READ */
+            4'd0
+        } else {
+            /* WAIT_AMO_R_VALID */
+            if *r_r_val == 1'b1 { 4'd0 } else { 4'd9 }
+        } >>
+
+        set state := ns >>
+
+        /* Save ID on grant */
+        if gnt_v == 1'b1 {
+            set id_q := *r_id >>
+            set amo_q := *r_amo >>
+            set size_q := *r_size
+        } else {
+            /* Update cache line on read data */
+            if *r_r_val == 1'b1 {
+                if *cnt == 2'd0 { set cache_line0 := *r_r_data }
+                else if *cnt == 2'd1 { set cache_line1 := *r_r_data }
+                else if *cnt == 2'd2 { set cache_line2 := *r_r_data }
+                else { set cache_line3 := *r_r_data }
+            } else {
+                cycle 1
+            }
+        }
+    }
+}

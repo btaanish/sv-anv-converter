@@ -1,0 +1,249 @@
+/* Hand-written Anvil for cva6_hpdcache_subsystem_axi_arbiter.sv
+   AXI arbiter for CVA6 cache subsystem integrating standard I$ and
+   HPDcache D$. Arbitrates I$ miss, D$ read, D$ write, and D$ uncached
+   requests onto a single AXI port. Contains FIFO bridges and
+   request/response routing logic.
+   Concrete params: AxiDataWidth=64, AxiIdWidth=4, AxiAddrWidth=64,
+   MEM_TID_WIDTH=2. Clock/reset implicit. */
+
+chan arb_icache_ch {
+    left miss_valid : (logic@#1) @dyn - @dyn,
+    left miss_paddr : (logic[64]@#1) @dyn - @dyn,
+    left miss_nc : (logic@#1) @dyn - @dyn,
+    left miss_tid : (logic[2]@#1) @dyn - @dyn
+}
+
+chan arb_dcache_rd_ch {
+    left rd_valid : (logic@#1) @dyn - @dyn,
+    left rd_addr : (logic[64]@#1) @dyn - @dyn,
+    left rd_len : (logic[8]@#1) @dyn - @dyn,
+    left rd_size : (logic[3]@#1) @dyn - @dyn,
+    left rd_id : (logic[2]@#1) @dyn - @dyn,
+    left rd_resp_ready : (logic@#1) @dyn - @dyn
+}
+
+chan arb_dcache_wr_ch {
+    left wr_valid : (logic@#1) @dyn - @dyn,
+    left wr_addr : (logic[64]@#1) @dyn - @dyn,
+    left wr_len : (logic[8]@#1) @dyn - @dyn,
+    left wr_size : (logic[3]@#1) @dyn - @dyn,
+    left wr_id : (logic[2]@#1) @dyn - @dyn,
+    left wr_data_valid : (logic@#1) @dyn - @dyn,
+    left wr_data : (logic[64]@#1) @dyn - @dyn,
+    left wr_data_last : (logic@#1) @dyn - @dyn,
+    left wr_resp_ready : (logic@#1) @dyn - @dyn
+}
+
+chan arb_axi_resp_ch {
+    left aw_ready : (logic@#1) @dyn - @dyn,
+    left ar_ready : (logic@#1) @dyn - @dyn,
+    left w_ready : (logic@#1) @dyn - @dyn,
+    left b_valid : (logic@#1) @dyn - @dyn,
+    left b_id : (logic[4]@#1) @dyn - @dyn,
+    left r_valid : (logic@#1) @dyn - @dyn,
+    left r_data : (logic[64]@#1) @dyn - @dyn,
+    left r_last : (logic@#1) @dyn - @dyn,
+    left r_id : (logic[4]@#1) @dyn - @dyn
+}
+
+chan arb_out_ch {
+    left icache_miss_ready : (logic@#1) @dyn - @dyn,
+    left icache_resp_valid : (logic@#1) @dyn - @dyn,
+    left icache_resp_data : (logic[64]@#1) @dyn - @dyn,
+    left dcache_rd_ready : (logic@#1) @dyn - @dyn,
+    left dcache_rd_resp_valid : (logic@#1) @dyn - @dyn,
+    left dcache_rd_resp_data : (logic[64]@#1) @dyn - @dyn,
+    left dcache_wr_ready : (logic@#1) @dyn - @dyn,
+    left dcache_wr_data_ready : (logic@#1) @dyn - @dyn,
+    left dcache_wr_resp_valid : (logic@#1) @dyn - @dyn,
+    left axi_aw_valid : (logic@#1) @dyn - @dyn,
+    left axi_ar_valid : (logic@#1) @dyn - @dyn,
+    left axi_w_valid : (logic@#1) @dyn - @dyn,
+    left axi_w_last : (logic@#1) @dyn - @dyn,
+    left axi_b_ready : (logic@#1) @dyn - @dyn,
+    left axi_r_ready : (logic@#1) @dyn - @dyn
+}
+
+proc cva6_hpdcache_subsystem_axi_arbiter(
+    ic : left arb_icache_ch,
+    dr : left arb_dcache_rd_ch,
+    dw : left arb_dcache_wr_ch,
+    axi : left arb_axi_resp_ch,
+    out : right arb_out_ch
+) {
+    /* Arbiter state: 0=IDLE, 1=ICACHE_READ, 2=DCACHE_READ, 3=DCACHE_WRITE */
+    reg arb_state : logic[2];
+    /* I$ miss pending */
+    reg ic_pending : logic;
+    /* Staging registers */
+    reg r_ic_valid : logic;
+    reg r_ic_paddr : logic[64];
+    reg r_ic_nc : logic;
+    reg r_ic_tid : logic[2];
+    reg r_dr_valid : logic;
+    reg r_dr_addr : logic[64];
+    reg r_dr_len : logic[8];
+    reg r_dr_size : logic[3];
+    reg r_dr_id : logic[2];
+    reg r_dr_rr : logic;
+    reg r_dw_valid : logic;
+    reg r_dw_addr : logic[64];
+    reg r_dw_len : logic[8];
+    reg r_dw_size : logic[3];
+    reg r_dw_id : logic[2];
+    reg r_dw_dv : logic;
+    reg r_dw_data : logic[64];
+    reg r_dw_dl : logic;
+    reg r_dw_rr : logic;
+    reg r_aw_rdy : logic;
+    reg r_ar_rdy : logic;
+    reg r_w_rdy : logic;
+    reg r_b_val : logic;
+    reg r_b_id : logic[4];
+    reg r_r_val : logic;
+    reg r_r_data : logic[64];
+    reg r_r_last : logic;
+    reg r_r_id : logic[4];
+
+    /* Input recv loops */
+    loop { let v = recv ic.miss_valid >> set r_ic_valid := v }
+    loop { let v = recv ic.miss_paddr >> set r_ic_paddr := v }
+    loop { let v = recv ic.miss_nc >> set r_ic_nc := v }
+    loop { let v = recv ic.miss_tid >> set r_ic_tid := v }
+    loop { let v = recv dr.rd_valid >> set r_dr_valid := v }
+    loop { let v = recv dr.rd_addr >> set r_dr_addr := v }
+    loop { let v = recv dr.rd_len >> set r_dr_len := v }
+    loop { let v = recv dr.rd_size >> set r_dr_size := v }
+    loop { let v = recv dr.rd_id >> set r_dr_id := v }
+    loop { let v = recv dr.rd_resp_ready >> set r_dr_rr := v }
+    loop { let v = recv dw.wr_valid >> set r_dw_valid := v }
+    loop { let v = recv dw.wr_addr >> set r_dw_addr := v }
+    loop { let v = recv dw.wr_len >> set r_dw_len := v }
+    loop { let v = recv dw.wr_size >> set r_dw_size := v }
+    loop { let v = recv dw.wr_id >> set r_dw_id := v }
+    loop { let v = recv dw.wr_data_valid >> set r_dw_dv := v }
+    loop { let v = recv dw.wr_data >> set r_dw_data := v }
+    loop { let v = recv dw.wr_data_last >> set r_dw_dl := v }
+    loop { let v = recv dw.wr_resp_ready >> set r_dw_rr := v }
+    loop { let v = recv axi.aw_ready >> set r_aw_rdy := v }
+    loop { let v = recv axi.ar_ready >> set r_ar_rdy := v }
+    loop { let v = recv axi.w_ready >> set r_w_rdy := v }
+    loop { let v = recv axi.b_valid >> set r_b_val := v }
+    loop { let v = recv axi.b_id >> set r_b_id := v }
+    loop { let v = recv axi.r_valid >> set r_r_val := v }
+    loop { let v = recv axi.r_data >> set r_r_data := v }
+    loop { let v = recv axi.r_last >> set r_r_last := v }
+    loop { let v = recv axi.r_id >> set r_r_id := v }
+
+    /* Main arbiter loop */
+    loop {
+        /* Arbitration: priority I$ > D$ read > D$ write */
+        let ar_valid = if *arb_state == 2'd0 {
+            if *r_ic_valid == 1'b1 { 1'b1 }
+            else if *r_dr_valid == 1'b1 { 1'b1 }
+            else { 1'b0 }
+        } else { 1'b0 } >>
+
+        let aw_valid = if *arb_state == 2'd0 {
+            if *r_ic_valid == 1'b0 {
+                if *r_dr_valid == 1'b0 {
+                    if *r_dw_valid == 1'b1 { 1'b1 } else { 1'b0 }
+                } else { 1'b0 }
+            } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        let ic_ready = if *arb_state == 2'd0 {
+            if *r_ic_valid == 1'b1 {
+                if *r_ar_rdy == 1'b1 { 1'b1 } else { 1'b0 }
+            } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        let dr_ready = if *arb_state == 2'd0 {
+            if *r_ic_valid == 1'b0 {
+                if *r_dr_valid == 1'b1 {
+                    if *r_ar_rdy == 1'b1 { 1'b1 } else { 1'b0 }
+                } else { 1'b0 }
+            } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        let dw_ready = if *arb_state == 2'd0 {
+            if *r_ic_valid == 1'b0 {
+                if *r_dr_valid == 1'b0 {
+                    if *r_dw_valid == 1'b1 {
+                        if *r_aw_rdy == 1'b1 { 1'b1 } else { 1'b0 }
+                    } else { 1'b0 }
+                } else { 1'b0 }
+            } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        /* Response routing: check r_id MSB to route to I$ or D$ */
+        let ic_resp_v = if *r_r_val == 1'b1 {
+            if *ic_pending == 1'b1 {
+                if *r_r_id == 4'd0 { 1'b1 } else { 1'b0 }
+            } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        let dr_resp_v = if *r_r_val == 1'b1 {
+            if ic_resp_v == 1'b0 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        let dw_resp_v = *r_b_val >>
+
+        send out.icache_miss_ready (ic_ready) >>
+        send out.icache_resp_valid (ic_resp_v) >>
+        send out.icache_resp_data (*r_r_data) >>
+        send out.dcache_rd_ready (dr_ready) >>
+        send out.dcache_rd_resp_valid (dr_resp_v) >>
+        send out.dcache_rd_resp_data (*r_r_data) >>
+        send out.dcache_wr_ready (dw_ready) >>
+        send out.dcache_wr_data_ready (*r_w_rdy) >>
+        send out.dcache_wr_resp_valid (dw_resp_v) >>
+        send out.axi_aw_valid (aw_valid) >>
+        send out.axi_ar_valid (ar_valid) >>
+        send out.axi_w_valid (*r_dw_dv) >>
+        send out.axi_w_last (*r_dw_dl) >>
+        send out.axi_b_ready (*r_dw_rr) >>
+        send out.axi_r_ready (1'b1) >>
+
+        /* State transitions */
+        let ns = if *arb_state == 2'd0 {
+            if *r_ic_valid == 1'b1 {
+                if *r_ar_rdy == 1'b1 { 2'd1 } else { 2'd0 }
+            } else if *r_dr_valid == 1'b1 {
+                if *r_ar_rdy == 1'b1 { 2'd2 } else { 2'd0 }
+            } else if *r_dw_valid == 1'b1 {
+                if *r_aw_rdy == 1'b1 { 2'd3 } else { 2'd0 }
+            } else { 2'd0 }
+        } else if *arb_state == 2'd1 {
+            /* ICACHE_READ: wait for last R response */
+            if *r_r_val == 1'b1 {
+                if *r_r_last == 1'b1 { 2'd0 } else { 2'd1 }
+            } else { 2'd1 }
+        } else if *arb_state == 2'd2 {
+            /* DCACHE_READ: wait for last R response */
+            if *r_r_val == 1'b1 {
+                if *r_r_last == 1'b1 { 2'd0 } else { 2'd2 }
+            } else { 2'd2 }
+        } else {
+            /* DCACHE_WRITE: wait for B response */
+            if *r_b_val == 1'b1 { 2'd0 } else { 2'd3 }
+        } >>
+
+        set arb_state := ns >>
+
+        /* Track I$ pending state */
+        if ic_ready == 1'b1 {
+            set ic_pending := 1'b1
+        } else {
+            if ic_resp_v == 1'b1 {
+                if *r_r_last == 1'b1 {
+                    set ic_pending := 1'b0
+                } else {
+                    cycle 1
+                }
+            } else {
+                cycle 1
+            }
+        }
+    }
+}
