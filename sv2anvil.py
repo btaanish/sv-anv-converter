@@ -1677,11 +1677,52 @@ def _convert_all_ternaries(expr: str) -> str:
     return "".join(result)
 
 
+def _skip_cast_or_comment(s: str, pos: int) -> int:
+    """If pos is at the start of a <(...) cast or /* comment, return index past it. Else return pos."""
+    # Skip <(...) :: ...> Anvil cast blocks
+    if pos < len(s) - 1 and s[pos] == '<' and s[pos + 1] == '(':
+        depth = 1
+        j = pos + 2
+        while j < len(s) and depth > 0:
+            if s[j] == '<' and j + 1 < len(s) and s[j + 1] == '(':
+                depth += 1
+                j += 1
+            elif s[j] == ')' and j + 1 < len(s):
+                # Look ahead for ::...> to confirm this is a cast close
+                k = j + 1
+                if k < len(s) and s[k] == ':':
+                    # Find closing >
+                    while k < len(s) and s[k] != '>':
+                        k += 1
+                    if k < len(s):
+                        depth -= 1
+                        j = k + 1
+                        continue
+            j += 1
+        return j
+    # Skip /* ... */ comments
+    if pos < len(s) - 1 and s[pos] == '/' and s[pos + 1] == '*':
+        j = pos + 2
+        while j < len(s) - 1:
+            if s[j] == '*' and s[j + 1] == '/':
+                return j + 2
+            j += 1
+        return len(s)
+    return pos
+
+
 def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
-    """Split a ternary expression respecting brackets and braces (not angle brackets)."""
+    """Split a ternary expression respecting brackets, braces, casts, and comments."""
     depth = 0
     q_pos = -1
-    for i, ch in enumerate(expr):
+    i = 0
+    while i < len(expr):
+        # Try to skip casts and comments
+        new_i = _skip_cast_or_comment(expr, i)
+        if new_i != i:
+            i = new_i
+            continue
+        ch = expr[i]
         if ch in "([{":
             depth += 1
         elif ch in ")]}":
@@ -1689,6 +1730,7 @@ def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
         elif ch == "?" and depth == 0:
             q_pos = i
             break
+        i += 1
 
     if q_pos == -1:
         return None
@@ -1696,15 +1738,23 @@ def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
     cond = expr[:q_pos]
     rest = expr[q_pos + 1:]
 
-    # Find the colon at depth 0
+    # Find the colon at depth 0, skipping casts and comments
     depth = 0
-    for i, ch in enumerate(rest):
+    i = 0
+    while i < len(rest):
+        # Try to skip casts and comments
+        new_i = _skip_cast_or_comment(rest, i)
+        if new_i != i:
+            i = new_i
+            continue
+        ch = rest[i]
         if ch in "([{":
             depth += 1
         elif ch in ")]}":
             depth -= 1
         elif ch == ":" and depth == 0:
             return (cond, rest[:i], rest[i + 1:])
+        i += 1
 
     return None
 
@@ -2833,7 +2883,7 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             if reg_t and reg_t != "logic":
                 return f"{var_name} {op} <({num})::{reg_t}>"
             return m.group(0)
-        code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\d+)(?!\')', _fix_arith_int, code_part)
+        code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\d+)(?!\d*\')', _fix_arith_int, code_part)
 
         # Fix bare integer after cast value: <(N)::type> - 1 → <(N)::type> - <(1)::type>
         def _fix_cast_arith(m):
@@ -2841,7 +2891,7 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             op = m.group(2)         # + or -
             num = m.group(3)        # bare number
             return f"::{cast_type}> {op} <({num})::{cast_type}>"
-        code_part = re.sub(r'::(logic\[\d+\])>\s*(\+|-)\s*(\d+)(?!\')', _fix_cast_arith, code_part)
+        code_part = re.sub(r'::(logic\[\d+\])>\s*(\+|-)\s*(\d+)(?!\d*\')', _fix_cast_arith, code_part)
 
         # Evaluate constant comparisons: number == 1'b0 → 1'b0/1'b1
         # These arise from parameter substitution (e.g., DEPTH=8 → 8 == 0)
