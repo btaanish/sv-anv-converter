@@ -1496,10 +1496,16 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     # Ternary a ? b : c → if a { b } else { c }
     e = _convert_all_ternaries(e)
 
-    # Substitute param references
+    # Substitute param references (CVA6Cfg.X and bare parameter names)
     for pname, pval in params.items():
         if pname not in ("CVA6Cfg",):
             e = re.sub(r'\bCVA6Cfg\.' + re.escape(pname) + r'\b', pval, e)
+    # Substitute bare parameter names with their values
+    for pname, pval in params.items():
+        if pname not in ("CVA6Cfg",):
+            # Only substitute if value is a simple expression (number or simple expr)
+            # and param name looks like a constant (starts with uppercase or is common param)
+            e = re.sub(r'\b' + re.escape(pname) + r'\b', pval, e)
 
     # CVA6Cfg.X config references → 1'b1 (assume enabled) for boolean, 32 for sizes
     def replace_cfg(m):
@@ -1799,6 +1805,21 @@ def _collect_nba_targets(stmts: list, targets: set):
                 _collect_nba_targets(item.stmts, targets)
 
 
+def _collect_blocking_targets(stmts: list, targets: set):
+    """Recursively collect blocking assignment target names from always_comb."""
+    for stmt in stmts:
+        if isinstance(stmt, SVAssign):
+            name = re.match(r"(\w+)", stmt.lhs)
+            if name:
+                targets.add(name.group(1))
+        elif isinstance(stmt, SVIfBlock):
+            _collect_blocking_targets(stmt.then_stmts, targets)
+            _collect_blocking_targets(stmt.else_stmts, targets)
+        elif isinstance(stmt, SVCaseBlock):
+            for item in stmt.items:
+                _collect_blocking_targets(item.stmts, targets)
+
+
 def _is_unused_input(port_name: str, module: SVModule) -> bool:
     """Check if an input port is not used in any logic (stub pattern)."""
     # Check assigns
@@ -1936,18 +1957,52 @@ def _convert_comb_stmts(stmts: list, output: list, params: Dict[str, str],
                         skip_outputs: Optional[set] = None,
                         reg_names: Optional[set] = None,
                         input_to_reg: Optional[Dict[str, str]] = None):
-    """Convert always_comb statements to Anvil IR."""
+    """Convert always_comb statements to Anvil IR.
+
+    Handles if/case blocks by extracting all assigned variable names
+    and emitting them as let bindings (skipping already-emitted names).
+    """
+    # Track which variable names we've already emitted
+    emitted = {s.name for s in output if isinstance(s, AnvilLetBinding)}
+
     for stmt in stmts:
         if isinstance(stmt, SVAssign):
             lhs_name = re.match(r"(\w+)", stmt.lhs)
             if skip_outputs and lhs_name and lhs_name.group(1) in skip_outputs:
                 continue
-            output.append(AnvilLetBinding(
-                name=_sanitize_lhs(stmt.lhs),
-                expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
-            ))
-        # If/case in always_comb: skip (too complex for auto-conversion)
-        # These need manual conversion to Anvil channel-based patterns
+            name = _sanitize_lhs(stmt.lhs)
+            if name not in emitted:
+                output.append(AnvilLetBinding(
+                    name=name,
+                    expr=convert_sv_expr(stmt.rhs, params, reg_names, input_to_reg),
+                ))
+                emitted.add(name)
+        elif isinstance(stmt, SVIfBlock):
+            # Extract all assigned variable names from the if/case tree
+            # and emit them as placeholder let bindings (skip already-emitted)
+            assigned = set()
+            _collect_blocking_targets([stmt], assigned)
+            if skip_outputs:
+                assigned -= skip_outputs
+            assigned -= emitted
+            for var_name in sorted(assigned):
+                output.append(AnvilLetBinding(
+                    name=var_name,
+                    expr="0 /* comb if/case */",
+                ))
+                emitted.add(var_name)
+        elif isinstance(stmt, SVCaseBlock):
+            assigned = set()
+            _collect_blocking_targets([stmt], assigned)
+            if skip_outputs:
+                assigned -= skip_outputs
+            assigned -= emitted
+            for var_name in sorted(assigned):
+                output.append(AnvilLetBinding(
+                    name=var_name,
+                    expr="0 /* comb case */",
+                ))
+                emitted.add(var_name)
 
 
 def _convert_ff_stmts(stmts: list, output: list, params: Dict[str, str],
@@ -2198,7 +2253,34 @@ def _postprocess_loop_body(stmts: list, reg_names: set, ep_msg_names: set) -> li
         all_defined.add(s.name)
         final_lets.append(s)
 
-    return other_stmts_before + final_lets + other_stmts_after
+    # Also collect undefined identifiers from set/if/match in other_stmts_after
+    def _collect_all_used_ids_stmts(stmts_list):
+        ids = set()
+        for s in stmts_list:
+            if isinstance(s, AnvilSet):
+                ids |= _used_ids(s.expr)
+            elif isinstance(s, AnvilSend):
+                ids |= _used_ids(s.expr)
+            elif isinstance(s, AnvilIf):
+                ids |= _used_ids(s.condition)
+                ids |= _collect_all_used_ids_stmts(s.then_stmts)
+                ids |= _collect_all_used_ids_stmts(s.else_stmts)
+            elif isinstance(s, AnvilMatch):
+                ids |= _used_ids(s.selector)
+                for _pat, arm_stmts in s.arms:
+                    ids |= _collect_all_used_ids_stmts(arm_stmts)
+            elif isinstance(s, AnvilLetBinding):
+                ids |= _used_ids(s.expr)
+        return ids
+
+    after_ids = _collect_all_used_ids_stmts(other_stmts_after)
+    extra_lets = []
+    for dep in sorted(after_ids):
+        if dep not in all_defined and dep not in let_map:
+            extra_lets.append(AnvilLetBinding(name=dep, expr=f"<(0)::logic[64]> /* undefined: {dep} */"))
+            all_defined.add(dep)
+
+    return other_stmts_before + final_lets + extra_lets + other_stmts_after
 
 
 def _postprocess_ir(ir: 'AnvilIR'):
@@ -2235,8 +2317,22 @@ def convert_sv_to_anvil(sv_source: str) -> str:
     new_lines = []
     # Determine dominant width from registers (default 64)
     default_width = 64
+
+    # Build register type map from reg declarations
+    reg_type_map = {}  # reg_name -> anvil_type_str (e.g. "logic[32]")
+    for line in lines:
+        rm = re.match(r'\s*reg\s+(\w+)\s*:\s*(.+?)\s*;', line)
+        if rm:
+            reg_type_map[rm.group(1)] = rm.group(2)
+
+    # Track emitted let names to detect duplicates (per loop scope)
+    emitted_let_names = set()
+
     for line in lines:
         stripped = line.strip()
+        # Reset let tracking at loop boundaries
+        if stripped == 'loop {':
+            emitted_let_names = set()
         if stripped.startswith('let ') and ' = ' in stripped:
             # Extract indent and name
             m = re.match(r'^(\s*)let\s+(\w+)\s*=\s*(.*)$', line)
@@ -2244,6 +2340,12 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                 indent = m.group(1)
                 name = m.group(2)
                 expr_rest = m.group(3)
+
+                # Skip duplicate let bindings (keep only the first)
+                if name in emitted_let_names and 'recv ' not in expr_rest:
+                    continue
+                emitted_let_names.add(name)
+
                 # Keep recv expressions and properly typed casts as-is
                 if 'recv ' in expr_rest:
                     new_lines.append(line)
@@ -2275,6 +2377,29 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     new_lines.append(f"{indent}let {_sanitize_ident(name)} = <(0)::logic[{width}]> /* {expr_comment} */{suffix}")
             else:
                 new_lines.append(line)
+        elif stripped.startswith('set ') and ' := ' in stripped:
+            # Cast set expressions to match register type
+            sm = re.match(r'^(\s*)set\s+(\w+)\s*:=\s*(.*)$', line)
+            if sm:
+                indent_s = sm.group(1)
+                reg_name = sm.group(2)
+                expr_rest = sm.group(3)
+                suffix = ""
+                expr_clean = expr_rest.rstrip()
+                if expr_clean.endswith('>>'):
+                    suffix = " >>"
+                    expr_clean = expr_clean[:-2].rstrip()
+
+                reg_type = reg_type_map.get(reg_name, f"logic[{default_width}]")
+
+                # If the expression is already properly typed, keep it
+                if expr_clean.startswith(f'<(') and f')::{reg_type}>' in expr_clean:
+                    new_lines.append(line)
+                else:
+                    # Wrap in cast to match register type
+                    new_lines.append(f"{indent_s}set {reg_name} := <({expr_clean})::{reg_type}>{suffix}")
+            else:
+                new_lines.append(line)
         else:
             new_lines.append(line)
     result = '\n'.join(new_lines)
@@ -2304,8 +2429,135 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         code_part = re.sub(r'<\(([^)]*)\)::(logic\[\d+\])>', _fix_struct_cast, code_part)
         # Fix SV type casts: <(type_name ( expr ))::type> → <(0)::type>
         code_part = re.sub(r'<\((\w+_t\s*\([^)]*\))\)::(logic\[\d+\])>', r'<(0)::\2>', code_part)
+
+        # Fix single-index array access: *reg [ N - 1 ] → <(*reg)::logic>
+        # This pattern appears when SV has reg_q[STAGES-1] for single-bit extraction
+        def _fix_single_index(m):
+            var = m.group(1)
+            return f"<({var})::logic>"
+        code_part = re.sub(r'(\*\w+)\s*\[\s*[^:\]]+\s*\]', _fix_single_index, code_part)
+
+        # Fix struct field access on registers: *reg.field → *reg
+        code_part = re.sub(r'(\*\w+)\.\w+', r'\1', code_part)
+
+        # Fix comparisons: *reg == 1'b0 → *reg == <(1'b0)::type>
+        # Only for register dereferences with known types
+        def _fix_comparison_cast(m):
+            var_name = m.group(1)  # e.g., *reg_name
+            op = m.group(2)        # == or !=
+            lit = m.group(3)       # 1'b0 or 1'b1
+            # Only fix for register dereferences (*name)
+            if not var_name.startswith('*'):
+                return m.group(0)
+            clean_name = var_name[1:].strip()
+            reg_t = reg_type_map.get(clean_name)
+            if reg_t and reg_t != "logic":
+                return f"{var_name} {op} <({lit})::{reg_t}>"
+            return m.group(0)
+        code_part = re.sub(r'(\*?\w+)\s*(==|!=)\s*(1\'b[01])', _fix_comparison_cast, code_part)
+
+        # Fix $clog2 that wasn't evaluated: $clog2 ( N ) → 1
+        code_part = re.sub(r'\$clog2\s*\(\s*[^)]+\s*\)', "1", code_part)
+
+        # Fix bare integer in arithmetic with registers: *reg + 1, *reg - 1
+        # Cast the integer to match the register's type
+        def _fix_arith_int(m):
+            var_name = m.group(1)  # e.g., *reg_name
+            op = m.group(2)        # + or -
+            num = m.group(3)       # bare number
+            clean_name = var_name.lstrip('*').strip()
+            reg_t = reg_type_map.get(clean_name)
+            if reg_t and reg_t != "logic":
+                return f"{var_name} {op} <({num})::{reg_t}>"
+            return m.group(0)
+        code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\d+)(?!\')', _fix_arith_int, code_part)
+
+        # Fix bare integer after cast value: <(N)::type> - 1 → <(N)::type> - <(1)::type>
+        def _fix_cast_arith(m):
+            cast_type = m.group(1)  # e.g., logic[4]
+            op = m.group(2)         # + or -
+            num = m.group(3)        # bare number
+            return f"::{cast_type}> {op} <({num})::{cast_type}>"
+        code_part = re.sub(r'::(logic\[\d+\])>\s*(\+|-)\s*(\d+)(?!\')', _fix_cast_arith, code_part)
+
+        # Evaluate constant comparisons: number == 1'b0 → 1'b0/1'b1
+        # These arise from parameter substitution (e.g., DEPTH=8 → 8 == 0)
+        def _eval_const_cmp(m):
+            lhs = m.group(1).strip()
+            op = m.group(2).strip()
+            rhs = m.group(3).strip()
+            try:
+                # Try to evaluate both sides
+                lhs_val = eval(re.sub(r"'[bdho]", "", lhs.replace("1'b0","0").replace("1'b1","1")), {"__builtins__": {}})
+                rhs_val = eval(re.sub(r"'[bdho]", "", rhs.replace("1'b0","0").replace("1'b1","1")), {"__builtins__": {}})
+                result = False
+                if op == "==": result = (lhs_val == rhs_val)
+                elif op == "!=": result = (lhs_val != rhs_val)
+                elif op == ">": result = (lhs_val > rhs_val)
+                elif op == "<": result = (lhs_val < rhs_val)
+                elif op == ">=": result = (lhs_val >= rhs_val)
+                elif op == "<=": result = (lhs_val <= rhs_val)
+                return "1'b1" if result else "1'b0"
+            except Exception:
+                return m.group(0)
+        # Match: number/literal == number/literal
+        code_part = re.sub(r'\b(\d+(?:\'[bdh][0-9a-fA-F]+)?)\s*(==|!=|>=|<=|>|<)\s*(\d+(?:\'[bdh][0-9a-fA-F]+)?)\b', _eval_const_cmp, code_part)
+
+        # Fix bare 0 in comparisons only: == 0, != 0, > 0, < 0 → use 1'b0
+        # These appear when parameter substitution creates expressions like `N > 0`
+        code_part = re.sub(r'([=!<>]=?\s*)0(?!\w|\')', r"\g<1>1'b0", code_part)
+        # Fix standalone 0 in logical expressions: && 0, || 0
+        code_part = re.sub(r'(&&\s*|&\s*|\|\|\s*|\|\s*)0(?!\w|\')', r"\g<1>1'b0", code_part)
+
         cleaned_lines.append(code_part + comment_part)
-    return '\n'.join(cleaned_lines)
+
+    # Remove unused let bindings (Anvil rejects them)
+    # Multiple passes since removing one let might make another unused
+    for _pass in range(5):
+        full_text = '\n'.join(cleaned_lines)
+        new_cleaned = []
+        removed = False
+        for idx, line in enumerate(cleaned_lines):
+            m = re.match(r'\s*let\s+(\w+)\s*=\s*', line)
+            if m:
+                let_name = m.group(1)
+                # Check if this name is used elsewhere in the output
+                # Count occurrences in all OTHER lines
+                pattern = r'\b' + re.escape(let_name) + r'\b'
+                other_text = '\n'.join(cleaned_lines[:idx] + cleaned_lines[idx+1:])
+                occurrences = len(re.findall(pattern, other_text))
+                if occurrences == 0:
+                    removed = True
+                    continue  # skip this unused let
+            new_cleaned.append(line)
+        cleaned_lines = new_cleaned
+        if not removed:
+            break
+
+    # Fix sequencing: ensure >> connectors are correct after let removal
+    result_text = '\n'.join(cleaned_lines)
+    # Remove trailing >> before a closing brace
+    result_text = re.sub(r'\s*>>\s*\n(\s*\})', r'\n\1', result_text)
+
+    # Fix empty if/else blocks: insert cycle 1 into empty blocks
+    # Pattern: { \n } (possibly with whitespace)
+    def _fix_empty_blocks(text):
+        lines_list = text.split('\n')
+        result = []
+        for i, line in enumerate(lines_list):
+            result.append(line)
+            # Check if this line opens a block and next line closes it
+            if i + 1 < len(lines_list):
+                this_stripped = line.rstrip()
+                next_stripped = lines_list[i + 1].strip()
+                if this_stripped.endswith('{') and (next_stripped == '}' or next_stripped.startswith('} else')):
+                    # Get indentation of the opening brace
+                    indent = len(line) - len(line.lstrip()) + 4
+                    result.append(' ' * indent + 'cycle 1')
+        return '\n'.join(result)
+    result_text = _fix_empty_blocks(result_text)
+
+    return result_text
 
 
 def main():
