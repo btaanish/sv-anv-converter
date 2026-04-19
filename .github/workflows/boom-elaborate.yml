@@ -71,7 +71,7 @@ jobs:
           cp collected-sv/* core/boom/
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add core/boom/
+          git add -f core/boom/
           if git diff --cached --quiet; then
             echo "No changes"
           else

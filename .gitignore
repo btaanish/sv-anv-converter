@@ -1,2 +1,2 @@
 # Cloned source repositories
-core/
+# core/ is not ignored — CI commits generated SV files to core/boom/
