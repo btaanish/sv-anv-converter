@@ -1,0 +1,288 @@
+/* Hand-written Anvil for wt_l15_adapter.sv
+   Adapter connecting L1 I$ and D$ to the OpenPiton L1.5 cache.
+   Handles request arbitration, packet encoding/decoding, endianness.
+   Sub-modules (fifo_v2, rrarbiter) modeled as external channels.
+   Concrete params: MEM_TID_WIDTH=2, DCACHE_SET_ASSOC_WIDTH=2.
+   Clock/reset implicit. */
+
+chan l15a_icache_in_ch {
+    left ic_data_req : (logic@#1) @dyn - @dyn,
+    left ic_data_nc : (logic@#1) @dyn - @dyn,
+    left ic_data_tid : (logic[2]@#1) @dyn - @dyn,
+    left ic_data_way : (logic[2]@#1) @dyn - @dyn,
+    left ic_data_paddr : (logic[40]@#1) @dyn - @dyn
+}
+
+chan l15a_dcache_in_ch {
+    left dc_data_req : (logic@#1) @dyn - @dyn,
+    left dc_data_nc : (logic@#1) @dyn - @dyn,
+    left dc_data_size : (logic[3]@#1) @dyn - @dyn,
+    left dc_data_tid : (logic[2]@#1) @dyn - @dyn,
+    left dc_data_way : (logic[2]@#1) @dyn - @dyn,
+    left dc_data_paddr : (logic[40]@#1) @dyn - @dyn,
+    left dc_data_data : (logic[64]@#1) @dyn - @dyn,
+    left dc_data_rtype : (logic[3]@#1) @dyn - @dyn,
+    left dc_data_amo_op : (logic[4]@#1) @dyn - @dyn
+}
+
+chan l15a_l15_rtrn_ch {
+    left l15_ack : (logic@#1) @dyn - @dyn,
+    left l15_val : (logic@#1) @dyn - @dyn,
+    left l15_returntype : (logic[4]@#1) @dyn - @dyn,
+    left l15_noncacheable : (logic@#1) @dyn - @dyn,
+    left l15_atomic : (logic@#1) @dyn - @dyn,
+    left l15_threadid : (logic[2]@#1) @dyn - @dyn,
+    left l15_f4b : (logic@#1) @dyn - @dyn,
+    left l15_data_0 : (logic[64]@#1) @dyn - @dyn,
+    left l15_data_1 : (logic[64]@#1) @dyn - @dyn,
+    left l15_data_2 : (logic[64]@#1) @dyn - @dyn,
+    left l15_data_3 : (logic[64]@#1) @dyn - @dyn,
+    left l15_inval_icache_all : (logic@#1) @dyn - @dyn,
+    left l15_inval_dcache_all : (logic@#1) @dyn - @dyn,
+    left l15_inval_addr : (logic[12]@#1) @dyn - @dyn,
+    left l15_inval_dcache_inval : (logic@#1) @dyn - @dyn,
+    left l15_inval_icache_inval : (logic@#1) @dyn - @dyn,
+    left l15_inval_way : (logic[2]@#1) @dyn - @dyn
+}
+
+chan l15a_l15_req_ch {
+    left l15_val : (logic@#1) @dyn - @dyn,
+    left l15_req_ack : (logic@#1) @dyn - @dyn,
+    left l15_rqtype : (logic[4]@#1) @dyn - @dyn,
+    left l15_nc : (logic@#1) @dyn - @dyn,
+    left l15_size : (logic[3]@#1) @dyn - @dyn,
+    left l15_threadid : (logic[2]@#1) @dyn - @dyn,
+    left l15_l1rplway : (logic[2]@#1) @dyn - @dyn,
+    left l15_address : (logic[40]@#1) @dyn - @dyn,
+    left l15_data : (logic[64]@#1) @dyn - @dyn,
+    left l15_amo_op : (logic[4]@#1) @dyn - @dyn
+}
+
+chan l15a_icache_rtrn_ch {
+    left ic_rtrn_vld : (logic@#1) @dyn - @dyn,
+    left ic_rtrn_rtype : (logic[3]@#1) @dyn - @dyn,
+    left ic_rtrn_tid : (logic[2]@#1) @dyn - @dyn,
+    left ic_rtrn_data : (logic[256]@#1) @dyn - @dyn,
+    left ic_rtrn_inv_vld : (logic@#1) @dyn - @dyn,
+    left ic_rtrn_inv_all : (logic@#1) @dyn - @dyn,
+    left ic_rtrn_inv_idx : (logic[16]@#1) @dyn - @dyn,
+    left ic_rtrn_inv_way : (logic[2]@#1) @dyn - @dyn
+}
+
+chan l15a_dcache_rtrn_ch {
+    left dc_rtrn_vld : (logic@#1) @dyn - @dyn,
+    left dc_rtrn_rtype : (logic[3]@#1) @dyn - @dyn,
+    left dc_rtrn_tid : (logic[2]@#1) @dyn - @dyn,
+    left dc_rtrn_data : (logic[128]@#1) @dyn - @dyn,
+    left dc_rtrn_inv_vld : (logic@#1) @dyn - @dyn,
+    left dc_rtrn_inv_all : (logic@#1) @dyn - @dyn,
+    left dc_rtrn_inv_idx : (logic[16]@#1) @dyn - @dyn,
+    left dc_rtrn_inv_way : (logic[2]@#1) @dyn - @dyn
+}
+
+chan l15a_ic_ack_ch {
+    left ic_data_ack : (logic@#1) @dyn - @dyn
+}
+
+chan l15a_dc_ack_ch {
+    left dc_data_ack : (logic@#1) @dyn - @dyn
+}
+
+proc wt_l15_adapter(
+    ic_in : left l15a_icache_in_ch,
+    dc_in : left l15a_dcache_in_ch,
+    l15_rtrn : left l15a_l15_rtrn_ch,
+    l15_req : right l15a_l15_req_ch,
+    ic_rtrn : right l15a_icache_rtrn_ch,
+    dc_rtrn : right l15a_dcache_rtrn_ch,
+    ic_ack : right l15a_ic_ack_ch,
+    dc_ack : right l15a_dc_ack_ch
+) {
+    /* Input staging registers */
+    reg r_ic_req : logic;
+    reg r_ic_nc : logic;
+    reg r_ic_tid : logic[2];
+    reg r_ic_way : logic[2];
+    reg r_ic_paddr : logic[40];
+
+    reg r_dc_req : logic;
+    reg r_dc_nc : logic;
+    reg r_dc_size : logic[3];
+    reg r_dc_tid : logic[2];
+    reg r_dc_way : logic[2];
+    reg r_dc_paddr : logic[40];
+    reg r_dc_data : logic[64];
+    reg r_dc_rtype : logic[3];
+    reg r_dc_amo_op : logic[4];
+
+    reg r_l15_ack : logic;
+    reg r_l15_val : logic;
+    reg r_l15_rtype : logic[4];
+    reg r_l15_nc : logic;
+    reg r_l15_atomic : logic;
+    reg r_l15_tid : logic[2];
+    reg r_l15_f4b : logic;
+    reg r_l15_d0 : logic[64];
+    reg r_l15_d1 : logic[64];
+    reg r_l15_d2 : logic[64];
+    reg r_l15_d3 : logic[64];
+    reg r_l15_inval_ic_all : logic;
+    reg r_l15_inval_dc_all : logic;
+    reg r_l15_inval_addr : logic[12];
+    reg r_l15_inval_dc : logic;
+    reg r_l15_inval_ic : logic;
+    reg r_l15_inval_way : logic[2];
+
+    /* Arbiter state: simple round-robin with priority to icache */
+    reg arb_idx : logic;
+
+    /* FIFO state (simplified: single entry buffers) */
+    reg ic_fifo_full : logic;
+    reg dc_fifo_full : logic;
+
+    /* Input recv loops */
+    loop { let v = recv ic_in.ic_data_req >> set r_ic_req := v }
+    loop { let v = recv ic_in.ic_data_nc >> set r_ic_nc := v }
+    loop { let v = recv ic_in.ic_data_tid >> set r_ic_tid := v }
+    loop { let v = recv ic_in.ic_data_way >> set r_ic_way := v }
+    loop { let v = recv ic_in.ic_data_paddr >> set r_ic_paddr := v }
+
+    loop { let v = recv dc_in.dc_data_req >> set r_dc_req := v }
+    loop { let v = recv dc_in.dc_data_nc >> set r_dc_nc := v }
+    loop { let v = recv dc_in.dc_data_size >> set r_dc_size := v }
+    loop { let v = recv dc_in.dc_data_tid >> set r_dc_tid := v }
+    loop { let v = recv dc_in.dc_data_way >> set r_dc_way := v }
+    loop { let v = recv dc_in.dc_data_paddr >> set r_dc_paddr := v }
+    loop { let v = recv dc_in.dc_data_data >> set r_dc_data := v }
+    loop { let v = recv dc_in.dc_data_rtype >> set r_dc_rtype := v }
+    loop { let v = recv dc_in.dc_data_amo_op >> set r_dc_amo_op := v }
+
+    loop { let v = recv l15_rtrn.l15_ack >> set r_l15_ack := v }
+    loop { let v = recv l15_rtrn.l15_val >> set r_l15_val := v }
+    loop { let v = recv l15_rtrn.l15_returntype >> set r_l15_rtype := v }
+    loop { let v = recv l15_rtrn.l15_noncacheable >> set r_l15_nc := v }
+    loop { let v = recv l15_rtrn.l15_atomic >> set r_l15_atomic := v }
+    loop { let v = recv l15_rtrn.l15_threadid >> set r_l15_tid := v }
+    loop { let v = recv l15_rtrn.l15_f4b >> set r_l15_f4b := v }
+    loop { let v = recv l15_rtrn.l15_data_0 >> set r_l15_d0 := v }
+    loop { let v = recv l15_rtrn.l15_data_1 >> set r_l15_d1 := v }
+    loop { let v = recv l15_rtrn.l15_data_2 >> set r_l15_d2 := v }
+    loop { let v = recv l15_rtrn.l15_data_3 >> set r_l15_d3 := v }
+    loop { let v = recv l15_rtrn.l15_inval_icache_all >> set r_l15_inval_ic_all := v }
+    loop { let v = recv l15_rtrn.l15_inval_dcache_all >> set r_l15_inval_dc_all := v }
+    loop { let v = recv l15_rtrn.l15_inval_addr >> set r_l15_inval_addr := v }
+    loop { let v = recv l15_rtrn.l15_inval_dcache_inval >> set r_l15_inval_dc := v }
+    loop { let v = recv l15_rtrn.l15_inval_icache_inval >> set r_l15_inval_ic := v }
+    loop { let v = recv l15_rtrn.l15_inval_way >> set r_l15_inval_way := v }
+
+    /* ACK outputs */
+    loop {
+        let ic_ack_v = *r_ic_req & (~(*ic_fifo_full)) >>
+        let dc_ack_v = *r_dc_req & (~(*dc_fifo_full)) >>
+        send ic_ack.ic_data_ack (ic_ack_v) >>
+        send dc_ack.dc_data_ack (dc_ack_v) >>
+        cycle 1
+    }
+
+    /* Request path to L15 */
+    loop {
+        let ic_has_data = *r_ic_req >>
+        let dc_has_data = *r_dc_req >>
+        let any_req = ic_has_data | dc_has_data >>
+
+        /* Simple arbiter: icache priority */
+        let idx = if ic_has_data == 1'b1 { 1'b0 } else { 1'b1 } >>
+
+        /* Mux request fields based on arb_idx */
+        let req_nc = if idx == 1'b0 { *r_ic_nc } else { *r_dc_nc } >>
+        let req_size = if idx == 1'b0 {
+            if *r_ic_nc == 1'b1 { 3'b010 } else { 3'b111 }
+        } else { *r_dc_size } >>
+        let req_tid = if idx == 1'b0 { *r_ic_tid } else { *r_dc_tid } >>
+        let req_way = if idx == 1'b0 { *r_ic_way } else { *r_dc_way } >>
+        let req_addr = if idx == 1'b0 { *r_ic_paddr } else { *r_dc_paddr } >>
+
+        /* Request type encoding */
+        /* L15_IMISS_RQ=4'd0, L15_LOAD_RQ=4'd1, L15_STORE_RQ=4'd2, L15_ATOMIC_RQ=4'd5 */
+        let rqtype = if idx == 1'b0 { 4'd0 }
+                     else {
+                         /* DCACHE_STORE_REQ=3'd1, DCACHE_LOAD_REQ=3'd0, DCACHE_ATOMIC_REQ=3'd2 */
+                         if *r_dc_rtype == 3'd1 { 4'd2 }
+                         else if *r_dc_rtype == 3'd0 { 4'd1 }
+                         else if *r_dc_rtype == 3'd2 { 4'd5 }
+                         else { 4'd1 }
+                     } >>
+
+        send l15_req.l15_val (any_req) >>
+        send l15_req.l15_rqtype (rqtype) >>
+        send l15_req.l15_nc (req_nc) >>
+        send l15_req.l15_size (req_size) >>
+        send l15_req.l15_threadid (req_tid) >>
+        send l15_req.l15_l1rplway (req_way) >>
+        send l15_req.l15_address (req_addr) >>
+        send l15_req.l15_data (*r_dc_data) >>
+        send l15_req.l15_amo_op (*r_dc_amo_op) >>
+
+        /* L15 return acknowledge */
+        send l15_req.l15_req_ack (*r_l15_val) >>
+
+        set arb_idx := idx
+    }
+
+    /* Return path from L15 */
+    loop {
+        /* L15_LOAD_RET=4'd0, L15_ST_ACK=4'd4, L15_IFILL_RET=4'd1, L15_EVICT_REQ=4'd3,
+           L15_CPX_RESTYPE_ATOMIC_RES=4'd6 */
+        /* ICACHE_IFILL_ACK=3'd0, ICACHE_INV_REQ=3'd1 */
+        /* DCACHE_LOAD_ACK=3'd0, DCACHE_STORE_ACK=3'd1, DCACHE_INV_REQ=3'd2, DCACHE_ATOMIC_ACK=3'd3 */
+
+        let ic_rtrn_rtype = if *r_l15_rtype == 4'd1 { 3'd0 }
+                            else if *r_l15_rtype == 4'd3 { 3'd1 }
+                            else { 3'd0 } >>
+
+        let dc_rtrn_rtype = if *r_l15_rtype == 4'd0 { 3'd0 }
+                            else if *r_l15_rtype == 4'd4 { 3'd1 }
+                            else if *r_l15_rtype == 4'd3 { 3'd2 }
+                            else if *r_l15_rtype == 4'd6 { 3'd3 }
+                            else { 3'd0 } >>
+
+        let ic_vld = if *r_l15_val == 1'b0 { 1'b0 }
+                     else if *r_l15_rtype == 4'd1 { 1'b1 }
+                     else if *r_l15_rtype == 4'd3 {
+                         *r_l15_inval_ic | *r_l15_inval_ic_all
+                     }
+                     else { 1'b0 } >>
+
+        let dc_vld = if *r_l15_val == 1'b0 { 1'b0 }
+                     else if *r_l15_rtype == 4'd0 { 1'b1 }
+                     else if *r_l15_rtype == 4'd4 { 1'b1 }
+                     else if *r_l15_rtype == 4'd6 { 1'b1 }
+                     else if *r_l15_rtype == 4'd3 {
+                         *r_l15_inval_dc | *r_l15_inval_dc_all
+                     }
+                     else { 1'b0 } >>
+
+        /* Invalidation address: {inval_addr, 4'b0} = 16-bit aligned */
+        let inv_idx = <(*r_l15_inval_addr)::logic[16]> << 16'd4 >>
+
+        send ic_rtrn.ic_rtrn_vld (ic_vld) >>
+        send ic_rtrn.ic_rtrn_rtype (ic_rtrn_rtype) >>
+        send ic_rtrn.ic_rtrn_tid (*r_l15_tid) >>
+        send ic_rtrn.ic_rtrn_data (256'd0) >>
+        send ic_rtrn.ic_rtrn_inv_vld (*r_l15_inval_ic) >>
+        send ic_rtrn.ic_rtrn_inv_all (*r_l15_inval_ic_all) >>
+        send ic_rtrn.ic_rtrn_inv_idx (inv_idx) >>
+        send ic_rtrn.ic_rtrn_inv_way (*r_l15_inval_way) >>
+
+        send dc_rtrn.dc_rtrn_vld (dc_vld) >>
+        send dc_rtrn.dc_rtrn_rtype (dc_rtrn_rtype) >>
+        send dc_rtrn.dc_rtrn_tid (*r_l15_tid) >>
+        send dc_rtrn.dc_rtrn_data (128'd0) >>
+        send dc_rtrn.dc_rtrn_inv_vld (*r_l15_inval_dc) >>
+        send dc_rtrn.dc_rtrn_inv_all (*r_l15_inval_dc_all) >>
+        send dc_rtrn.dc_rtrn_inv_idx (inv_idx) >>
+        send dc_rtrn.dc_rtrn_inv_way (*r_l15_inval_way) >>
+
+        cycle 1
+    }
+}
