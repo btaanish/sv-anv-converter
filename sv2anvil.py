@@ -2325,6 +2325,118 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         if rm:
             reg_type_map[rm.group(1)] = rm.group(2)
 
+    # Build output port type map from chan declarations
+    out_port_type_map = {}
+    in_out_chan = None
+    for line in lines:
+        # Detect output chan (the _out_ch one)
+        cm = re.match(r'\s*chan\s+(\w+_out_ch)\s*\{', line)
+        if cm:
+            in_out_chan = 'out'
+            continue
+        cm2 = re.match(r'\s*chan\s+(\w+)\s*\{', line)
+        if cm2:
+            in_out_chan = 'other'
+            continue
+        if in_out_chan == 'out':
+            pm = re.match(r'\s*left\s+(\w+)\s*:\s*\((logic(?:\[\d+\])?)', line)
+            if pm:
+                out_port_type_map[pm.group(1)] = pm.group(2)
+            if line.strip() == '}':
+                in_out_chan = None
+
+    # Infer types for let variables from their usage context
+    # This prevents defaulting everything to logic[64]
+    let_type_map = {}
+    full_text_joined = '\n'.join(lines)
+    for line in lines:
+        s = line.strip()
+
+        # Pattern: var == 1'b0/1'b1 → var should be logic (1-bit)
+        for m_cmp in re.finditer(r'\b(\w+)\s*(?:==|!=)\s*1\'b[01]', s):
+            v = m_cmp.group(1)
+            if v not in reg_type_map:
+                let_type_map[v] = 'logic'
+
+        # Pattern: 1'b0/1'b1 == var → var should be logic
+        for m_cmp in re.finditer(r'1\'b[01]\s*(?:==|!=)\s*(\w+)\b', s):
+            v = m_cmp.group(1)
+            if v not in reg_type_map:
+                let_type_map[v] = 'logic'
+
+        # Pattern: var && ... or ... && var → boolean context → logic
+        for m_bool in re.finditer(r'\b(\w+)\s*&&', s):
+            v = m_bool.group(1)
+            if v not in reg_type_map:
+                let_type_map[v] = 'logic'
+        for m_bool in re.finditer(r'&&\s*~?\s*(\w+)\b', s):
+            v = m_bool.group(1)
+            if v not in reg_type_map:
+                let_type_map[v] = 'logic'
+        for m_bool in re.finditer(r'\b(\w+)\s*\|\|', s):
+            v = m_bool.group(1)
+            if v not in reg_type_map:
+                let_type_map[v] = 'logic'
+        for m_bool in re.finditer(r'\|\|\s*~?\s*(\w+)\b', s):
+            v = m_bool.group(1)
+            if v not in reg_type_map:
+                let_type_map[v] = 'logic'
+
+        # Pattern: *reg OP var or var OP *reg (bitwise/arithmetic)
+        # var should match register's type
+        for m_op in re.finditer(r'\*(\w+)\s*([&|^+\-])\s*(\w+)\b', s):
+            reg_n = m_op.group(1)
+            var_n = m_op.group(3)
+            if reg_n in reg_type_map and var_n not in reg_type_map:
+                let_type_map.setdefault(var_n, reg_type_map[reg_n])
+        for m_op in re.finditer(r'\b(\w+)\s*([&|^+\-])\s*\*(\w+)', s):
+            var_n = m_op.group(1)
+            reg_n = m_op.group(3)
+            if reg_n in reg_type_map and var_n not in reg_type_map:
+                let_type_map.setdefault(var_n, reg_type_map[reg_n])
+
+        # Pattern: ~ var ... & *reg or *reg & ~ var
+        for m_not in re.finditer(r'~\s*(\w+)\b', s):
+            v = m_not.group(1)
+            # Check if this negated var appears near a register deref
+            for m_reg in re.finditer(r'\*(\w+)', s):
+                rn = m_reg.group(1)
+                if rn in reg_type_map and v not in reg_type_map:
+                    let_type_map.setdefault(v, reg_type_map[rn])
+
+        # Pattern: ~ var used with || or && → logic
+        for m_not_bool in re.finditer(r'~\s*(\w+)\s*(?:\|\||&&)', s):
+            v = m_not_bool.group(1)
+            if v not in reg_type_map:
+                let_type_map[v] = 'logic'
+        for m_not_bool in re.finditer(r'(?:\|\||&&)\s*~?\s*\(?\s*(\w+)', s):
+            v = m_not_bool.group(1)
+            if v not in reg_type_map and v not in {'if', 'else', 'send', 'set', 'let'}:
+                let_type_map.setdefault(v, 'logic')
+
+        # Pattern: variables in send expressions → infer from send port type
+        sm_send = re.match(r'\s*send\s+out_ep\.(\w+)\s+\(', s)
+        if sm_send:
+            port = sm_send.group(1)
+            port_type = out_port_type_map.get(port)
+            if port_type:
+                # Find variables that are indexed (var[...]) — these are arrays, don't infer
+                indexed_vars = set(m_idx.group(1) for m_idx in re.finditer(r'\b(\w+)\s*\[', s))
+                # Find variables in the send expression that aren't registers
+                for m_var in re.finditer(r'\b(\w+)\b', s):
+                    vn = m_var.group(1)
+                    if (vn not in reg_type_map and vn not in let_type_map
+                            and vn not in indexed_vars
+                            and vn not in {'send', 'out_ep', 'in_ep', port, 'logic', 'if',
+                                           'else', 'let', 'set', 'recv', 'cycle'}
+                            and not vn.startswith('logic')):
+                        let_type_map.setdefault(vn, port_type)
+
+    # Also: let variable matching output port name → use port type
+    for port_name, port_type in out_port_type_map.items():
+        if port_name not in reg_type_map:
+            let_type_map.setdefault(port_name, port_type)
+
     # Track emitted let names to detect duplicates (per loop scope)
     emitted_let_names = set()
 
@@ -2346,12 +2458,13 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     continue
                 emitted_let_names.add(name)
 
-                # Keep recv expressions and properly typed casts as-is
+                # Keep recv expressions and special cases as-is
                 if 'recv ' in expr_rest:
                     new_lines.append(line)
-                elif expr_rest.strip().startswith('<(0)::logic['):
-                    new_lines.append(line)
                 elif expr_rest.strip() == f"*r_fu_data_i >>" or expr_rest.strip() == "*r_fu_data_cpop_i >>":
+                    new_lines.append(line)
+                elif expr_rest.strip().startswith('<(0)::logic[') and name not in let_type_map:
+                    # Keep already-typed zeros only if no better type was inferred
                     new_lines.append(line)
                 else:
                     # Replace expression with typed zero + comment
@@ -2362,19 +2475,24 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                         suffix = " >>"
                         expr_clean = expr_clean[:-2].rstrip()
 
-                    # Choose width: 1 for flag-like names, default otherwise
-                    width = default_width
-                    flag_names = {'adder_op_b_negate', 'shift_left', 'shift_arithmetic',
-                                  'sgn', 'less', 'adder_z_flag'}
-                    if name in flag_names:
-                        width = 1
+                    # Choose type: use inferred type if available, then flag names, then default
+                    inferred_type = let_type_map.get(name)
+                    if inferred_type:
+                        type_str = inferred_type
+                    else:
+                        flag_names = {'adder_op_b_negate', 'shift_left', 'shift_arithmetic',
+                                      'sgn', 'less', 'adder_z_flag'}
+                        if name in flag_names:
+                            type_str = 'logic'
+                        else:
+                            type_str = f"logic[{default_width}]"
 
                     # Clean expr for comment (remove nested comments)
                     expr_comment = re.sub(r'/\*.*?\*/', '', expr_clean).strip()
                     if len(expr_comment) > 80:
                         expr_comment = expr_comment[:77] + '...'
 
-                    new_lines.append(f"{indent}let {_sanitize_ident(name)} = <(0)::logic[{width}]> /* {expr_comment} */{suffix}")
+                    new_lines.append(f"{indent}let {_sanitize_ident(name)} = <(0)::{type_str}> /* {expr_comment} */{suffix}")
             else:
                 new_lines.append(line)
         elif stripped.startswith('set ') and ' := ' in stripped:
@@ -2416,6 +2534,13 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             comment_part = ""
         # Remove bare ticks from code (not part of sized literals)
         code_part = re.sub(r"(?<![0-9])'(?![bdhoBDHO0-9])", "", code_part)
+
+        # Fix SV reduction operators: ( | *var ) or ( & *var ) → <(*var)::logic>
+        # These are unary reduction ops (OR-reduce, AND-reduce) → 1-bit result
+        code_part = re.sub(r'\(\s*[|&]\s*(\*\w+)\s*\)', r'<(\1)::logic>', code_part)
+        # Also handle without parens: | *var in expression context
+        code_part = re.sub(r'(?<![|&\w])\s*\|\s*(\*\w+)\b(?!\s*[|])', r' <(\1)::logic>', code_part)
+
         # Fix struct-like expressions in cast: <( field : value )::type> → <(0)::type>
         # Colons inside <(...)::type> that aren't part of :: indicate SV struct syntax
         def _fix_struct_cast(m):
@@ -2429,6 +2554,40 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         code_part = re.sub(r'<\(([^)]*)\)::(logic\[\d+\])>', _fix_struct_cast, code_part)
         # Fix SV type casts: <(type_name ( expr ))::type> → <(0)::type>
         code_part = re.sub(r'<\((\w+_t\s*\([^)]*\))\)::(logic\[\d+\])>', r'<(0)::\2>', code_part)
+
+        # Fix shift expressions inside casts: <(... << ...)::type> → <(0)::type>
+        # Shift ops with mixed-width operands cause type mismatches
+        # Use balanced-paren matching to find cast expressions
+        def _fix_shift_casts_in_line(line_text):
+            result = []
+            i = 0
+            while i < len(line_text):
+                # Look for <( pattern
+                if line_text[i:i+2] == '<(' :
+                    # Find the balanced closing )
+                    depth = 1
+                    j = i + 2
+                    while j < len(line_text) and depth > 0:
+                        if line_text[j] == '(':
+                            depth += 1
+                        elif line_text[j] == ')':
+                            depth -= 1
+                        j += 1
+                    # j now points past the closing )
+                    inner = line_text[i+2:j-1]
+                    # Check for ::type> after the closing )
+                    tm = re.match(r'::(logic(?:\[\d+\])?)\s*>', line_text[j:])
+                    if tm and '<<' in inner:
+                        # Replace with zero
+                        cast_type = tm.group(1)
+                        end_pos = j + tm.end()
+                        result.append(f"<(0)::{cast_type}>")
+                        i = end_pos
+                        continue
+                result.append(line_text[i])
+                i += 1
+            return ''.join(result)
+        code_part = _fix_shift_casts_in_line(code_part)
 
         # Fix single-index array access: *reg [ N - 1 ] → <(*reg)::logic>
         # This pattern appears when SV has reg_q[STAGES-1] for single-bit extraction
@@ -2508,6 +2667,30 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         code_part = re.sub(r'([=!<>]=?\s*)0(?!\w|\')', r"\g<1>1'b0", code_part)
         # Fix standalone 0 in logical expressions: && 0, || 0
         code_part = re.sub(r'(&&\s*|&\s*|\|\|\s*|\|\s*)0(?!\w|\')', r"\g<1>1'b0", code_part)
+
+        # Fix broad comparison pattern: (expr_with_*reg) != 1'b0 after bare-0 conversion
+        # When a complex expression involving *reg is compared to a 1-bit literal,
+        # cast the literal to match the widest register type in the expression
+        def _fix_complex_comparison_post(m):
+            lhs = m.group(1)
+            op = m.group(2)
+            lit = m.group(3)
+            reg_refs = re.findall(r'\*(\w+)', lhs)
+            widest_type = None
+            widest_bits = 0
+            for rn in reg_refs:
+                rt = reg_type_map.get(rn)
+                if rt and rt != "logic":
+                    wm = re.match(r'logic\[(\d+)\]', rt)
+                    if wm:
+                        w = int(wm.group(1))
+                        if w > widest_bits:
+                            widest_bits = w
+                            widest_type = rt
+            if widest_type:
+                return f"{lhs} {op} <({lit})::{widest_type}>"
+            return m.group(0)
+        code_part = re.sub(r'(\([^)]*\*\w+[^)]*\))\s*(==|!=)\s*(1\'b[01])', _fix_complex_comparison_post, code_part)
 
         cleaned_lines.append(code_part + comment_part)
 
