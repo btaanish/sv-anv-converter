@@ -1,0 +1,212 @@
+/* Hand-written Anvil for instr_queue.sv
+   Instruction queue separating front-end from back-end.
+   Organized as FIFO for 32-bit instruction entries. Supports
+   compressed instructions, branch prediction forwarding, and replay.
+   Concrete params: INSTR_PER_FETCH=1, VLEN=64, GPLEN=34, DEPTH=4.
+   Clock/reset implicit. */
+
+chan iq_in_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left instr : (logic[32]@#1) @dyn - @dyn,
+    left addr : (logic[64]@#1) @dyn - @dyn,
+    left valid : (logic@#1) @dyn - @dyn,
+    left exception_valid : (logic@#1) @dyn - @dyn,
+    left exception_addr : (logic[64]@#1) @dyn - @dyn,
+    left exception_gpaddr : (logic[34]@#1) @dyn - @dyn,
+    left exception_tinst : (logic[32]@#1) @dyn - @dyn,
+    left exception_gva : (logic@#1) @dyn - @dyn,
+    left predict_addr : (logic[64]@#1) @dyn - @dyn,
+    left cf_type : (logic[3]@#1) @dyn - @dyn
+}
+
+chan iq_out_ch {
+    left rdy_out : (logic@#1) @dyn - @dyn,
+    left consumed : (logic@#1) @dyn - @dyn,
+    left replay : (logic@#1) @dyn - @dyn,
+    left fetch_entry_valid : (logic@#1) @dyn - @dyn,
+    left fetch_entry_instr : (logic[32]@#1) @dyn - @dyn,
+    left fetch_entry_addr : (logic[64]@#1) @dyn - @dyn,
+    left fetch_entry_bp_taken : (logic@#1) @dyn - @dyn,
+    left fetch_entry_bp_target : (logic[64]@#1) @dyn - @dyn,
+    left fetch_entry_ex_valid : (logic@#1) @dyn - @dyn,
+    left fetch_entry_ex_addr : (logic[64]@#1) @dyn - @dyn
+}
+
+chan iq_decode_ch {
+    left fetch_entry_ready : (logic@#1) @dyn - @dyn
+}
+
+proc instr_queue(
+    inp : left iq_in_ch,
+    dec : left iq_decode_ch,
+    out : right iq_out_ch
+) {
+    /* FIFO storage (4 entries) */
+    reg fifo_instr0 : logic[32];
+    reg fifo_instr1 : logic[32];
+    reg fifo_instr2 : logic[32];
+    reg fifo_instr3 : logic[32];
+    reg fifo_addr0 : logic[64];
+    reg fifo_addr1 : logic[64];
+    reg fifo_addr2 : logic[64];
+    reg fifo_addr3 : logic[64];
+    reg fifo_valid0 : logic;
+    reg fifo_valid1 : logic;
+    reg fifo_valid2 : logic;
+    reg fifo_valid3 : logic;
+    reg fifo_ex0 : logic;
+    reg fifo_ex1 : logic;
+    reg fifo_ex2 : logic;
+    reg fifo_ex3 : logic;
+    reg fifo_ex_addr0 : logic[64];
+
+    /* FIFO pointers (2-bit for 4-entry queue) */
+    reg wr_ptr : logic[2];
+    reg rd_ptr : logic[2];
+    reg count : logic[3];
+
+    /* Input staging */
+    reg r_flush : logic;
+    reg r_instr : logic[32];
+    reg r_addr : logic[64];
+    reg r_valid : logic;
+    reg r_ex_valid : logic;
+    reg r_ex_addr : logic[64];
+    reg r_ex_gpaddr : logic[34];
+    reg r_ex_tinst : logic[32];
+    reg r_ex_gva : logic;
+    reg r_predict : logic[64];
+    reg r_cf : logic[3];
+    reg r_dec_ready : logic;
+
+    /* Input recv loops */
+    loop { let v = recv inp.flush >> set r_flush := v }
+    loop { let v = recv inp.instr >> set r_instr := v }
+    loop { let v = recv inp.addr >> set r_addr := v }
+    loop { let v = recv inp.valid >> set r_valid := v }
+    loop { let v = recv inp.exception_valid >> set r_ex_valid := v }
+    loop { let v = recv inp.exception_addr >> set r_ex_addr := v }
+    loop { let v = recv inp.exception_gpaddr >> set r_ex_gpaddr := v }
+    loop { let v = recv inp.exception_tinst >> set r_ex_tinst := v }
+    loop { let v = recv inp.exception_gva >> set r_ex_gva := v }
+    loop { let v = recv inp.predict_addr >> set r_predict := v }
+    loop { let v = recv inp.cf_type >> set r_cf := v }
+    loop { let v = recv dec.fetch_entry_ready >> set r_dec_ready := v }
+
+    /* Main FIFO control loop */
+    loop {
+        let full = *count == 3'd4 >>
+        let empty = *count == 3'd0 >>
+
+        /* Ready to accept new instruction if not full */
+        let rdy = if full { 1'b0 } else { 1'b1 } >>
+
+        /* Replay when FIFO full and new valid instruction arrives */
+        let rep = if full {
+            if *r_valid == 1'b1 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        /* Output oldest entry if available */
+        let out_valid = if empty { 1'b0 } else { 1'b1 } >>
+
+        let out_instr = if *rd_ptr == 2'd0 { *fifo_instr0 }
+                        else if *rd_ptr == 2'd1 { *fifo_instr1 }
+                        else if *rd_ptr == 2'd2 { *fifo_instr2 }
+                        else { *fifo_instr3 } >>
+
+        let out_addr = if *rd_ptr == 2'd0 { *fifo_addr0 }
+                       else if *rd_ptr == 2'd1 { *fifo_addr1 }
+                       else if *rd_ptr == 2'd2 { *fifo_addr2 }
+                       else { *fifo_addr3 } >>
+
+        let out_ex = if *rd_ptr == 2'd0 { *fifo_ex0 }
+                     else if *rd_ptr == 2'd1 { *fifo_ex1 }
+                     else if *rd_ptr == 2'd2 { *fifo_ex2 }
+                     else { *fifo_ex3 } >>
+
+        /* Consumed signal: downstream took an entry */
+        let consumed = if out_valid == 1'b1 {
+            if *r_dec_ready == 1'b1 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        send out.rdy_out (rdy) >>
+        send out.consumed (consumed) >>
+        send out.replay (rep) >>
+        send out.fetch_entry_valid (out_valid) >>
+        send out.fetch_entry_instr (out_instr) >>
+        send out.fetch_entry_addr (out_addr) >>
+        send out.fetch_entry_bp_taken (1'b0) >>
+        send out.fetch_entry_bp_target (*r_predict) >>
+        send out.fetch_entry_ex_valid (out_ex) >>
+        send out.fetch_entry_ex_addr (*fifo_ex_addr0) >>
+
+        /* FIFO update logic */
+        if *r_flush == 1'b1 {
+            /* Flush: reset pointers */
+            set wr_ptr := 2'd0 >>
+            set rd_ptr := 2'd0 >>
+            set count := 3'd0 >>
+            set fifo_valid0 := 1'b0 >>
+            set fifo_valid1 := 1'b0 >>
+            set fifo_valid2 := 1'b0 >>
+            set fifo_valid3 := 1'b0
+        } else {
+            /* Enqueue */
+            let do_enq = if *r_valid == 1'b1 {
+                if full { 1'b0 } else { 1'b1 }
+            } else { 1'b0 } >>
+
+            if do_enq == 1'b1 {
+                if *wr_ptr == 2'd0 {
+                    set fifo_instr0 := *r_instr >>
+                    set fifo_addr0 := *r_addr >>
+                    set fifo_valid0 := 1'b1 >>
+                    set fifo_ex0 := *r_ex_valid >>
+                    set fifo_ex_addr0 := *r_ex_addr
+                } else if *wr_ptr == 2'd1 {
+                    set fifo_instr1 := *r_instr >>
+                    set fifo_addr1 := *r_addr >>
+                    set fifo_valid1 := 1'b1 >>
+                    set fifo_ex1 := *r_ex_valid
+                } else if *wr_ptr == 2'd2 {
+                    set fifo_instr2 := *r_instr >>
+                    set fifo_addr2 := *r_addr >>
+                    set fifo_valid2 := 1'b1 >>
+                    set fifo_ex2 := *r_ex_valid
+                } else {
+                    set fifo_instr3 := *r_instr >>
+                    set fifo_addr3 := *r_addr >>
+                    set fifo_valid3 := 1'b1 >>
+                    set fifo_ex3 := *r_ex_valid
+                }
+            } else {
+                cycle 1
+            } >>
+
+            /* Dequeue */
+            if consumed == 1'b1 {
+                /* Advance read pointer */
+                let next_rd = if *rd_ptr == 2'd3 { 2'd0 } else { *rd_ptr + 2'd1 } >>
+                set rd_ptr := next_rd
+            } else {
+                cycle 1
+            } >>
+
+            /* Update write pointer and count */
+            let nw = if do_enq == 1'b1 {
+                if *wr_ptr == 2'd3 { 2'd0 } else { *wr_ptr + 2'd1 }
+            } else { *wr_ptr } >>
+
+            let nc = if do_enq == 1'b1 {
+                if consumed == 1'b1 { *count }
+                else { *count + 3'd1 }
+            } else {
+                if consumed == 1'b1 { *count - 3'd1 }
+                else { *count }
+            } >>
+
+            set wr_ptr := nw >>
+            set count := nc
+        }
+    }
+}
