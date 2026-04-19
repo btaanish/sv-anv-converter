@@ -1,0 +1,78 @@
+name: BOOM Elaborate
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/boom-elaborate.yml'
+jobs:
+  elaborate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      CHIPYARD_TAG: '1.13.0'
+      BOOM_CONFIG: SmallBoomV3Config
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git curl wget python3 device-tree-compiler verilator libfl-dev
+      - name: Cache SBT
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.sbt
+            ~/.ivy2
+          key: sbt-chipyard-1.13.0
+      - name: Install firtool
+        run: |
+          wget -q "https://github.com/llvm/circt/releases/download/firtool-1.75.0/firrtl-bin-linux-x64.tar.gz" -O firtool.tar.gz
+          tar xzf firtool.tar.gz
+          sudo mv firtool-1.75.0/bin/firtool /usr/local/bin/
+          firtool --version
+          rm -rf firtool.tar.gz firtool-1.75.0
+      - name: Clone Chipyard
+        run: |
+          git clone --branch $CHIPYARD_TAG https://github.com/ucb-bar/chipyard.git chipyard
+          cd chipyard
+          ./scripts/init-submodules-no-riscv-tools.sh
+      - name: Generate SV
+        timeout-minutes: 90
+        run: |
+          cd chipyard/sims/verilator
+          make verilog CONFIG=$BOOM_CONFIG 2>&1 | tee ../../build.log
+          find generated-src -name "*.sv" -o -name "*.v" | head -200
+      - name: Collect SV
+        run: |
+          mkdir -p collected-sv
+          find chipyard/sims/verilator/generated-src -name "*.sv" -o -name "*.v" | while read f; do cp "$f" collected-sv/; done
+          echo "Total: $(ls collected-sv/ | wc -l) files"
+          ls collected-sv/ | head -50
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: boom-sv
+          path: collected-sv/
+          retention-days: 30
+      - name: Commit to repo
+        run: |
+          mkdir -p core/boom
+          cp collected-sv/* core/boom/
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add core/boom/
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "[CI] Add BOOM SystemVerilog from Chipyard $CHIPYARD_TAG ($BOOM_CONFIG)"
+            git push
+          fi
