@@ -1,0 +1,168 @@
+/* Hand-written Anvil for frontend.sv
+   Ariane instruction fetch frontend. Interfaces with I$, handles
+   control change requests from back-end, does branch prediction.
+   Manages NPC generation, replay, and instruction queue feeding.
+   Concrete params: VLEN=64, NrIssuePorts=1, INSTR_PER_FETCH=1.
+   Clock/reset implicit. Sub-modules (bht, btb, ras, instr_queue,
+   instr_realign) modeled as external channel interfaces. */
+
+chan fe_ctrl_ch {
+    left boot_addr : (logic[64]@#1) @dyn - @dyn,
+    left flush_bp : (logic@#1) @dyn - @dyn,
+    left flush : (logic@#1) @dyn - @dyn,
+    left halt : (logic@#1) @dyn - @dyn,
+    left halt_frontend : (logic@#1) @dyn - @dyn,
+    left set_pc_commit : (logic@#1) @dyn - @dyn,
+    left pc_commit : (logic[64]@#1) @dyn - @dyn,
+    left ex_valid : (logic@#1) @dyn - @dyn,
+    left eret : (logic@#1) @dyn - @dyn,
+    left epc : (logic[64]@#1) @dyn - @dyn,
+    left trap_vector_base : (logic[64]@#1) @dyn - @dyn,
+    left set_debug_pc : (logic@#1) @dyn - @dyn,
+    left debug_mode : (logic@#1) @dyn - @dyn
+}
+
+chan fe_bp_ch {
+    left bp_valid : (logic@#1) @dyn - @dyn,
+    left bp_mispredict : (logic@#1) @dyn - @dyn,
+    left bp_target : (logic[64]@#1) @dyn - @dyn,
+    left bp_pc : (logic[64]@#1) @dyn - @dyn,
+    left bp_taken : (logic@#1) @dyn - @dyn,
+    left bp_cf_type : (logic[3]@#1) @dyn - @dyn
+}
+
+chan fe_icache_resp_ch {
+    left ic_valid : (logic@#1) @dyn - @dyn,
+    left ic_data : (logic[32]@#1) @dyn - @dyn,
+    left ic_ex_valid : (logic@#1) @dyn - @dyn,
+    left ic_vaddr : (logic[64]@#1) @dyn - @dyn
+}
+
+chan fe_decode_ch {
+    left fetch_ready : (logic@#1) @dyn - @dyn
+}
+
+chan fe_out_ch {
+    left ic_req_valid : (logic@#1) @dyn - @dyn,
+    left ic_req_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left fetch_valid : (logic@#1) @dyn - @dyn,
+    left fetch_instr : (logic[32]@#1) @dyn - @dyn,
+    left fetch_addr : (logic[64]@#1) @dyn - @dyn,
+    left fetch_bp_taken : (logic@#1) @dyn - @dyn,
+    left fetch_bp_target : (logic[64]@#1) @dyn - @dyn,
+    left fetch_ex_valid : (logic@#1) @dyn - @dyn
+}
+
+proc frontend(
+    ctrl : left fe_ctrl_ch,
+    bp : left fe_bp_ch,
+    ic : left fe_icache_resp_ch,
+    dec : left fe_decode_ch,
+    out : right fe_out_ch
+) {
+    /* NPC and fetch PC registers */
+    reg npc : logic[64];
+    reg fetch_pc : logic[64];
+    /* I$ request valid */
+    reg ic_req_q : logic;
+    /* Replay tracking */
+    reg replay_q : logic;
+    /* Boot address saved */
+    reg boot_addr_q : logic[64];
+
+    /* Input staging */
+    reg r_flush : logic;
+    reg r_halt : logic;
+    reg r_halt_fe : logic;
+    reg r_set_pc : logic;
+    reg r_pc_commit : logic[64];
+    reg r_ex_valid : logic;
+    reg r_eret : logic;
+    reg r_epc : logic[64];
+    reg r_trap_vec : logic[64];
+    reg r_set_dbg : logic;
+    reg r_dbg_mode : logic;
+    reg r_bp_valid : logic;
+    reg r_bp_misp : logic;
+    reg r_bp_target : logic[64];
+    reg r_bp_pc : logic[64];
+    reg r_ic_valid : logic;
+    reg r_ic_data : logic[32];
+    reg r_ic_ex : logic;
+    reg r_ic_vaddr : logic[64];
+    reg r_fr : logic;
+
+    /* Input recv loops */
+    loop { let v = recv ctrl.boot_addr >> set boot_addr_q := v }
+    loop { let v = recv ctrl.flush_bp >> cycle 1 }
+    loop { let v = recv ctrl.flush >> set r_flush := v }
+    loop { let v = recv ctrl.halt >> set r_halt := v }
+    loop { let v = recv ctrl.halt_frontend >> set r_halt_fe := v }
+    loop { let v = recv ctrl.set_pc_commit >> set r_set_pc := v }
+    loop { let v = recv ctrl.pc_commit >> set r_pc_commit := v }
+    loop { let v = recv ctrl.ex_valid >> set r_ex_valid := v }
+    loop { let v = recv ctrl.eret >> set r_eret := v }
+    loop { let v = recv ctrl.epc >> set r_epc := v }
+    loop { let v = recv ctrl.trap_vector_base >> set r_trap_vec := v }
+    loop { let v = recv ctrl.set_debug_pc >> set r_set_dbg := v }
+    loop { let v = recv ctrl.debug_mode >> set r_dbg_mode := v }
+    loop { let v = recv bp.bp_valid >> set r_bp_valid := v }
+    loop { let v = recv bp.bp_mispredict >> set r_bp_misp := v }
+    loop { let v = recv bp.bp_target >> set r_bp_target := v }
+    loop { let v = recv bp.bp_pc >> set r_bp_pc := v }
+    loop { let v = recv bp.bp_taken >> cycle 1 }
+    loop { let v = recv bp.bp_cf_type >> cycle 1 }
+    loop { let v = recv ic.ic_valid >> set r_ic_valid := v }
+    loop { let v = recv ic.ic_data >> set r_ic_data := v }
+    loop { let v = recv ic.ic_ex_valid >> set r_ic_ex := v }
+    loop { let v = recv ic.ic_vaddr >> set r_ic_vaddr := v }
+    loop { let v = recv dec.fetch_ready >> set r_fr := v }
+
+    /* Sequential NPC update loop */
+    loop {
+        set npc := *fetch_pc
+    }
+
+    /* Main output logic */
+    loop {
+        /* NPC selection: priority: flush/exception > eret > debug >
+           mispredict > set_pc_commit > sequential */
+        let next_pc = if *r_flush == 1'b1 {
+            if *r_ex_valid == 1'b1 { *r_trap_vec }
+            else { *r_pc_commit }
+        } else if *r_eret == 1'b1 {
+            *r_epc
+        } else if *r_set_dbg == 1'b1 {
+            *r_pc_commit
+        } else if *r_bp_misp == 1'b1 {
+            *r_bp_target
+        } else if *r_set_pc == 1'b1 {
+            *r_pc_commit
+        } else {
+            *npc + 64'd4
+        } >>
+
+        /* Issue I$ request unless halted */
+        let do_fetch = if *r_halt == 1'b1 { 1'b0 }
+                       else if *r_halt_fe == 1'b1 { 1'b0 }
+                       else { 1'b1 } >>
+
+        send out.ic_req_valid (do_fetch) >>
+        send out.ic_req_vaddr (next_pc) >>
+
+        /* Forward fetched instruction to decode */
+        let fv = if *r_ic_valid == 1'b1 {
+            if *r_flush == 1'b0 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        send out.fetch_valid (fv) >>
+        send out.fetch_instr (*r_ic_data) >>
+        send out.fetch_addr (*r_ic_vaddr) >>
+        send out.fetch_bp_taken (1'b0) >>
+        send out.fetch_bp_target (64'd0) >>
+        send out.fetch_ex_valid (*r_ic_ex) >>
+
+        /* Update fetch_pc (which feeds npc via separate loop) */
+        set fetch_pc := next_pc
+    }
+}
