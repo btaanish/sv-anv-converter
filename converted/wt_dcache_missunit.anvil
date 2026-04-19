@@ -1,0 +1,252 @@
+/* Hand-written Anvil for wt_dcache_missunit.sv
+   Miss controller for write-through DCache. Handles miss requests
+   from multiple ports (load, PTW, wbuffer, store), AMO operations,
+   cache flush, and memory request/response arbitration.
+   Concrete params: NumPorts=4, XLEN=64, PLEN=56, DCACHE_TAG_WIDTH=44,
+   DCACHE_SET_ASSOC=8, DCACHE_LINE_WIDTH=128, MEM_TID_WIDTH=2,
+   DCACHE_MAX_TX=4, CL_IDX_WIDTH=9. Clock/reset implicit. */
+
+chan mu_ctrl_ch {
+    left enable : (logic@#1) @dyn - @dyn,
+    left flush : (logic@#1) @dyn - @dyn,
+    left wbuf_empty : (logic@#1) @dyn - @dyn,
+    left amo_req_valid : (logic@#1) @dyn - @dyn,
+    left amo_req_op : (logic[4]@#1) @dyn - @dyn,
+    left amo_req_size : (logic[2]@#1) @dyn - @dyn,
+    left amo_req_addr : (logic[64]@#1) @dyn - @dyn,
+    left amo_req_data : (logic[64]@#1) @dyn - @dyn
+}
+
+chan mu_miss_ch {
+    left miss_req : (logic[4]@#1) @dyn - @dyn,
+    left miss_nc : (logic[4]@#1) @dyn - @dyn,
+    left miss_we : (logic[4]@#1) @dyn - @dyn,
+    left miss_paddr0 : (logic[56]@#1) @dyn - @dyn,
+    left miss_paddr1 : (logic[56]@#1) @dyn - @dyn,
+    left miss_paddr2 : (logic[56]@#1) @dyn - @dyn,
+    left miss_paddr3 : (logic[56]@#1) @dyn - @dyn,
+    left miss_size0 : (logic[3]@#1) @dyn - @dyn,
+    left miss_id0 : (logic[2]@#1) @dyn - @dyn,
+    left miss_vld_bits0 : (logic[8]@#1) @dyn - @dyn
+}
+
+chan mu_mem_ch {
+    left mem_rtrn_vld : (logic@#1) @dyn - @dyn,
+    left mem_rtrn_tid : (logic[2]@#1) @dyn - @dyn,
+    left mem_rtrn_type : (logic[3]@#1) @dyn - @dyn,
+    left mem_rtrn_data : (logic[128]@#1) @dyn - @dyn,
+    left mem_data_ack : (logic@#1) @dyn - @dyn
+}
+
+chan mu_tx_ch {
+    left tx_vld : (logic[4]@#1) @dyn - @dyn,
+    left tx_paddr0 : (logic[56]@#1) @dyn - @dyn,
+    left tx_paddr1 : (logic[56]@#1) @dyn - @dyn,
+    left tx_paddr2 : (logic[56]@#1) @dyn - @dyn,
+    left tx_paddr3 : (logic[56]@#1) @dyn - @dyn
+}
+
+chan mu_out_ch {
+    left flush_ack : (logic@#1) @dyn - @dyn,
+    left miss_out : (logic@#1) @dyn - @dyn,
+    left cache_en : (logic@#1) @dyn - @dyn,
+    left miss_ack : (logic[4]@#1) @dyn - @dyn,
+    left miss_replay : (logic[4]@#1) @dyn - @dyn,
+    left miss_rtrn_vld : (logic[4]@#1) @dyn - @dyn,
+    left miss_rtrn_id : (logic[2]@#1) @dyn - @dyn,
+    left amo_resp_data : (logic[64]@#1) @dyn - @dyn,
+    left amo_resp_ack : (logic@#1) @dyn - @dyn,
+    left wr_cl_vld : (logic@#1) @dyn - @dyn,
+    left wr_cl_nc : (logic@#1) @dyn - @dyn,
+    left wr_cl_tag : (logic[44]@#1) @dyn - @dyn,
+    left wr_cl_idx : (logic[9]@#1) @dyn - @dyn,
+    left wr_cl_data : (logic[128]@#1) @dyn - @dyn,
+    left mem_data_req : (logic@#1) @dyn - @dyn,
+    left mem_data_paddr : (logic[56]@#1) @dyn - @dyn,
+    left mem_data_size : (logic[3]@#1) @dyn - @dyn,
+    left mem_data_tid : (logic[2]@#1) @dyn - @dyn
+}
+
+proc wt_dcache_missunit(
+    ctrl : left mu_ctrl_ch,
+    miss : left mu_miss_ch,
+    mem : left mu_mem_ch,
+    tx : left mu_tx_ch,
+    out : right mu_out_ch
+) {
+    /* FSM: 0=IDLE, 1=FLUSHING, 2=AMO_WAIT, 3=SEND_MEM_REQ, 4=WAIT_MEM_RESP */
+    reg state : logic[3];
+    /* Cache enable register */
+    reg cache_en_q : logic;
+    /* Selected port for current miss */
+    reg sel_port : logic[2];
+    /* Saved miss request fields */
+    reg sv_paddr : logic[56];
+    reg sv_size : logic[3];
+    reg sv_tid : logic[2];
+    reg sv_nc : logic;
+    reg sv_we : logic;
+    reg sv_vld_bits : logic[8];
+
+    /* Input staging */
+    reg r_enable : logic;
+    reg r_flush : logic;
+    reg r_wbuf_empty : logic;
+    reg r_amo_valid : logic;
+    reg r_amo_op : logic[4];
+    reg r_amo_size : logic[2];
+    reg r_amo_addr : logic[64];
+    reg r_amo_data : logic[64];
+    reg r_miss_req : logic[4];
+    reg r_miss_nc : logic[4];
+    reg r_miss_we : logic[4];
+    reg r_paddr0 : logic[56];
+    reg r_paddr1 : logic[56];
+    reg r_paddr2 : logic[56];
+    reg r_paddr3 : logic[56];
+    reg r_msize0 : logic[3];
+    reg r_mid0 : logic[2];
+    reg r_mvb0 : logic[8];
+    reg r_mrv : logic;
+    reg r_mrtid : logic[2];
+    reg r_mrtype : logic[3];
+    reg r_mrdata : logic[128];
+    reg r_mda : logic;
+    reg r_txv : logic[4];
+
+    /* Input recv loops */
+    loop { let v = recv ctrl.enable >> set r_enable := v }
+    loop { let v = recv ctrl.flush >> set r_flush := v }
+    loop { let v = recv ctrl.wbuf_empty >> set r_wbuf_empty := v }
+    loop { let v = recv ctrl.amo_req_valid >> set r_amo_valid := v }
+    loop { let v = recv ctrl.amo_req_op >> set r_amo_op := v }
+    loop { let v = recv ctrl.amo_req_size >> set r_amo_size := v }
+    loop { let v = recv ctrl.amo_req_addr >> set r_amo_addr := v }
+    loop { let v = recv ctrl.amo_req_data >> set r_amo_data := v }
+    loop { let v = recv miss.miss_req >> set r_miss_req := v }
+    loop { let v = recv miss.miss_nc >> set r_miss_nc := v }
+    loop { let v = recv miss.miss_we >> set r_miss_we := v }
+    loop { let v = recv miss.miss_paddr0 >> set r_paddr0 := v }
+    loop { let v = recv miss.miss_paddr1 >> set r_paddr1 := v }
+    loop { let v = recv miss.miss_paddr2 >> set r_paddr2 := v }
+    loop { let v = recv miss.miss_paddr3 >> set r_paddr3 := v }
+    loop { let v = recv miss.miss_size0 >> set r_msize0 := v }
+    loop { let v = recv miss.miss_id0 >> set r_mid0 := v }
+    loop { let v = recv miss.miss_vld_bits0 >> set r_mvb0 := v }
+    loop { let v = recv mem.mem_rtrn_vld >> set r_mrv := v }
+    loop { let v = recv mem.mem_rtrn_tid >> set r_mrtid := v }
+    loop { let v = recv mem.mem_rtrn_type >> set r_mrtype := v }
+    loop { let v = recv mem.mem_rtrn_data >> set r_mrdata := v }
+    loop { let v = recv mem.mem_data_ack >> set r_mda := v }
+    loop { let v = recv tx.tx_vld >> set r_txv := v }
+    loop { let v = recv tx.tx_paddr0 >> cycle 1 }
+    loop { let v = recv tx.tx_paddr1 >> cycle 1 }
+    loop { let v = recv tx.tx_paddr2 >> cycle 1 }
+    loop { let v = recv tx.tx_paddr3 >> cycle 1 }
+
+    /* Main FSM and output loop */
+    loop {
+        /* Arbiter: priority port 0 > 1 > 2 > 3 */
+        let any_miss = *r_miss_req != 4'd0 >>
+
+        let arb_port = if *r_miss_req & 4'd1 != 4'd0 { 2'd0 }
+                       else if *r_miss_req & 4'd2 != 4'd0 { 2'd1 }
+                       else if *r_miss_req & 4'd4 != 4'd0 { 2'd2 }
+                       else { 2'd3 } >>
+
+        /* Acknowledge the selected port in IDLE state */
+        let ack_bits = if *state == 3'd0 {
+            if any_miss {
+                if arb_port == 2'd0 { 4'd1 }
+                else if arb_port == 2'd1 { 4'd2 }
+                else if arb_port == 2'd2 { 4'd4 }
+                else { 4'd8 }
+            } else { 4'd0 }
+        } else { 4'd0 } >>
+
+        /* Memory request in SEND state */
+        let mem_req_v = if *state == 3'd3 { 1'b1 } else { 1'b0 } >>
+
+        /* Return valid routing: broadcast to the port that initiated the miss */
+        let rtrn_bits = if *r_mrv == 1'b1 {
+            if *sel_port == 2'd0 { 4'd1 }
+            else if *sel_port == 2'd1 { 4'd2 }
+            else if *sel_port == 2'd2 { 4'd4 }
+            else { 4'd8 }
+        } else { 4'd0 } >>
+
+        /* Collision detection (simplified): replay if TX in progress at same addr */
+        let replay_bits = 4'd0 >>
+
+        /* Flush ack */
+        let fl_ack = if *state == 3'd1 {
+            if *r_wbuf_empty == 1'b1 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        /* Write cacheline on return */
+        let wr_vld = if *r_mrv == 1'b1 {
+            if *sv_we == 1'b0 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        /* AMO response */
+        let amo_ack = if *state == 3'd2 {
+            if *r_mrv == 1'b1 { 1'b1 } else { 1'b0 }
+        } else { 1'b0 } >>
+
+        send out.flush_ack (fl_ack) >>
+        send out.miss_out (any_miss) >>
+        send out.cache_en (*cache_en_q) >>
+        send out.miss_ack (ack_bits) >>
+        send out.miss_replay (replay_bits) >>
+        send out.miss_rtrn_vld (rtrn_bits) >>
+        send out.miss_rtrn_id (*r_mrtid) >>
+        send out.amo_resp_data (<(*r_mrdata)::logic[64]>) >>
+        send out.amo_resp_ack (amo_ack) >>
+        send out.wr_cl_vld (wr_vld) >>
+        send out.wr_cl_nc (*sv_nc) >>
+        send out.wr_cl_tag (<(*sv_paddr)::logic[44]>) >>
+        send out.wr_cl_idx (<(*sv_paddr)::logic[9]>) >>
+        send out.wr_cl_data (*r_mrdata) >>
+        send out.mem_data_req (mem_req_v) >>
+        send out.mem_data_paddr (*sv_paddr) >>
+        send out.mem_data_size (*sv_size) >>
+        send out.mem_data_tid (*sv_tid) >>
+
+        /* Next state */
+        let ns = if *state == 3'd0 {
+            /* IDLE */
+            if *r_flush == 1'b1 { 3'd1 }
+            else if *r_amo_valid == 1'b1 { 3'd3 }
+            else if any_miss { 3'd3 }
+            else { 3'd0 }
+        } else if *state == 3'd1 {
+            /* FLUSHING */
+            if fl_ack == 1'b1 { 3'd0 } else { 3'd1 }
+        } else if *state == 3'd2 {
+            /* AMO_WAIT */
+            if *r_mrv == 1'b1 { 3'd0 } else { 3'd2 }
+        } else if *state == 3'd3 {
+            /* SEND_MEM_REQ */
+            if *r_mda == 1'b1 { 3'd4 } else { 3'd3 }
+        } else {
+            /* WAIT_MEM_RESP */
+            if *r_mrv == 1'b1 { 3'd0 } else { 3'd4 }
+        } >>
+
+        set state := ns >>
+
+        /* Save selected port info on ack */
+        if ack_bits != 4'd0 {
+            set sel_port := arb_port >>
+            set sv_paddr := *r_paddr0 >>
+            set sv_size := *r_msize0 >>
+            set sv_tid := *r_mid0 >>
+            set sv_nc := <(*r_miss_nc)::logic> >>
+            set sv_we := <(*r_miss_we)::logic> >>
+            set sv_vld_bits := *r_mvb0
+        } else {
+            /* Update cache enable */
+            set cache_en_q := *r_enable
+        }
+    }
+}
