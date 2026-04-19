@@ -38,28 +38,32 @@ Ares's team achieved full compilation of all 43 CVA6 core modules. Independently
 **Results:** 39/39 .anvil files compile. Semantic quality mixed — clint, sram, rv_tracer, ariane_verilog_wrap are stubs. Quality fixes deferred to M9.
 
 ### M6: CVA6 Vendor Files — PULP Platform (budget: 10 cycles)
-**Status:** IN PROGRESS
-**Scope:** Convert 153 vendor/pulp-platform .sv files:
-- common_cells/ (74 files): FIFOs, CDCs, arbiters, synchronizers
-- axi/ (36 files): AXI infrastructure (mux, demux, CDC, burst splitter)
-- fpga-support/ (21 files): FPGA primitives
-- tech_cells_generic/ (15 files): technology cell wrappers
-- axi_riscv_atomics/ (7 files): AXI atomic operations
-**Converter baseline:** ~55% pass rate on vendor files (11/20 sampled)
-**Approach:** Improve converter for remaining patterns, batch-convert, hand-fix failures
-**Acceptance criteria:** All 153 .anvil files pass `anvil -just-check` with exit code 0
+**Status:** COMPLETE ✓ (verified 2026-04-19)
+**Results:** 153/153 vendor .anvil files compile. sv2anvil.py auto-conversion at 100% for vendor files. PR #98 pending merge.
 
-### M7: BOOM Conversion (budget: TBD)
+### M7: Complete CVA6 Conversion — Remaining 214 Files (budget: 8 cycles)
+**Status:** NEXT
+**Scope:** Convert all remaining CVA6 .sv files:
+- core/ remaining (cache_subsystem, frontend, mmu, etc.): ~71 files
+- corev_apu/ (FPGA, testbench, platform files): ~66 files
+- common/: ~9 files
+- Package/config headers: ~68 files
+**Converter baseline:** 88.7% pass rate (190/214 auto-convert successfully)
+**24 failing files:** 8 testbench (SimDTM, SimJTAG, dp_ram, etc.), 8 cache subsystem, 3 frontend, 2 MMU, 3 other
+**Approach:** Batch auto-convert the 190 passing files, fix converter for remaining 24, hand-fix if needed
+**Acceptance criteria:** All 214 .anvil files pass `anvil -just-check` with exit code 0
+
+### M8: BOOM Conversion (budget: TBD)
 **Status:** NOT STARTED
-**Goal:** Convert BOOM to Anvil. Chisel-based, needs Chisel→SV→Anvil pipeline.
+**Goal:** Convert BOOM to Anvil. Chisel-based, needs Chisel→SV→Anvil pipeline research first.
 
-### M8: Rocket Chip Conversion (budget: TBD)
+### M9: Rocket Chip Conversion (budget: TBD)
 **Status:** NOT STARTED
 **Goal:** Convert Rocket Chip to Anvil. Chisel-based, largest codebase.
 
-### M9: Validation & Polish (budget: TBD)
+### M10: Semantic Validation & Round-Trip Verification (budget: TBD)
 **Status:** NOT STARTED
-**Goal:** Full round-trip verification. Compile Anvil→SV, compare with originals. Fix semantic stubs from M5.
+**Goal:** Full round-trip verification. Compile Anvil→SV, compare with originals. Fix semantic stubs from M5/M6.
 
 ## Lessons Learned
 - **CRITICAL: Always compile-check output.** The team produced 27 files over many cycles without ever running the compiler. ALL were invalid. Verification MUST include `anvil -just-check` on every file.
@@ -74,14 +78,17 @@ Ares's team achieved full compilation of all 43 CVA6 core modules. Independently
 - **Stub files pass compilation but lack semantics.** Several M5 files were port-level skeletons. Acceptance criteria should require semantic spot-checks, not just compilation.
 - **Scale workers per file count.** 153 vendor files needs many parallel workers to avoid timeout. Assign ~5-10 files per worker max.
 
+### 2026-04-19: M6 complete — 153/153 CVA6 vendor files compile
+Maya improved sv2anvil.py from 49% to 100% vendor pass rate across 8 commits. Converter now handles parameterized types, casting, const eval, array indexing, struct access. PR #98 pending merge. Overall converter pass rate on remaining 214 CVA6 files: 88.7%.
+
 ## Progress Tracking
 - CVA6 core: 43/43 compile ✓
 - CVA6 utility+SoC: 39/39 compile ✓
-- CVA6 vendor: 0/153 (M6 starting)
-- CVA6 testbench/verif: 0/~116 (low priority)
-- BOOM: not started
-- Rocket Chip: not started
-- Total converted: 82 files
+- CVA6 vendor: 153/153 compile ✓
+- CVA6 remaining (core extras, corev_apu, common, configs): 0/214
+- BOOM: not started (Chisel-based, no SV source yet)
+- Rocket Chip: not started (Chisel-based, no SV source yet)
+- Total converted: 231 files / 445 CVA6 total
 
 ## Research Findings
 - CVA6 = native SV (42K LOC), best first target (moderate complexity, clean modules)
