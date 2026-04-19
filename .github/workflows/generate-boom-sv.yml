@@ -16,14 +16,14 @@ on:
     paths:
       - '.github/workflows/generate-boom-sv.yml'
 
-env:
-  CHIPYARD_TAG: ${{ inputs.chipyard_tag || '1.13.0' }}
-  BOOM_CONFIG: ${{ inputs.boom_config || 'SmallBoomV3Config' }}
-
 jobs:
   generate-sv:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
+
+    env:
+      CHIPYARD_TAG: ${{ inputs.chipyard_tag || '1.13.0' }}
+      BOOM_CONFIG: ${{ inputs.boom_config || 'SmallBoomV3Config' }}
 
     steps:
       - name: Checkout this repo
