@@ -18,6 +18,9 @@ Ares's team achieved full compilation of all 43 CVA6 core modules. Independently
 ### 2026-04-18: M5 complete — 82/82 CVA6 non-vendor files compile
 39 utility+SoC files converted. Apollo verified: all compile, but semantic spot-checks revealed some files are port-level stubs (clint, sram, rv_tracer, ariane_verilog_wrap). Converter improved to ~55% on vendor files.
 
+### 2026-04-19: M7 complete — 445/445 CVA6 files compile
+Full CVA6 conversion achieved in 7 cycles. Converter improved to handle 416/445 files automatically; 15 complex files (cache subsystem, MMU, frontend, testbench) hand-written by Dana and Leo. All 445 .anvil files verified passing `anvil -just-check`. CVA6 phase complete. Next challenge: Chisel-based repos (BOOM, Rocket) — no JVM in environment.
+
 ## Milestones
 
 ### M1: Research & Foundation (budget: 4 impl cycles)
@@ -41,21 +44,15 @@ Ares's team achieved full compilation of all 43 CVA6 core modules. Independently
 **Status:** COMPLETE ✓ (verified 2026-04-19)
 **Results:** 153/153 vendor .anvil files compile. sv2anvil.py auto-conversion at 100% for vendor files. PR #98 pending merge.
 
-### M7: Complete CVA6 Conversion — Remaining 214 Files (budget: 8 cycles)
-**Status:** NEXT
-**Scope:** Convert all remaining CVA6 .sv files:
-- core/ remaining (cache_subsystem, frontend, mmu, etc.): ~71 files
-- corev_apu/ (FPGA, testbench, platform files): ~66 files
-- common/: ~9 files
-- Package/config headers: ~68 files
-**Converter baseline:** 88.7% pass rate (190/214 auto-convert successfully)
-**24 failing files:** 8 testbench (SimDTM, SimJTAG, dp_ram, etc.), 8 cache subsystem, 3 frontend, 2 MMU, 3 other
-**Approach:** Batch auto-convert the 190 passing files, fix converter for remaining 24, hand-fix if needed
-**Acceptance criteria:** All 214 .anvil files pass `anvil -just-check` with exit code 0
+### M7: Complete CVA6 Conversion — Remaining 214 Files (budget: 8 cycles, used: 7)
+**Status:** COMPLETE ✓ (verified 2026-04-19)
+**Results:** All 445 CVA6 .anvil files pass `anvil -just-check`. Maya improved converter (190→416 auto-pass), Dana and Leo hand-wrote 15 complex files (cache subsystem, MMU, frontend).
 
-### M8: BOOM Conversion (budget: TBD)
-**Status:** NOT STARTED
-**Goal:** Convert BOOM to Anvil. Chisel-based, needs Chisel→SV→Anvil pipeline research first.
+### M8: BOOM SV Generation & Batch Conversion (budget: 10 cycles)
+**Status:** NEXT
+**Goal:** Install JVM/SBT/Chisel toolchain, clone BOOM repo, generate SV from Chisel, run sv2anvil.py on generated SV, fix converter failures, achieve full compilation of all BOOM .anvil files.
+**Key risk:** No JVM available in environment — installation is prerequisite. If JVM install fails, explore pre-generated Verilog from Chipyard releases or BOOM CI artifacts.
+**Acceptance criteria:** All BOOM .anvil files pass `anvil -just-check` with exit code 0.
 
 ### M9: Rocket Chip Conversion (budget: TBD)
 **Status:** NOT STARTED
@@ -85,10 +82,10 @@ Maya improved sv2anvil.py from 49% to 100% vendor pass rate across 8 commits. Co
 - CVA6 core: 43/43 compile ✓
 - CVA6 utility+SoC: 39/39 compile ✓
 - CVA6 vendor: 153/153 compile ✓
-- CVA6 remaining (core extras, corev_apu, common, configs): 0/214
+- CVA6 remaining (core extras, corev_apu, common, configs): 214/214 compile ✓
 - BOOM: not started (Chisel-based, no SV source yet)
 - Rocket Chip: not started (Chisel-based, no SV source yet)
-- Total converted: 231 files / 445 CVA6 total
+- Total converted: 445 files / 445 CVA6 total ✓
 
 ## Research Findings
 - CVA6 = native SV (42K LOC), best first target (moderate complexity, clean modules)
