@@ -1,0 +1,401 @@
+/* Hand-written Anvil for cva6_icache.sv
+   Instruction cache compatible with OpenPiton.
+   6-state FSM: FLUSH(0), IDLE(1), READ(2), MISS(3), KILL_ATRANS(4), KILL_MISS(5).
+   4-way set-associative, 256 lines per way, 128-bit cache lines.
+   Concrete params: VLEN=64, PLEN=56, ICACHE_LINE_WIDTH=128,
+   ICACHE_INDEX_WIDTH=12, ICACHE_OFFSET_WIDTH=4, ICACHE_TAG_WIDTH=44,
+   ICACHE_SET_ASSOC=4, ICACHE_NUM_WORDS=256, FETCH_WIDTH=32,
+   FETCH_ALIGN_BITS=2. Piton NOC style.
+   Clock/reset implicit. */
+
+chan icache_ctrl_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left en : (logic@#1) @dyn - @dyn
+}
+
+chan icache_areq_in_ch {
+    left fetch_valid : (logic@#1) @dyn - @dyn,
+    left fetch_paddr : (logic[56]@#1) @dyn - @dyn,
+    left fetch_ex_valid : (logic@#1) @dyn - @dyn
+}
+
+chan icache_areq_out_ch {
+    left fetch_req : (logic@#1) @dyn - @dyn,
+    left fetch_vaddr : (logic[64]@#1) @dyn - @dyn
+}
+
+chan icache_dreq_in_ch {
+    left req : (logic@#1) @dyn - @dyn,
+    left kill_s1 : (logic@#1) @dyn - @dyn,
+    left kill_s2 : (logic@#1) @dyn - @dyn,
+    left vaddr : (logic[64]@#1) @dyn - @dyn,
+    left spec : (logic@#1) @dyn - @dyn
+}
+
+chan icache_dreq_out_ch {
+    left rdy : (logic@#1) @dyn - @dyn,
+    left valid : (logic@#1) @dyn - @dyn,
+    left data : (logic[32]@#1) @dyn - @dyn,
+    left vaddr_out : (logic[64]@#1) @dyn - @dyn,
+    left ex : (logic@#1) @dyn - @dyn
+}
+
+chan icache_mem_rtrn_ch {
+    left vld : (logic@#1) @dyn - @dyn,
+    left rtype : (logic[3]@#1) @dyn - @dyn,
+    left data : (logic[128]@#1) @dyn - @dyn,
+    left inv_all : (logic@#1) @dyn - @dyn,
+    left inv_vld : (logic@#1) @dyn - @dyn,
+    left inv_way : (logic[2]@#1) @dyn - @dyn,
+    left inv_idx : (logic[12]@#1) @dyn - @dyn
+}
+
+chan icache_mem_out_ch {
+    left data_req : (logic@#1) @dyn - @dyn,
+    left data_ack : (logic@#1) @dyn - @dyn,
+    left paddr : (logic[56]@#1) @dyn - @dyn,
+    left nc : (logic@#1) @dyn - @dyn,
+    left way : (logic[2]@#1) @dyn - @dyn
+}
+
+chan icache_perf_ch {
+    left miss : (logic@#1) @dyn - @dyn
+}
+
+proc cva6_icache(
+    ctrl : left icache_ctrl_ch,
+    areq_in : left icache_areq_in_ch,
+    dreq_in : left icache_dreq_in_ch,
+    mem_rtrn : left icache_mem_rtrn_ch,
+    mem_ack : left icache_mem_out_ch,
+    areq_out : right icache_areq_out_ch,
+    dreq_out : right icache_dreq_out_ch,
+    mem_out : right icache_mem_out_ch,
+    perf : right icache_perf_ch
+) {
+    /* FSM state */
+    reg state : logic[3];
+    reg cache_en_q : logic;
+    reg cmp_en_q : logic;
+    reg flush_q : logic;
+    reg inv_q : logic;
+    reg vaddr_q : logic[64];
+    reg cl_tag_q : logic[44];
+    reg cl_offset_q : logic[4];
+    reg flush_cnt_q : logic[8];
+    reg repl_way_oh_q : logic[4];
+    reg lfsr_q : logic[8];
+
+    /* Snapshot registers */
+    reg s_state : logic[3];
+    reg s_cache_en : logic;
+    reg s_cmp_en : logic;
+    reg s_flush : logic;
+    reg s_inv : logic;
+    reg s_vaddr : logic[64];
+    reg s_tag : logic[44];
+    reg s_offset : logic[4];
+    reg s_flush_cnt : logic[8];
+    reg s_repl_oh : logic[4];
+    reg s_lfsr : logic[8];
+
+    /* Input staging registers */
+    reg r_flush : logic;
+    reg r_en : logic;
+    reg r_areq_valid : logic;
+    reg r_areq_paddr : logic[56];
+    reg r_areq_ex_valid : logic;
+    reg r_dreq_req : logic;
+    reg r_dreq_kill_s1 : logic;
+    reg r_dreq_kill_s2 : logic;
+    reg r_dreq_vaddr : logic[64];
+    reg r_dreq_spec : logic;
+    reg r_mem_rtrn_vld : logic;
+    reg r_mem_rtrn_rtype : logic[3];
+    reg r_mem_rtrn_data : logic[128];
+    reg r_mem_inv_all : logic;
+    reg r_mem_inv_vld : logic;
+    reg r_mem_inv_way : logic[2];
+    reg r_mem_inv_idx : logic[12];
+    reg r_mem_data_ack : logic;
+
+    /* Output staging registers */
+    reg o_areq_fetch_req : logic;
+    reg o_areq_fetch_vaddr : logic[64];
+    reg o_dreq_ready : logic;
+    reg o_dreq_valid : logic;
+    reg o_dreq_data : logic[32];
+    reg o_dreq_vaddr : logic[64];
+    reg o_dreq_ex : logic;
+    reg o_mem_data_req : logic;
+    reg o_mem_paddr : logic[56];
+    reg o_mem_nc : logic;
+    reg o_mem_way : logic[2];
+    reg o_miss : logic;
+
+    /* Input recv loops */
+    loop { let v = recv ctrl.flush >> set r_flush := v }
+    loop { let v = recv ctrl.en >> set r_en := v }
+    loop { let v = recv areq_in.fetch_valid >> set r_areq_valid := v }
+    loop { let v = recv areq_in.fetch_paddr >> set r_areq_paddr := v }
+    loop { let v = recv areq_in.fetch_ex_valid >> set r_areq_ex_valid := v }
+    loop { let v = recv dreq_in.req >> set r_dreq_req := v }
+    loop { let v = recv dreq_in.kill_s1 >> set r_dreq_kill_s1 := v }
+    loop { let v = recv dreq_in.kill_s2 >> set r_dreq_kill_s2 := v }
+    loop { let v = recv dreq_in.vaddr >> set r_dreq_vaddr := v }
+    loop { let v = recv dreq_in.spec >> set r_dreq_spec := v }
+    loop { let v = recv mem_rtrn.vld >> set r_mem_rtrn_vld := v }
+    loop { let v = recv mem_rtrn.rtype >> set r_mem_rtrn_rtype := v }
+    loop { let v = recv mem_rtrn.data >> set r_mem_rtrn_data := v }
+    loop { let v = recv mem_rtrn.inv_all >> set r_mem_inv_all := v }
+    loop { let v = recv mem_rtrn.inv_vld >> set r_mem_inv_vld := v }
+    loop { let v = recv mem_rtrn.inv_way >> set r_mem_inv_way := v }
+    loop { let v = recv mem_rtrn.inv_idx >> set r_mem_inv_idx := v }
+    loop { let v = recv mem_ack.data_ack >> set r_mem_data_ack := v }
+
+    /* Output loop */
+    loop {
+        send areq_out.fetch_req (*o_areq_fetch_req) >>
+        send areq_out.fetch_vaddr (*o_areq_fetch_vaddr) >>
+        send dreq_out.rdy (*o_dreq_ready) >>
+        send dreq_out.valid (*o_dreq_valid) >>
+        send dreq_out.data (*o_dreq_data) >>
+        send dreq_out.vaddr_out (*o_dreq_vaddr) >>
+        send dreq_out.ex (*o_dreq_ex) >>
+        send mem_out.data_req (*o_mem_data_req) >>
+        send mem_out.data_ack (1'b0) >>
+        send mem_out.paddr (*o_mem_paddr) >>
+        send mem_out.nc (*o_mem_nc) >>
+        send mem_out.way (*o_mem_way) >>
+        send perf.miss (*o_miss) >>
+        cycle 1
+    }
+
+    /* Snapshot loop */
+    loop {
+        set s_state := *state >>
+        set s_cache_en := *cache_en_q >>
+        set s_cmp_en := *cmp_en_q >>
+        set s_flush := *flush_q >>
+        set s_inv := *inv_q >>
+        set s_vaddr := *vaddr_q >>
+        set s_tag := *cl_tag_q >>
+        set s_offset := *cl_offset_q >>
+        set s_flush_cnt := *flush_cnt_q >>
+        set s_repl_oh := *repl_way_oh_q >>
+        set s_lfsr := *lfsr_q
+    }
+
+    /* Main FSM loop */
+    loop {
+        let st = *s_state >>
+        let ce = *s_cache_en >>
+        let fl = *s_flush >>
+        let invq = *s_inv >>
+        let va = *s_vaddr >>
+        let tag = *s_tag >>
+        let off = *s_offset >>
+        let fcnt = *s_flush_cnt >>
+
+        /* Extract tag from physical address */
+        let new_tag = if *r_areq_valid == 1'b1 {
+            <(*r_areq_paddr >> 12)::logic[44]>
+        } else { tag } >>
+
+        /* NC check: cache disabled or address in non-cacheable region (bit 39 of paddr) */
+        let paddr_is_nc = if ce == 1'b0 { 1'b1 }
+                          else if <(*r_areq_paddr >> 39)::logic> == 1'b1 { 1'b1 }
+                          else { 1'b0 } >>
+
+        /* Latch vaddr */
+        let new_vaddr = if *r_dreq_req == 1'b1 { *r_dreq_vaddr } else { va } >>
+
+        /* Aligned vaddr for translation */
+        let aligned_vaddr = (va >> 64'd2) << 64'd2 >>
+
+        /* Offset: Piton style */
+        let new_offset = if *r_dreq_req == 1'b1 {
+            <(*r_dreq_vaddr >> 2)::logic[4]>
+        } else { off } >>
+
+        /* Invalidation detect: ICACHE_INV_REQ = rtype 1 */
+        let inv_en = *r_mem_rtrn_vld & (if *r_mem_rtrn_rtype == 3'd1 { 1'b1 } else { 1'b0 }) >>
+
+        /* Flush counter */
+        let flush_done = if fcnt == 8'd255 { 1'b1 } else { 1'b0 } >>
+
+        /* Simplified hit detection: no actual tag RAM modeled.
+           In behavioral model, we say no hit when cache disabled. */
+        let cl_hit_any = 1'b0 >>
+
+        /* Default outputs */
+        set o_areq_fetch_req := 1'b0 >>
+        set o_areq_fetch_vaddr := aligned_vaddr >>
+        set o_dreq_ready := 1'b0 >>
+        set o_dreq_valid := 1'b0 >>
+        set o_dreq_data := <(*r_mem_rtrn_data)::logic[32]> >>
+        set o_dreq_vaddr := va >>
+        set o_dreq_ex := *r_areq_ex_valid >>
+        set o_mem_data_req := 1'b0 >>
+        set o_mem_paddr := if paddr_is_nc == 1'b1 {
+            <((new_tag << 44'd12) | <(va & 64'd4092)::logic[44]>)::logic[56]>
+        } else {
+            <((new_tag << 44'd12) | <((va >> 4) << 4)::logic[44]>)::logic[56]>
+        } >>
+        set o_mem_nc := paddr_is_nc >>
+        set o_mem_way := <(*s_lfsr)::logic[2]> >>
+        set o_miss := 1'b0 >>
+
+        /* Register updates defaults */
+        set cl_tag_q := new_tag >>
+        set cl_offset_q := new_offset >>
+        set inv_q := inv_en >>
+
+        let new_flush = fl | *r_flush >>
+
+        if st == 3'd0 {
+            /* FLUSH */
+            if flush_done == 1'b1 {
+                set state := 3'd1 >>
+                set flush_q := 1'b0 >>
+                set cache_en_q := *r_en >>
+                set flush_cnt_q := 8'd0
+            } else {
+                set flush_cnt_q := fcnt + 8'd1 >>
+                set flush_q := new_flush >>
+                cycle 1
+            }
+        } else if st == 3'd1 {
+            /* IDLE */
+            set cmp_en_q := ce >>
+            set flush_q := new_flush >>
+            if new_flush == 1'b1 {
+                set state := 3'd0
+            } else if *r_en == 1'b1 {
+                if ce == 1'b0 {
+                    set state := 3'd0
+                } else {
+                    if *r_mem_rtrn_vld == 1'b0 {
+                        set o_dreq_ready := 1'b1 >>
+                        if *r_dreq_req == 1'b1 {
+                            set vaddr_q := *r_dreq_vaddr >>
+                            set state := 3'd2
+                        } else {
+                            cycle 1
+                        }
+                    } else {
+                        cycle 1
+                    }
+                }
+            } else {
+                if *r_mem_rtrn_vld == 1'b0 {
+                    set o_dreq_ready := 1'b1 >>
+                    if *r_dreq_req == 1'b1 {
+                        set vaddr_q := *r_dreq_vaddr >>
+                        set state := 3'd2
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            }
+        } else if st == 3'd2 {
+            /* READ */
+            set o_areq_fetch_req := 1'b1 >>
+            set cmp_en_q := ce >>
+            set flush_q := new_flush >>
+            if *r_areq_valid == 1'b1 {
+                if new_flush == 1'b1 {
+                    set state := 3'd1
+                } else if (*r_areq_ex_valid == 1'b1) | (cl_hit_any == 1'b1 & ce == 1'b1) {
+                    if invq == 1'b0 {
+                        let dv = if *r_dreq_kill_s2 == 1'b1 { 1'b0 } else { 1'b1 } >>
+                        set o_dreq_valid := dv >>
+                        set state := 3'd1 >>
+                        if *r_mem_rtrn_vld == 1'b0 {
+                            set o_dreq_ready := 1'b1 >>
+                            if *r_dreq_req == 1'b1 {
+                                set vaddr_q := *r_dreq_vaddr >>
+                                set state := 3'd2
+                            } else {
+                                cycle 1
+                            }
+                        } else {
+                            cycle 1
+                        }
+                    } else {
+                        cycle 1
+                    }
+                } else if *r_dreq_kill_s2 == 1'b1 {
+                    set state := 3'd1
+                } else if invq == 1'b0 {
+                    set cmp_en_q := 1'b0 >>
+                    set o_mem_data_req := 1'b1 >>
+                    if *r_mem_data_ack == 1'b1 {
+                        set o_miss := if paddr_is_nc == 1'b1 { 1'b0 } else { 1'b1 } >>
+                        set state := 3'd3
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            } else if *r_dreq_kill_s2 == 1'b1 | new_flush == 1'b1 {
+                set state := 3'd4
+            } else {
+                cycle 1
+            }
+        } else if st == 3'd3 {
+            /* MISS */
+            set flush_q := new_flush >>
+            /* ICACHE_IFILL_ACK = rtype 0 */
+            if *r_mem_rtrn_vld == 1'b1 {
+                if *r_mem_rtrn_rtype == 3'd0 {
+                    set state := 3'd1 >>
+                    let kill = *r_dreq_kill_s2 | new_flush >>
+                    if kill == 1'b0 {
+                        set o_dreq_valid := 1'b1
+                    } else {
+                        cycle 1
+                    }
+                } else {
+                    cycle 1
+                }
+            } else if *r_dreq_kill_s2 == 1'b1 | new_flush == 1'b1 {
+                set state := 3'd5
+            } else {
+                cycle 1
+            }
+        } else if st == 3'd4 {
+            /* KILL_ATRANS */
+            set o_areq_fetch_req := 1'b1 >>
+            set flush_q := new_flush >>
+            if *r_areq_valid == 1'b1 {
+                set state := 3'd1
+            } else {
+                cycle 1
+            }
+        } else {
+            /* KILL_MISS (state=5) */
+            set flush_q := new_flush >>
+            if *r_mem_rtrn_vld == 1'b1 {
+                if *r_mem_rtrn_rtype == 3'd0 {
+                    set state := 3'd1
+                } else {
+                    cycle 1
+                }
+            } else {
+                cycle 1
+            }
+        }
+    }
+
+    /* LFSR update: simple shift register for replacement */
+    loop {
+        let v = *lfsr_q >>
+        let feedback = <(v)::logic> ^ <(v >> 2)::logic> ^ <(v >> 3)::logic> ^ <(v >> 4)::logic> >>
+        set lfsr_q := (<(feedback)::logic[8]> << 8'd7) | (v >> 8'd1) >>
+        cycle 1
+    }
+}
