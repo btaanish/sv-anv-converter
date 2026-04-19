@@ -828,8 +828,13 @@ class Parser:
                 self.advance()
 
     def _parse_signal(self) -> List[SVSignal]:
-        """Parse a signal declaration: logic [msb:lsb] name, name2;"""
+        """Parse a signal declaration: logic/wire/reg [#delay] [msb:lsb] name, name2;"""
         self.advance()  # consume logic/wire/reg
+        # Skip optional delay: #number or #number.number
+        if self.at(TokenKind.HASH):
+            self.advance()
+            while self.at(TokenKind.NUMBER) or self.at(TokenKind.DOT):
+                self.advance()
         width_msb = None
         width_lsb = None
 
@@ -861,8 +866,14 @@ class Parser:
         return signals
 
     def _parse_assign(self) -> Optional[SVAssign]:
-        """Parse: assign lhs = rhs;"""
+        """Parse: assign [#delay] lhs = rhs;"""
         self.expect(TokenKind.ASSIGN)
+        # Skip optional delay: #number or #number.number
+        if self.at(TokenKind.HASH):
+            self.advance()
+            # Skip delay value (e.g., 0.1, 10, etc.)
+            while self.at(TokenKind.NUMBER) or (self.at(TokenKind.DOT)):
+                self.advance()
         lhs = self.collect_expr_until(TokenKind.EQUALS)
         self.expect(TokenKind.EQUALS)
         rhs = self.collect_expr_until(TokenKind.SEMI)
@@ -1249,7 +1260,7 @@ def compute_width(msb: Optional[str], lsb: Optional[str], params: Dict[str, str]
     expr_lsb = re.sub(r'config_pkg::\w+', '0', expr_lsb)
     try:
         w = eval(expr_msb, {"__builtins__": {}}) - eval(expr_lsb, {"__builtins__": {}}) + 1
-        return max(w, 1)
+        return max(int(w), 1)
     except Exception:
         return None
 
@@ -1279,6 +1290,10 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
 
     # '0 → explicit zero
     e = re.sub(r"'\{default\s*:\s*'0\s*\}", "0", e)
+    # Strip underscores from sized literals (e.g., 32'hffff_ffff → 32'hffffffff)
+    def _strip_lit_underscores(m):
+        return m.group(0).replace('_', '')
+    e = re.sub(r"\d+'[bdho][0-9a-fA-F_xXzZ]+", _strip_lit_underscores, e)
     # Unsized literals: 'bXXX → 1'bXXX, 'hXXX → 1'hXXX, 'dXXX → 1'dXXX, 'oXXX → 1'oXXX
     # Negative lookbehind prevents matching inside already-sized literals like 1'b0
     e = re.sub(r"(?<!\d)'([bdho])([0-9a-fA-F_xXzZ]+)", r"1'\1\2", e)
@@ -1312,6 +1327,29 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
                     break
         return result
     e = _strip_signed_unsigned(e)
+
+    # SV type casts: byte'(expr) → expr, byte (expr) → expr, etc.
+    # The tokenizer may strip the tick, so handle both with and without '
+    sv_type_widths = {"byte": 8, "shortint": 16, "int": 32, "longint": 64}
+    for sv_type, sv_w in sv_type_widths.items():
+        # Try with tick first, then without
+        for pat_str in [re.escape(sv_type) + r"\s*'\s*\(", r'\b' + re.escape(sv_type) + r"\s*\("]:
+            while re.search(pat_str, e):
+                m_tc = re.search(pat_str, e)
+                # Find matching close paren
+                depth = 1
+                pos = m_tc.end()
+                while pos < len(e) and depth > 0:
+                    if e[pos] == "(":
+                        depth += 1
+                    elif e[pos] == ")":
+                        depth -= 1
+                    pos += 1
+                if depth == 0:
+                    inner = e[m_tc.end():pos - 1]
+                    e = e[:m_tc.start()] + inner + e[pos:]
+                else:
+                    break
 
     # $clog2(N) → compute if possible
     def eval_clog2(m):
@@ -1481,16 +1519,59 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
             if mm:
                 width_expr = mm.group(1).strip()
                 try:
-                    w = eval(width_expr, {"__builtins__": {}})
+                    w = int(eval(width_expr, {"__builtins__": {}}))
                     return f"<({var})::logic[{w}]>"
                 except Exception:
                     return f"<({var})::logic[32]>"
             try:
-                w = eval(msb_expr, {"__builtins__": {}}) + 1
+                w = int(eval(msb_expr, {"__builtins__": {}})) + 1
                 return f"<({var})::logic[{w}]>"
             except Exception:
                 return f"<({var})::logic[32]>"
         return f"{var} /* [{msb_expr}:{lsb_expr}] */"
+    # Indexed part-select: anything[base +: width] → <(anything)::logic[width]>
+    # Handle +: before regular bit-select since they both contain ':'
+    # Use a function to find balanced brackets containing +:
+    def _replace_all_part_selects(text):
+        # Repeatedly find and replace [... +: ...] patterns
+        while True:
+            m = re.search(r'\+\s*:', text)
+            if not m:
+                break
+            # Find the enclosing brackets
+            plus_colon_pos = m.start()
+            # Search backwards for '['
+            bracket_start = None
+            depth = 0
+            for i in range(plus_colon_pos - 1, -1, -1):
+                if text[i] == ']':
+                    depth += 1
+                elif text[i] == '[':
+                    if depth == 0:
+                        bracket_start = i
+                        break
+                    depth -= 1
+            if bracket_start is None:
+                break
+            # Search forwards for matching ']'
+            bracket_end = text.find(']', m.end())
+            if bracket_end == -1:
+                break
+            # Extract the width (after +: )
+            width_str = text[m.end():bracket_end].strip()
+            for pn, pv in params.items():
+                width_str = re.sub(r'\b' + re.escape(pn) + r'\b', pv, width_str)
+            # Extract what precedes the bracket
+            var_part = text[:bracket_start].rstrip()
+            try:
+                w = int(eval(width_str, {"__builtins__": {}}))
+                replacement = f"<({var_part})::logic[{w}]>"
+            except Exception:
+                replacement = f"<({var_part})::logic[32]>"
+            text = replacement + text[bracket_end + 1:]
+        return text
+    e = _replace_all_part_selects(e)
+
     e = re.sub(r"(\w+(?:\.\w+)*)\s*\[\s*([^\]]+?)\s*:\s*([^\]]+?)\s*\]", replace_bit_select, e)
 
     # Ternary a ? b : c → if a { b } else { c }
@@ -2137,14 +2218,62 @@ def _emit_stmts(stmts: list, lines: List[str], indent: int):
                 lines.append(f"{pad}    cycle 1")
             lines.append(f"{pad}}}{seq}")
         elif isinstance(stmt, AnvilMatch):
-            lines.append(f"{pad}match ({stmt.selector}) {{")
-            for pat, arm_stmts in stmt.arms:
-                if arm_stmts:
-                    arm_text = _stmts_to_inline(arm_stmts)
-                    lines.append(f"{pad}    {pat} => {arm_text},")
+            # Check if any arm contains set statements (not allowed in match arms)
+            has_set_in_arms = False
+            for _, arm_stmts in stmt.arms:
+                for s in arm_stmts:
+                    if isinstance(s, AnvilSet):
+                        has_set_in_arms = True
+                        break
+                if has_set_in_arms:
+                    break
+
+            if has_set_in_arms:
+                # Convert match to if-else chain since set is not allowed in match arms
+                first = True
+                for pat, arm_stmts in stmt.arms:
+                    if pat == "_":
+                        # Default arm → else
+                        if first:
+                            lines.append(f"{pad}{{")
+                        else:
+                            lines.append(f"{pad}}} else {{")
+                        if arm_stmts:
+                            _emit_stmts(arm_stmts, lines, indent + 4)
+                        else:
+                            lines.append(f"{pad}    cycle 1")
+                    else:
+                        cond = f"{stmt.selector} == {pat}"
+                        if first:
+                            lines.append(f"{pad}if ({cond}) {{")
+                            first = False
+                        else:
+                            lines.append(f"{pad}}} else if ({cond}) {{")
+                        if arm_stmts:
+                            _emit_stmts(arm_stmts, lines, indent + 4)
+                        else:
+                            lines.append(f"{pad}    cycle 1")
+                if first:
+                    # No arms at all
+                    lines.append(f"{pad}cycle 1")
                 else:
-                    lines.append(f"{pad}    {pat} => cycle 1,")
-            lines.append(f"{pad}}}{seq}")
+                    # Add else with cycle 1 if no default
+                    has_default = any(p == "_" for p, _ in stmt.arms)
+                    if not has_default:
+                        lines.append(f"{pad}}} else {{")
+                        lines.append(f"{pad}    cycle 1")
+                    lines.append(f"{pad}}}{seq}")
+            else:
+                lines.append(f"{pad}match ({stmt.selector}) {{")
+                for arm_idx, (pat, arm_stmts) in enumerate(stmt.arms):
+                    is_last = arm_idx == len(stmt.arms) - 1
+                    comma = "" if is_last else ","
+                    if arm_stmts:
+                        arm_text = _stmts_to_inline(arm_stmts)
+                        lines.append(f"{pad}    {pat} => {arm_text}{comma}")
+                    else:
+                        lines.append(f"{pad}    {pat} => cycle 1{comma}")
+                lines.append(f"{pad}}}{seq}")
 
 
 def _paren_cond(cond: str) -> str:
@@ -2158,6 +2287,7 @@ def _paren_cond(cond: str) -> str:
 def _stmts_to_inline(stmts: list) -> str:
     """Convert simple statements to inline text for match arms."""
     parts = []
+    has_cycle = False
     for s in stmts:
         if isinstance(s, AnvilSet):
             parts.append(f"set {s.reg_name} := {s.expr}")
@@ -2165,8 +2295,22 @@ def _stmts_to_inline(stmts: list) -> str:
             parts.append(f"let {s.name} = {s.expr}")
         elif isinstance(s, AnvilCycle):
             parts.append(f"cycle {s.count}")
+            has_cycle = True
+        elif isinstance(s, AnvilIf):
+            # Nested if in match arm — emit cycle 1 as placeholder
+            parts.append("cycle 1")
+            has_cycle = True
+        elif isinstance(s, AnvilMatch):
+            # Nested match — emit cycle 1 as placeholder
+            parts.append("cycle 1")
+            has_cycle = True
         else:
-            parts.append("/* complex */")
+            # Unknown statement type — must still be valid Anvil
+            parts.append("cycle 1")
+            has_cycle = True
+    # Every match arm must take >= 1 cycle in Anvil
+    if parts and not has_cycle:
+        parts.append("cycle 1")
     return " >> ".join(parts) if parts else "cycle 1"
 
 
@@ -2382,14 +2526,14 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             if v not in reg_type_map:
                 let_type_map[v] = 'logic'
 
-        # Pattern: *reg OP var or var OP *reg (bitwise/arithmetic)
+        # Pattern: *reg OP var or var OP *reg (bitwise/arithmetic/comparison)
         # var should match register's type
-        for m_op in re.finditer(r'\*(\w+)\s*([&|^+\-])\s*(\w+)\b', s):
+        for m_op in re.finditer(r'\*(\w+)\s*([&|^+\-><=!]+)\s*(\w+)\b', s):
             reg_n = m_op.group(1)
             var_n = m_op.group(3)
             if reg_n in reg_type_map and var_n not in reg_type_map:
                 let_type_map.setdefault(var_n, reg_type_map[reg_n])
-        for m_op in re.finditer(r'\b(\w+)\s*([&|^+\-])\s*\*(\w+)', s):
+        for m_op in re.finditer(r'\b(\w+)\s*([&|^+\-><=!]+)\s*\*(\w+)', s):
             var_n = m_op.group(1)
             reg_n = m_op.group(3)
             if reg_n in reg_type_map and var_n not in reg_type_map:
@@ -2535,11 +2679,25 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         # Remove bare ticks from code (not part of sized literals)
         code_part = re.sub(r"(?<![0-9])'(?![bdhoBDHO0-9])", "", code_part)
 
+        # Fix operator precedence: add parens around comparisons before && / ||
+        # In SV, < > <= >= == != bind tighter than && ||, but Anvil may differ
+        # Pattern: expr OP expr && ... → (expr OP expr) && ...
+        code_part = re.sub(
+            r'(\b\S+\s*(?:<(?!=)|>(?!=)|<=|>=|==|!=)\s*\S+)\s*(&&|\|\|)',
+            r'(\1) \2', code_part)
+
         # Fix SV reduction operators: ( | *var ) or ( & *var ) → <(*var)::logic>
         # These are unary reduction ops (OR-reduce, AND-reduce) → 1-bit result
         code_part = re.sub(r'\(\s*[|&]\s*(\*\w+)\s*\)', r'<(\1)::logic>', code_part)
-        # Also handle without parens: | *var in expression context
-        code_part = re.sub(r'(?<![|&\w])\s*\|\s*(\*\w+)\b(?!\s*[|])', r' <(\1)::logic>', code_part)
+        # Also handle without parens: | *var as unary reduction (only when not preceded by an operand)
+        # Must not match binary OR (e.g., "exp_empty | *reg")
+        def _reduce_or_replace(m):
+            # If preceded by a word char or closing paren/bracket/angle, it's binary OR — leave it
+            before = code_part[:m.start()].rstrip()
+            if before and (before[-1].isalnum() or before[-1] in ')]}>' or before[-1] == '_'):
+                return m.group(0)  # binary OR, don't replace
+            return f' <({m.group(1)})::logic>'
+        code_part = re.sub(r'\|\s*(\*\w+)\b(?!\s*[|])', _reduce_or_replace, code_part)
 
         # Fix struct-like expressions in cast: <( field : value )::type> → <(0)::type>
         # Colons inside <(...)::type> that aren't part of :: indicate SV struct syntax
@@ -2614,6 +2772,52 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                 return f"{var_name} {op} <({lit})::{reg_t}>"
             return m.group(0)
         code_part = re.sub(r'(\*?\w+)\s*(==|!=)\s*(1\'b[01])', _fix_comparison_cast, code_part)
+
+        # Fix comparisons with sized hex/decimal literals: *reg OP N'hXX → cast
+        def _fix_comparison_sized_lit(m):
+            var_name = m.group(1)
+            op = m.group(2)
+            lit = m.group(3)
+            if not var_name.startswith('*'):
+                return m.group(0)
+            clean_name = var_name[1:].strip()
+            reg_t = reg_type_map.get(clean_name)
+            if reg_t and reg_t != "logic":
+                return f"{var_name} {op} <({lit})::{reg_t}>"
+            return m.group(0)
+        code_part = re.sub(r'(\*\w+)\s*(==|!=|>=?|<=?)\s*(\d+\'[hdbo][0-9a-fA-F]+)', _fix_comparison_sized_lit, code_part)
+
+        # Fix comparisons/ops with bare numbers: *reg OP number or let_var OP number
+        def _fix_comparison_bare_int(m):
+            var_name = m.group(1)
+            op = m.group(2)
+            num = m.group(3)
+            if var_name.startswith('*'):
+                clean_name = var_name[1:].strip()
+                reg_t = reg_type_map.get(clean_name)
+                if reg_t and reg_t != "logic":
+                    return f"{var_name} {op} <({num})::{reg_t}>"
+            else:
+                # Check let_type_map
+                let_t = let_type_map.get(var_name)
+                if let_t and let_t != "logic":
+                    return f"{var_name} {op} <({num})::{let_t}>"
+            return m.group(0)
+        code_part = re.sub(r'(\*?\w+)\s*(==|!=|>=?|<(?!=))\s*(\d+)(?![\'dhbo\w])', _fix_comparison_bare_int, code_part)
+
+        # Fix bitwise ops with mismatched sized literals: *reg & N'hXX → cast
+        def _fix_bitwise_sized_lit(m):
+            var_name = m.group(1)
+            op = m.group(2)
+            lit = m.group(3)
+            if not var_name.startswith('*'):
+                return m.group(0)
+            clean_name = var_name[1:].strip()
+            reg_t = reg_type_map.get(clean_name)
+            if reg_t and reg_t != "logic":
+                return f"{var_name} {op} <({lit})::{reg_t}>"
+            return m.group(0)
+        code_part = re.sub(r'(\*\w+)\s*([&|^])\s*(\d+\'[hdbo][0-9a-fA-F]+)', _fix_bitwise_sized_lit, code_part)
 
         # Fix $clog2 that wasn't evaluated: $clog2 ( N ) → 1
         code_part = re.sub(r'\$clog2\s*\(\s*[^)]+\s*\)', "1", code_part)
@@ -2694,6 +2898,27 @@ def convert_sv_to_anvil(sv_source: str) -> str:
 
         cleaned_lines.append(code_part + comment_part)
 
+    # Replace terminal let bindings (let without >>) with cycle 1
+    # Terminal lets are dead-end statements that can't be used
+    temp_cleaned = []
+    for idx, line in enumerate(cleaned_lines):
+        m = re.match(r'(\s*)let\s+\w+\s*=\s*.*$', line)
+        if m and not line.rstrip().endswith('>>'):
+            # Check if next non-empty line is } or } else — this is a terminal let
+            is_terminal = False
+            for nxt in cleaned_lines[idx+1:]:
+                ns = nxt.strip()
+                if not ns:
+                    continue
+                if ns.startswith('}') or ns == '':
+                    is_terminal = True
+                break
+            if is_terminal:
+                temp_cleaned.append(m.group(1) + 'cycle 1')
+                continue
+        temp_cleaned.append(line)
+    cleaned_lines = temp_cleaned
+
     # Remove unused let bindings (Anvil rejects them)
     # Multiple passes since removing one let might make another unused
     for _pass in range(5):
@@ -2721,6 +2946,36 @@ def convert_sv_to_anvil(sv_source: str) -> str:
     result_text = '\n'.join(cleaned_lines)
     # Remove trailing >> before a closing brace
     result_text = re.sub(r'\s*>>\s*\n(\s*\})', r'\n\1', result_text)
+
+    # Post-pass: fix remaining type mismatches by extracting types from let definitions
+    # and cast-expressions, then fixing comparisons/ops with bare ints
+    let_def_types = {}
+    for line in result_text.split('\n'):
+        m_let = re.match(r'\s*let\s+(\w+)\s*=\s*<\(.*?\)::(logic(?:\[\d+\])?)\>', line)
+        if m_let:
+            let_def_types[m_let.group(1)] = m_let.group(2)
+    fixed_lines = []
+    for line in result_text.split('\n'):
+        # Fix: let_var OP bare_number → cast the number
+        if let_def_types:
+            def _fix_let_cmp(m):
+                vn = m.group(1)
+                op = m.group(2)
+                num = m.group(3)
+                lt = let_def_types.get(vn)
+                if lt and lt != "logic":
+                    return f"{vn} {op} <({num})::{lt}>"
+                return m.group(0)
+            line = re.sub(r'\b(\w+)\s*(==|!=|>=?|<(?!=))\s*(\d+)(?![\'dhbo\w])', _fix_let_cmp, line)
+        # Fix: cast_expr & sized_lit → cast the literal
+        def _fix_cast_bitwise(m):
+            cast_type = m.group(1)
+            op = m.group(2)
+            lit = m.group(3)
+            return f"::{cast_type}> {op} <({lit})::{cast_type}>"
+        line = re.sub(r'::(logic\[\d+\])>\s*([&|^])\s*(\d+\'[hdbo][0-9a-fA-F]+)', _fix_cast_bitwise, line)
+        fixed_lines.append(line)
+    result_text = '\n'.join(fixed_lines)
 
     # Fix empty if/else blocks: insert cycle 1 into empty blocks
     # Pattern: { \n } (possibly with whitespace)

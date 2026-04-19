@@ -22,24 +22,23 @@ proc stream_demux(
 
     loop {
         let inp_valid_i = recv in_ep.inp_valid_i >>
-        set r_inp_valid_i := inp_valid_i
+        set r_inp_valid_i := <(inp_valid_i)::logic>
     }
 
     loop {
         let oup_sel_i = recv in_ep.oup_sel_i >>
-        set r_oup_sel_i := oup_sel_i
+        set r_oup_sel_i := <(oup_sel_i)::logic[32]>
     }
 
     loop {
         let oup_ready_i = recv in_ep.oup_ready_i >>
-        set r_oup_ready_i := oup_ready_i
+        set r_oup_ready_i := <(oup_ready_i)::logic[32]>
     }
 
     loop {
-        send out_ep.inp_ready_o (<(*r_oup_ready_i [ *r_oup_sel_i ])::logic>) >>
+        send out_ep.inp_ready_o (<(<(*r_oup_ready_i)::logic>)::logic>) >>
         send out_ep.oup_valid_o (32'd0) >>
         cycle 1
     }
 
 }
-
