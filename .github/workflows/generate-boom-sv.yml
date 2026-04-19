@@ -2,17 +2,9 @@ name: Generate BOOM SystemVerilog
 
 on:
   workflow_dispatch:
-    inputs:
-      chipyard_tag:
-        description: 'Chipyard release tag'
-        required: true
-        default: '1.13.0'
-      boom_config:
-        description: 'BOOM config to elaborate'
-        required: true
-        default: 'SmallBoomV3Config'
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - '.github/workflows/generate-boom-sv.yml'
 
@@ -22,8 +14,8 @@ jobs:
     timeout-minutes: 120
 
     env:
-      CHIPYARD_TAG: ${{ inputs.chipyard_tag || '1.13.0' }}
-      BOOM_CONFIG: ${{ inputs.boom_config || 'SmallBoomV3Config' }}
+      CHIPYARD_TAG: '1.13.0'
+      BOOM_CONFIG: 'SmallBoomV3Config'
 
     steps:
       - name: Checkout this repo
@@ -32,7 +24,7 @@ jobs:
       - name: Install JDK 11
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '11'
 
       - name: Install system dependencies
@@ -48,20 +40,17 @@ jobs:
             verilator \
             libfl-dev
 
-      - name: Cache Coursier/SBT
+      - name: Cache Coursier and SBT
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/coursier
             ~/.sbt
             ~/.ivy2
-          key: ${{ runner.os }}-sbt-${{ env.CHIPYARD_TAG }}
-          restore-keys: |
-            ${{ runner.os }}-sbt-
+          key: sbt-chipyard-1.13.0
 
-      - name: Install firtool (CIRCT)
+      - name: Install firtool
         run: |
-          # Chipyard 1.13.0 requires firtool 1.75.0 (from conda-reqs/circt.json)
           FIRTOOL_VERSION="1.75.0"
           wget -q "https://github.com/llvm/circt/releases/download/firtool-${FIRTOOL_VERSION}/firrtl-bin-linux-x64.tar.gz" -O firtool.tar.gz
           tar xzf firtool.tar.gz
@@ -71,30 +60,24 @@ jobs:
 
       - name: Clone Chipyard
         run: |
-          git clone --branch ${{ env.CHIPYARD_TAG }} \
-            https://github.com/ucb-bar/chipyard.git chipyard
+          git clone --branch $CHIPYARD_TAG https://github.com/ucb-bar/chipyard.git chipyard
           cd chipyard
-          # Initialize submodules needed for BOOM (no RISC-V toolchain needed)
           ./scripts/init-submodules-no-riscv-tools.sh
 
       - name: Generate BOOM SystemVerilog
         timeout-minutes: 90
         run: |
-          cd chipyard
-          # Use the Chipyard Makefile-based flow to generate Verilog
-          cd sims/verilator
-          make verilog CONFIG=${{ env.BOOM_CONFIG }} 2>&1 | tee ../../build.log
+          cd chipyard/sims/verilator
+          make verilog CONFIG=$BOOM_CONFIG 2>&1 | tee ../../build.log
           echo "=== Generated files ==="
           find generated-src -name "*.sv" -o -name "*.v" | head -100
 
       - name: Collect generated SV files
         run: |
           mkdir -p collected-sv
-          # Generated files are in gen-collateral under the config-specific build dir
           GEN_DIR="chipyard/sims/verilator/generated-src"
           echo "=== Build directories ==="
           ls -la "$GEN_DIR/" || true
-          # Find all .sv files in the generated source tree
           find "$GEN_DIR" -name "*.sv" -o -name "*.v" | while read f; do
             cp "$f" collected-sv/
           done
@@ -118,9 +101,9 @@ jobs:
           if git diff --cached --quiet; then
             echo "No new SV files to commit"
           else
-            git commit -m "[CI] Add generated BOOM SystemVerilog from Chipyard ${{ env.CHIPYARD_TAG }}
+            git commit -m "[CI] Add generated BOOM SystemVerilog from Chipyard $CHIPYARD_TAG
 
-Config: ${{ env.BOOM_CONFIG }}
+Config: $BOOM_CONFIG
 Generated via Chisel elaboration in GitHub Actions"
             git push
           fi
