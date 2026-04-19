@@ -1,0 +1,343 @@
+/* Hand-written Anvil for cva6_mmu.sv
+   Memory Management Unit for CVA6: contains I/D TLBs, shared TLB, PTW.
+   Handles virtual-to-physical address translation, access checks,
+   and exception generation for both instruction and data interfaces.
+   Concrete params: XLEN=64, VLEN=64, PLEN=56, PPNW=44,
+   PtLevels=3, VpnLen=27, SV=39, HYP_EXT=0 (no hypervisor).
+   Sub-modules (cva6_tlb, cva6_shared_tlb, cva6_ptw, pmp) modeled
+   as channel interfaces. Clock/reset implicit. */
+
+chan mmu_ctrl_ch {
+    left flush : (logic@#1) @dyn - @dyn,
+    left enable_translation : (logic@#1) @dyn - @dyn,
+    left en_ld_st_translation : (logic@#1) @dyn - @dyn,
+    left flush_tlb : (logic@#1) @dyn - @dyn,
+    left priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left ld_st_priv_lvl : (logic[2]@#1) @dyn - @dyn,
+    left sum : (logic@#1) @dyn - @dyn,
+    left mxr : (logic@#1) @dyn - @dyn,
+    left satp_ppn : (logic[44]@#1) @dyn - @dyn,
+    left asid : (logic[16]@#1) @dyn - @dyn
+}
+
+chan mmu_icache_ch {
+    left fetch_req : (logic@#1) @dyn - @dyn,
+    left fetch_vaddr : (logic[64]@#1) @dyn - @dyn
+}
+
+chan mmu_lsu_ch {
+    left lsu_req : (logic@#1) @dyn - @dyn,
+    left lsu_vaddr : (logic[64]@#1) @dyn - @dyn,
+    left lsu_is_store : (logic@#1) @dyn - @dyn,
+    left misaligned_ex_valid : (logic@#1) @dyn - @dyn
+}
+
+chan mmu_ptw_resp_ch {
+    left ptw_active : (logic@#1) @dyn - @dyn,
+    left walking_instr : (logic@#1) @dyn - @dyn,
+    left ptw_error : (logic@#1) @dyn - @dyn,
+    left ptw_access_exception : (logic@#1) @dyn - @dyn,
+    left update_vaddr : (logic[64]@#1) @dyn - @dyn
+}
+
+chan mmu_itlb_resp_ch {
+    left itlb_hit : (logic@#1) @dyn - @dyn,
+    left itlb_ppn : (logic[44]@#1) @dyn - @dyn,
+    left itlb_content_u : (logic@#1) @dyn - @dyn
+}
+
+chan mmu_dtlb_resp_ch {
+    left dtlb_hit : (logic@#1) @dyn - @dyn,
+    left dtlb_ppn : (logic[44]@#1) @dyn - @dyn,
+    left dtlb_content_u : (logic@#1) @dyn - @dyn,
+    left dtlb_content_w : (logic@#1) @dyn - @dyn,
+    left dtlb_content_d : (logic@#1) @dyn - @dyn,
+    left dtlb_is_page_0 : (logic@#1) @dyn - @dyn
+}
+
+chan mmu_out_ch {
+    left icache_fetch_valid : (logic@#1) @dyn - @dyn,
+    left icache_fetch_paddr : (logic[56]@#1) @dyn - @dyn,
+    left icache_fetch_ex_valid : (logic@#1) @dyn - @dyn,
+    left icache_fetch_ex_cause : (logic[64]@#1) @dyn - @dyn,
+    left lsu_valid : (logic@#1) @dyn - @dyn,
+    left lsu_paddr : (logic[56]@#1) @dyn - @dyn,
+    left lsu_ex_valid : (logic@#1) @dyn - @dyn,
+    left lsu_ex_cause : (logic[64]@#1) @dyn - @dyn,
+    left lsu_dtlb_hit : (logic@#1) @dyn - @dyn,
+    left lsu_dtlb_ppn : (logic[44]@#1) @dyn - @dyn,
+    left itlb_miss : (logic@#1) @dyn - @dyn,
+    left dtlb_miss : (logic@#1) @dyn - @dyn
+}
+
+proc cva6_mmu(
+    ctrl : left mmu_ctrl_ch,
+    icache : left mmu_icache_ch,
+    lsu : left mmu_lsu_ch,
+    ptw_resp : left mmu_ptw_resp_ch,
+    itlb_resp : left mmu_itlb_resp_ch,
+    dtlb_resp : left mmu_dtlb_resp_ch,
+    out : right mmu_out_ch
+) {
+    /* Input staging */
+    reg r_flush : logic;
+    reg r_en_trans : logic;
+    reg r_en_ldst_trans : logic;
+    reg r_flush_tlb : logic;
+    reg r_priv_lvl : logic[2];
+    reg r_ldst_priv : logic[2];
+    reg r_sum : logic;
+    reg r_mxr : logic;
+    reg r_satp_ppn : logic[44];
+    reg r_asid : logic[16];
+    reg r_fetch_req : logic;
+    reg r_fetch_vaddr : logic[64];
+    reg r_lsu_req : logic;
+    reg r_lsu_vaddr : logic[64];
+    reg r_lsu_is_store : logic;
+    reg r_misaligned_valid : logic;
+    reg r_ptw_active : logic;
+    reg r_walking_instr : logic;
+    reg r_ptw_error : logic;
+    reg r_ptw_access_ex : logic;
+    reg r_update_vaddr : logic[64];
+    reg r_itlb_hit : logic;
+    reg r_itlb_ppn : logic[44];
+    reg r_itlb_u : logic;
+    reg r_dtlb_hit : logic;
+    reg r_dtlb_ppn : logic[44];
+    reg r_dtlb_u : logic;
+    reg r_dtlb_w : logic;
+    reg r_dtlb_d : logic;
+    reg r_dtlb_is_pg0 : logic;
+
+    /* Pipeline registers for data interface */
+    reg lsu_vaddr_q : logic[64];
+    reg lsu_req_q : logic;
+    reg lsu_is_store_q : logic;
+    reg dtlb_hit_q : logic;
+    reg dtlb_ppn_q : logic[44];
+    reg dtlb_u_q : logic;
+    reg dtlb_w_q : logic;
+    reg dtlb_d_q : logic;
+    reg dtlb_pg0_q : logic;
+    reg misaligned_q : logic;
+
+    /* Input recv loops */
+    loop { let v = recv ctrl.flush >> set r_flush := v }
+    loop { let v = recv ctrl.enable_translation >> set r_en_trans := v }
+    loop { let v = recv ctrl.en_ld_st_translation >> set r_en_ldst_trans := v }
+    loop { let v = recv ctrl.flush_tlb >> set r_flush_tlb := v }
+    loop { let v = recv ctrl.priv_lvl >> set r_priv_lvl := v }
+    loop { let v = recv ctrl.ld_st_priv_lvl >> set r_ldst_priv := v }
+    loop { let v = recv ctrl.sum >> set r_sum := v }
+    loop { let v = recv ctrl.mxr >> set r_mxr := v }
+    loop { let v = recv ctrl.satp_ppn >> set r_satp_ppn := v }
+    loop { let v = recv ctrl.asid >> set r_asid := v }
+    loop { let v = recv icache.fetch_req >> set r_fetch_req := v }
+    loop { let v = recv icache.fetch_vaddr >> set r_fetch_vaddr := v }
+    loop { let v = recv lsu.lsu_req >> set r_lsu_req := v }
+    loop { let v = recv lsu.lsu_vaddr >> set r_lsu_vaddr := v }
+    loop { let v = recv lsu.lsu_is_store >> set r_lsu_is_store := v }
+    loop { let v = recv lsu.misaligned_ex_valid >> set r_misaligned_valid := v }
+    loop { let v = recv ptw_resp.ptw_active >> set r_ptw_active := v }
+    loop { let v = recv ptw_resp.walking_instr >> set r_walking_instr := v }
+    loop { let v = recv ptw_resp.ptw_error >> set r_ptw_error := v }
+    loop { let v = recv ptw_resp.ptw_access_exception >> set r_ptw_access_ex := v }
+    loop { let v = recv ptw_resp.update_vaddr >> set r_update_vaddr := v }
+    loop { let v = recv itlb_resp.itlb_hit >> set r_itlb_hit := v }
+    loop { let v = recv itlb_resp.itlb_ppn >> set r_itlb_ppn := v }
+    loop { let v = recv itlb_resp.itlb_content_u >> set r_itlb_u := v }
+    loop { let v = recv dtlb_resp.dtlb_hit >> set r_dtlb_hit := v }
+    loop { let v = recv dtlb_resp.dtlb_ppn >> set r_dtlb_ppn := v }
+    loop { let v = recv dtlb_resp.dtlb_content_u >> set r_dtlb_u := v }
+    loop { let v = recv dtlb_resp.dtlb_content_w >> set r_dtlb_w := v }
+    loop { let v = recv dtlb_resp.dtlb_content_d >> set r_dtlb_d := v }
+    loop { let v = recv dtlb_resp.dtlb_is_page_0 >> set r_dtlb_is_pg0 := v }
+
+    /* Data interface pipeline: latch cycle 0 signals for cycle 1 */
+    loop {
+        set lsu_vaddr_q := *r_lsu_vaddr >>
+        set lsu_req_q := *r_lsu_req >>
+        set lsu_is_store_q := *r_lsu_is_store >>
+        set dtlb_hit_q := *r_dtlb_hit >>
+        set dtlb_ppn_q := *r_dtlb_ppn >>
+        set dtlb_u_q := *r_dtlb_u >>
+        set dtlb_w_q := *r_dtlb_w >>
+        set dtlb_d_q := *r_dtlb_d >>
+        set dtlb_pg0_q := *r_dtlb_is_pg0 >>
+        set misaligned_q := *r_misaligned_valid & *r_lsu_req
+    }
+
+    /* Instruction interface output */
+    loop {
+        let en = *r_en_trans >>
+
+        if en == 1'b0 {
+            /* MMU disabled: pass through */
+            send out.icache_fetch_valid (*r_fetch_req) >>
+            send out.icache_fetch_paddr (<(*r_fetch_vaddr)::logic[56]>) >>
+            send out.icache_fetch_ex_valid (1'b0) >>
+            send out.icache_fetch_ex_cause (64'd0) >>
+            send out.itlb_miss (1'b0) >>
+            cycle 1
+        } else {
+            /* MMU enabled */
+            let fetch_paddr = <((<(*r_itlb_ppn)::logic[56]> << 56'd12) | <(*r_fetch_vaddr & 64'd4095)::logic[56]>)::logic[56]> >>
+
+            /* Check access: U-mode accessing non-U page, or S-mode accessing U page */
+            let u_no_u = if *r_priv_lvl == 2'd0 { if *r_itlb_u == 1'b0 { 1'b1 } else { 1'b0 } } else { 1'b0 } >>
+            let s_u = if *r_priv_lvl == 2'd1 { *r_itlb_u } else { 1'b0 } >>
+            let iaccess_err = *r_fetch_req & (u_no_u | s_u) >>
+
+            if *r_itlb_hit == 1'b1 {
+                send out.icache_fetch_valid (*r_fetch_req) >>
+                send out.icache_fetch_paddr (fetch_paddr) >>
+                if iaccess_err == 1'b1 {
+                    /* INSTR_PAGE_FAULT = 12 */
+                    send out.icache_fetch_ex_valid (1'b1) >>
+                    send out.icache_fetch_ex_cause (64'd12)
+                } else {
+                    send out.icache_fetch_ex_valid (1'b0) >>
+                    send out.icache_fetch_ex_cause (64'd0)
+                } >>
+                send out.itlb_miss (1'b0) >>
+                cycle 1
+            } else if *r_ptw_active == 1'b1 & *r_walking_instr == 1'b1 {
+                /* ITLB miss, PTW walking */
+                let ifetch_valid = *r_ptw_error | *r_ptw_access_ex >>
+                send out.icache_fetch_valid (ifetch_valid) >>
+                send out.icache_fetch_paddr (fetch_paddr) >>
+                if *r_ptw_error == 1'b1 {
+                    send out.icache_fetch_ex_valid (1'b1) >>
+                    send out.icache_fetch_ex_cause (64'd12)
+                } else if *r_ptw_access_ex == 1'b1 {
+                    /* INSTR_ACCESS_FAULT = 1 */
+                    send out.icache_fetch_ex_valid (1'b1) >>
+                    send out.icache_fetch_ex_cause (64'd1)
+                } else {
+                    send out.icache_fetch_ex_valid (1'b0) >>
+                    send out.icache_fetch_ex_cause (64'd0)
+                } >>
+                send out.itlb_miss (1'b0) >>
+                cycle 1
+            } else {
+                send out.icache_fetch_valid (1'b0) >>
+                send out.icache_fetch_paddr (fetch_paddr) >>
+                send out.icache_fetch_ex_valid (1'b0) >>
+                send out.icache_fetch_ex_cause (64'd0) >>
+                send out.itlb_miss (1'b0) >>
+                cycle 1
+            }
+        }
+    }
+
+    /* Data interface output (cycle 1 results) */
+    loop {
+        let en = *r_en_ldst_trans >>
+        let s_vaddr = *lsu_vaddr_q >>
+        let s_req = *lsu_req_q >>
+        let s_store = *lsu_is_store_q >>
+        let s_hit = *dtlb_hit_q >>
+        let s_ppn = *dtlb_ppn_q >>
+        let s_u = *dtlb_u_q >>
+        let s_w = *dtlb_w_q >>
+        let s_d = *dtlb_d_q >>
+        let s_misaligned = *misaligned_q >>
+
+        /* DTLB hit signal */
+        let dtlb_hit_out = if en == 1'b1 { *r_dtlb_hit } else { 1'b1 } >>
+        send out.lsu_dtlb_hit (dtlb_hit_out) >>
+        send out.lsu_dtlb_ppn (if en == 1'b1 { *r_dtlb_ppn } else { <(*r_lsu_vaddr >> 12)::logic[44]> }) >>
+        send out.dtlb_miss (1'b0) >>
+
+        if en == 1'b0 {
+            /* MMU disabled: pass through */
+            send out.lsu_valid (s_req) >>
+            send out.lsu_paddr (<(s_vaddr)::logic[56]>) >>
+            send out.lsu_ex_valid (s_misaligned) >>
+            send out.lsu_ex_cause (64'd0) >>
+            cycle 1
+        } else if s_misaligned == 1'b1 {
+            /* Misaligned exception propagated */
+            send out.lsu_valid (s_req) >>
+            send out.lsu_paddr (<((s_ppn << 44'd12) | <(s_vaddr & 64'd4095)::logic[44]>)::logic[56]>) >>
+            send out.lsu_ex_valid (1'b1) >>
+            send out.lsu_ex_cause (64'd0) >>
+            cycle 1
+        } else {
+            let paddr = <((s_ppn << 44'd12) | <(s_vaddr & 64'd4095)::logic[44]>)::logic[56]> >>
+
+            /* Access check */
+            let d_s_no_sum_u = if *r_ldst_priv == 2'd1 { if *r_sum == 1'b0 { s_u } else { 1'b0 } } else { 1'b0 } >>
+            let d_u_no_u = if *r_ldst_priv == 2'd0 { if s_u == 1'b0 { 1'b1 } else { 1'b0 } } else { 1'b0 } >>
+            let daccess_err = d_s_no_sum_u | d_u_no_u >>
+
+            if s_hit == 1'b1 & s_req == 1'b1 {
+                send out.lsu_valid (1'b1) >>
+                send out.lsu_paddr (paddr) >>
+                if s_store == 1'b1 {
+                    if (s_w == 1'b0) | (daccess_err == 1'b1) | (s_d == 1'b0) {
+                        /* STORE_PAGE_FAULT = 15 */
+                        send out.lsu_ex_valid (1'b1) >>
+                        send out.lsu_ex_cause (64'd15) >>
+                        cycle 1
+                    } else {
+                        send out.lsu_ex_valid (1'b0) >>
+                        send out.lsu_ex_cause (64'd0) >>
+                        cycle 1
+                    }
+                } else {
+                    if daccess_err == 1'b1 {
+                        /* LOAD_PAGE_FAULT = 13 */
+                        send out.lsu_ex_valid (1'b1) >>
+                        send out.lsu_ex_cause (64'd13) >>
+                        cycle 1
+                    } else {
+                        send out.lsu_ex_valid (1'b0) >>
+                        send out.lsu_ex_cause (64'd0) >>
+                        cycle 1
+                    }
+                }
+            } else if *r_ptw_active == 1'b1 & *r_walking_instr == 1'b0 {
+                /* DTLB miss, PTW walking */
+                if *r_ptw_error == 1'b1 {
+                    send out.lsu_valid (1'b1) >>
+                    send out.lsu_paddr (paddr) >>
+                    if s_store == 1'b1 {
+                        send out.lsu_ex_valid (1'b1) >>
+                        send out.lsu_ex_cause (64'd15)
+                    } else {
+                        send out.lsu_ex_valid (1'b1) >>
+                        send out.lsu_ex_cause (64'd13)
+                    } >>
+                    cycle 1
+                } else if *r_ptw_access_ex == 1'b1 {
+                    send out.lsu_valid (1'b1) >>
+                    send out.lsu_paddr (paddr) >>
+                    /* LD/ST_ACCESS_FAULT = 5/7 */
+                    if s_store == 1'b1 {
+                        send out.lsu_ex_valid (1'b1) >>
+                        send out.lsu_ex_cause (64'd7)
+                    } else {
+                        send out.lsu_ex_valid (1'b1) >>
+                        send out.lsu_ex_cause (64'd5)
+                    } >>
+                    cycle 1
+                } else {
+                    send out.lsu_valid (1'b0) >>
+                    send out.lsu_paddr (paddr) >>
+                    send out.lsu_ex_valid (1'b0) >>
+                    send out.lsu_ex_cause (64'd0) >>
+                    cycle 1
+                }
+            } else {
+                send out.lsu_valid (1'b0) >>
+                send out.lsu_paddr (paddr) >>
+                send out.lsu_ex_valid (1'b0) >>
+                send out.lsu_ex_cause (64'd0) >>
+                cycle 1
+            }
+        }
+    }
+}
