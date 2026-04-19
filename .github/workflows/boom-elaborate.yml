@@ -13,6 +13,7 @@ jobs:
     env:
       CHIPYARD_TAG: '1.13.0'
       BOOM_CONFIG: SmallBoomV3Config
+      RISCV: /opt/riscv
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,7 +25,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential git curl wget python3 device-tree-compiler verilator libfl-dev
+          sudo apt-get install -y build-essential git curl wget python3 device-tree-compiler verilator libfl-dev jq
+          mkdir -p $RISCV
       - name: Cache SBT
         uses: actions/cache@v4
         with:
