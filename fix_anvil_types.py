@@ -537,6 +537,52 @@ def fix_if_condition_types(line, type_map):
 
 
 # ---------------------------------------------------------------------------
+# 9. Fix mismatched zero-literal widths inside cast expressions
+# ---------------------------------------------------------------------------
+# Pattern: inside <(...)::logic[N]>, if-else branches have literals
+# with wrong widths: { 1'h0 } or { 2'h0 } should be { N'h0 }
+# We fix zero literals that are smaller than the cast target type.
+
+_CAST_CONTEXT = re.compile(r'<\((.+?)\)::(logic\[(\d+)\])\s*>')
+
+
+def fix_cast_literal_widths(line):
+    """Fix literal widths inside cast expressions to match target type.
+
+    Resizes hex literals that are smaller than the cast target width,
+    EXCEPT those that are comparison operands (right of == or !=).
+    """
+    def _fix_cast(m):
+        expr = m.group(1)
+        target_type = m.group(2)
+        target_width = int(m.group(3))
+
+        # Find all literals and check if they're comparison operands
+        def _fix_lit(lm):
+            lit_width = int(lm.group(1))
+            base = lm.group(2)
+            value = lm.group(3)
+            if lit_width >= target_width or base.lower() != 'h':
+                return lm.group(0)
+            # Check if preceded by == or != (comparison RHS — skip)
+            start = lm.start()
+            before = expr[:start].rstrip()
+            if before.endswith('==') or before.endswith('!='):
+                return lm.group(0)
+            val = int(value, 16)
+            hex_digits = (target_width + 3) // 4
+            new_value = format(val, f'0{hex_digits}X')
+            return f"{target_width}'{base}{new_value}"
+
+        new_expr = re.sub(r"(\d+)'([hH])([0-9a-fA-F_]+)", _fix_lit, expr)
+        if new_expr != expr:
+            return f'<({new_expr})::{target_type}>'
+        return m.group(0)
+
+    return _CAST_CONTEXT.sub(_fix_cast, line)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -555,6 +601,7 @@ def process(text):
         line = fix_reduction_ops(line, type_map)
         line = fix_literal_widths(line, type_map)
         line = fix_if_condition_types(line, type_map)
+        line = fix_cast_literal_widths(line)
         line = fix_index_oob(line, type_map)
         line = fix_double_cast(line)
         result.append(line)
