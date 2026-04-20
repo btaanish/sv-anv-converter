@@ -1416,7 +1416,7 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
                 if k < len(text) and text[k] == '{':
                     count_str = text[j:k].strip()
                     # count_str should be non-empty and look like a number/expression
-                    if count_str and not count_str.startswith(','):
+                    if count_str and not count_str.startswith(',') and ',' not in count_str:
                         # Find the matching '}' for the inner brace
                         inner_start = k
                         depth = 1
@@ -1581,7 +1581,7 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
         return text
     e = _replace_all_part_selects(e)
 
-    e = re.sub(r"(\w+(?:\.\w+)*)\s*\[\s*([^\]]+?)\s*:\s*([^\]]+?)\s*\]", replace_bit_select, e)
+    e = re.sub(r"(\w+(?:\.\w+)*)\s*\[\s*([^\[\]]+?)\s*:\s*([^\[\]]+?)\s*\]", replace_bit_select, e)
 
     # Ternary a ? b : c → if a { b } else { c }
     e = _convert_all_ternaries(e)
@@ -2775,6 +2775,39 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             return f"<({var})::logic>"
         code_part = re.sub(r'(\*\w+)\s*\[\s*[^:\]]+\s*\]', _fix_single_index, code_part)
 
+        # Fix array indexing with complex expressions (containing casts):
+        # ident [ <(expr)::logic[N]> ] → <(ident)::logic>
+        # The simple regex above can't handle brackets/colons inside the index.
+        # Use balanced-bracket matching to find and remove stray indexing.
+        def _fix_complex_index(line_text):
+            # Find pattern: word_or_*word [ ... ] where inner has unmatched ] from casts
+            result = []
+            i = 0
+            while i < len(line_text):
+                # Look for identifier followed by ' ['
+                m_idx = re.match(r'(\*?\w+)\s*\[', line_text[i:])
+                if m_idx and (i == 0 or not line_text[i-1:i].isalnum()):
+                    var = m_idx.group(1)
+                    bracket_start = i + m_idx.end() - 1  # position of '['
+                    # Find balanced closing ']'
+                    depth = 1
+                    j = bracket_start + 1
+                    while j < len(line_text) and depth > 0:
+                        if line_text[j] == '[':
+                            depth += 1
+                        elif line_text[j] == ']':
+                            depth -= 1
+                        j += 1
+                    if depth == 0 and '::' in line_text[bracket_start:j]:
+                        # The index contains a cast — can't represent in Anvil
+                        result.append(f"<({var})::logic>")
+                        i = j
+                        continue
+                result.append(line_text[i])
+                i += 1
+            return ''.join(result)
+        code_part = _fix_complex_index(code_part)
+
         # Fix struct field access on registers: *reg.field → *reg
         code_part = re.sub(r'(\*\w+)\.\w+', r'\1', code_part)
 
@@ -2854,7 +2887,7 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             if reg_t and reg_t != "logic":
                 return f"{var_name} {op} <({num})::{reg_t}>"
             return m.group(0)
-        code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\d+)(?!\')', _fix_arith_int, code_part)
+        code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\d+)(?![\'\d])', _fix_arith_int, code_part)
 
         # Fix bare integer after cast value: <(N)::type> - 1 → <(N)::type> - <(1)::type>
         def _fix_cast_arith(m):
@@ -2862,7 +2895,7 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             op = m.group(2)         # + or -
             num = m.group(3)        # bare number
             return f"::{cast_type}> {op} <({num})::{cast_type}>"
-        code_part = re.sub(r'::(logic\[\d+\])>\s*(\+|-)\s*(\d+)(?!\')', _fix_cast_arith, code_part)
+        code_part = re.sub(r'::(logic\[\d+\])>\s*(\+|-)\s*(\d+)(?![\'\d])', _fix_cast_arith, code_part)
 
         # Evaluate constant comparisons: number == 1'b0 → 1'b0/1'b1
         # These arise from parameter substitution (e.g., DEPTH=8 → 8 == 0)
