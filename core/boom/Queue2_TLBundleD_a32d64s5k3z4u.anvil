@@ -36,7 +36,7 @@ proc Queue2_TLBundleD_a32d64s5k3z4u(
     reg maybe_full : logic;
 
     loop {
-        let _ram_ext_R0_data = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
+        let _ram_ext_R0_data = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let empty = <(0)::logic> /* <(0)::logic[64]> */ >>
         let full = <(0)::logic> /* <(0)::logic[64]> */ >>
         send out_ep.io_enq_ready (<(~ full)::logic>) >>
@@ -46,7 +46,7 @@ proc Queue2_TLBundleD_a32d64s5k3z4u(
         send out_ep.io_deq_bits_size (<(<(_ram_ext_R0_data >> 5)::logic[4]>)::logic[4]>) >>
         send out_ep.io_deq_bits_source (<(<(_ram_ext_R0_data >> 9)::logic[5]>)::logic[5]>) >>
         send out_ep.io_deq_bits_sink (<(<(_ram_ext_R0_data >> 14)::logic[3]>)::logic[3]>) >>
-        send out_ep.io_deq_bits_denied (<(<(_ram_ext_R0_data >> 17)::logic>)::logic>) >>
+        send out_ep.io_deq_bits_denied (<(_ram_ext_R0_data [ 17 ])::logic>) >>
         send out_ep.io_deq_bits_data (<(<(_ram_ext_R0_data >> 18)::logic[64]>)::logic[64]>) >>
         send out_ep.io_deq_bits_corrupt (<(<(_ram_ext_R0_data >> 82)::logic>)::logic>) >>
         cycle 1

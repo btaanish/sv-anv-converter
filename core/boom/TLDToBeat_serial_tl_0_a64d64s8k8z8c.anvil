@@ -37,7 +37,7 @@ proc TLDToBeat_serial_tl_0_a64d64s8k8z8c(
         let io_beat_bits_tail_0 = <(0)::logic> /* <(0)::logic[64]> */ >>
         send out_ep.io_protocol_ready (1'b0) >>
         send out_ep.io_beat_valid (<(_q_io_deq_valid)::logic>) >>
-        send out_ep.io_beat_bits_payload (<(if *is_body { _q_io_deq_bits_data } else { 35'h0 })::logic[65]>) >>
+        send out_ep.io_beat_bits_payload (<(if *is_body { _q_io_deq_bits_data } else { 65'h00000000000000000 })::logic[65]>) >>
         send out_ep.io_beat_bits_head (<(io_beat_bits_head_0)::logic>) >>
         send out_ep.io_beat_bits_tail (<(io_beat_bits_tail_0)::logic>) >>
         cycle 1

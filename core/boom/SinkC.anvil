@@ -66,7 +66,7 @@ proc SinkC(
         let _io_rel_pop_ready_T_1 = <(0)::logic[64]> /* undefined: _io_rel_pop_ready_T_1 */ >>
         let io_rel_pop_ready_0 = <(0)::logic> /* _io_rel_pop_ready_T_1 [ 0 ] */ >>
         let _c_q_io_deq_bits_address = <(0)::logic[6]> /* <(0)::logic[64]> */ >>
-        let _c_q_io_deq_bits_opcode = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
+        let _c_q_io_deq_bits_opcode = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let _c_q_io_deq_bits_param = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
         let _c_q_io_deq_bits_size = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
         let _c_q_io_deq_bits_source = <(0)::logic[6]> /* <(0)::logic[64]> */ >>
@@ -86,7 +86,7 @@ proc SinkC(
         send out_ep.io_req_bits_source (<(_c_q_io_deq_bits_source)::logic[6]>) >>
         send out_ep.io_req_bits_tag (<(tag)::logic[13]>) >>
         send out_ep.io_req_bits_offset (<(_c_q_io_deq_bits_address)::logic[6]>) >>
-        send out_ep.io_req_bits_put (<(4'h0)::logic[6]>) >>
+        send out_ep.io_req_bits_put (<(6'h00)::logic[6]>) >>
         send out_ep.io_req_bits_set (<(<(_c_q_io_deq_bits_address >> 6)::logic[10]>)::logic[10]>) >>
         send out_ep.io_resp_valid (<(resp & _c_q_io_deq_valid & ( ~ <(*r_counter)::logic> | last ) & ( ~ ( _c_q_io_deq_bits_opcode [ 0 ] ) | _io_bs_adr_q_io_enq_ready ))::logic>) >>
         send out_ep.io_resp_bits_last (<(last)::logic>) >>
@@ -111,7 +111,7 @@ proc SinkC(
     }
 
     loop {
-        let _c_q_io_deq_bits_opcode = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
+        let _c_q_io_deq_bits_opcode = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let _c_q_io_deq_valid = <(0)::logic> /* <(0)::logic[64]> */ >>
         let _r_counter1_T = <(0)::logic> /* undefined: _r_counter1_T */ >>
         let buf_block = <(0)::logic> /* <(0)::logic[64]> */ >>

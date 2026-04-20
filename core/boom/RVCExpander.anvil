@@ -24,7 +24,7 @@ proc RVCExpander(
     loop {
         let _io_out_T_2 = <(0)::logic[5]> /* <(0)::logic[64]> */ >>
         let _io_out_T_42_bits = <(0)::logic[32]> /* <(0)::logic[64]> */ >>
-        send out_ep.io_out_bits (<(if (_io_out_T_2 == 5'hFF) | (_io_out_T_2 == 5'h1E) | (_io_out_T_2 == 5'h1D) | (_io_out_T_2 == 5'h1C) | (_io_out_T_2 == 5'h1B) | (_io_out_T_2 == 5'h1A) | (_io_out_T_2 == 5'h19) | (_io_out_T_2 == 5'h18) { *r_io_in } else { if _io_out_T_2 == 5'h17 { 3'h0 } else { if _io_out_T_2 == 5'h16 { 4'h0 } else { if _io_out_T_2 == 5'h15 { 3'h0 } else { _io_out_T_42_bits } } } })::logic[32]>) >>
+        send out_ep.io_out_bits (<(if (_io_out_T_2 == 5'hFF) | (_io_out_T_2 == 5'h1E) | (_io_out_T_2 == 5'h1D) | (_io_out_T_2 == 5'h1C) | (_io_out_T_2 == 5'h1B) | (_io_out_T_2 == 5'h1A) | (_io_out_T_2 == 5'h19) | (_io_out_T_2 == 5'h18) { *r_io_in } else { if _io_out_T_2 == 5'h17 { 32'h00000000 } else { if _io_out_T_2 == 5'h16 { 32'h00000000 } else { if _io_out_T_2 == 5'h15 { 32'h00000000 } else { _io_out_T_42_bits } } } })::logic[32]>) >>
         send out_ep.io_rvc (<(*r_io_in)::logic[2]> != 2'h3) >>
         cycle 1
     }

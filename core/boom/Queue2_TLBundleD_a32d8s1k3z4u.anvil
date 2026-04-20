@@ -30,14 +30,14 @@ proc Queue2_TLBundleD_a32d8s1k3z4u(
     reg maybe_full : logic;
 
     loop {
-        let _ram_ext_R0_data = <(0)::logic[8]> /* <(0)::logic[64]> */ >>
+        let _ram_ext_R0_data = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let empty = <(0)::logic> /* <(0)::logic[64]> */ >>
         let full = <(0)::logic> /* <(0)::logic[64]> */ >>
         send out_ep.io_enq_ready (<(~ full)::logic>) >>
         send out_ep.io_deq_valid (<(~ empty)::logic>) >>
         send out_ep.io_deq_bits_denied (<(_ram_ext_R0_data [ 0 ])::logic>) >>
         send out_ep.io_deq_bits_data (<(<(_ram_ext_R0_data >> 1)::logic[8]>)::logic[8]>) >>
-        send out_ep.io_deq_bits_corrupt (<(<(_ram_ext_R0_data >> 9)::logic>)::logic>) >>
+        send out_ep.io_deq_bits_corrupt (<(_ram_ext_R0_data [ 9 ])::logic>) >>
         cycle 1
     }
 

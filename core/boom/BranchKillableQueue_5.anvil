@@ -214,7 +214,7 @@ proc BranchKillableQueue_5(
         let _GEN_7 = <(0)::logic[64]> /* undefined: _GEN_7 */ >>
         let _GEN_8 = <(0)::logic[64]> /* undefined: _GEN_8 */ >>
         let _GEN_9 = <(0)::logic[64]> /* undefined: _GEN_9 */ >>
-        let _ram_ext_R0_data = <(0)::logic[65]> /* <(0)::logic[64]> */ >>
+        let _ram_ext_R0_data = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let full = <(0)::logic> /* <(0)::logic[64]> */ >>
         let io_empty_0 = <(0)::logic> /* <(0)::logic[64]> */ >>
         let out_uop_br_mask = <(0)::logic[8]> /* <(0)::logic[64]> */ >>

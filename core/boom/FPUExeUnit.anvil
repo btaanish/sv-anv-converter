@@ -137,8 +137,8 @@ proc FPUExeUnit(
     }
 
     loop {
-        let _queue_io_empty = <(0)::logic[64]> /* undefined: _queue_io_empty */ >>
         let _fp_sdq_io_empty = <(0)::logic[64]> /* undefined: _fp_sdq_io_empty */ >>
+        let _queue_io_empty = <(0)::logic[64]> /* undefined: _queue_io_empty */ >>
         let _fpiu_busy_T = <(0)::logic[10]> /* _queue_io_empty & _fp_sdq_io_empty */ >>
         let _FDivSqrtUnit_io_resp_bits_data = <(0)::logic[65]> /* <(0)::logic[64]> */ >>
         let _FDivSqrtUnit_io_resp_bits_fflags_bits_flags = <(0)::logic[5]> /* <(0)::logic[64]> */ >>

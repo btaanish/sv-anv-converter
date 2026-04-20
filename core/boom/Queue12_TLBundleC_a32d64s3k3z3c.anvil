@@ -34,7 +34,7 @@ proc Queue12_TLBundleC_a32d64s3k3z3c(
 
     loop {
         let _ptr_diff_T = <(0)::logic[4]> /* <(0)::logic[64]> */ >>
-        let _ram_ext_R0_data = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
+        let _ram_ext_R0_data = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let empty = <(0)::logic> /* <(0)::logic[64]> */ >>
         let full = <(0)::logic> /* <(0)::logic[64]> */ >>
         let ptr_match = <(0)::logic> /* <(0)::logic[64]> */ >>

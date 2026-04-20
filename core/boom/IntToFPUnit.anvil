@@ -447,7 +447,7 @@ proc IntToFPUnit(
         send out_ep.io_resp_bits_uop_bp_xcpt_if (<(r_uops_1_bp_xcpt_if)::logic>) >>
         send out_ep.io_resp_bits_uop_debug_fsrc (<(r_uops_1_debug_fsrc)::logic[2]>) >>
         send out_ep.io_resp_bits_uop_debug_tsrc (<(r_uops_1_debug_tsrc)::logic[2]>) >>
-        send out_ep.io_resp_bits_data (<(if out_double_pipe_pipe_b { _ifpu_io_out_bits_data } else { 12'hFFF })::logic[65]>) >>
+        send out_ep.io_resp_bits_data (<(if out_double_pipe_pipe_b { _ifpu_io_out_bits_data } else { 65'h00000000000000FFF })::logic[65]>) >>
         send out_ep.io_resp_bits_fflags_valid (1'b0) >>
         send out_ep.io_resp_bits_fflags_bits_uop_uopc (<(r_uops_1_uopc)::logic[7]>) >>
         send out_ep.io_resp_bits_fflags_bits_uop_inst (<(r_uops_1_inst)::logic[32]>) >>

@@ -60,12 +60,12 @@ proc BankedStore(
     reg regsel_sourceD : logic[4];
 
     loop {
-        let regout_wen = <(0)::logic[64]> /* undefined: regout_wen */ >>
         let regout_en = <(0)::logic[64]> /* undefined: regout_en */ >>
+        let regout_wen = <(0)::logic[64]> /* undefined: regout_wen */ >>
         let regout_wen_1 = <(0)::logic[64]> /* undefined: regout_wen_1 */ >>
         let regout_en_1 = <(0)::logic[64]> /* undefined: regout_en_1 */ >>
-        let regout_wen_2 = <(0)::logic[64]> /* undefined: regout_wen_2 */ >>
         let regout_en_2 = <(0)::logic[64]> /* undefined: regout_en_2 */ >>
+        let regout_wen_2 = <(0)::logic[64]> /* undefined: regout_wen_2 */ >>
         let regout_wen_3 = <(0)::logic[64]> /* undefined: regout_wen_3 */ >>
         let regout_en_3 = <(0)::logic[64]> /* undefined: regout_en_3 */ >>
         let _sinkC_req_io_sinkC_adr_ready_T_1 = <(0)::logic[64]> /* undefined: _sinkC_req_io_sinkC_adr_ready_T_1 */ >>

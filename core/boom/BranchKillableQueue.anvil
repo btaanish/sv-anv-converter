@@ -305,7 +305,7 @@ proc BranchKillableQueue(
         let _GEN_79 = <(0)::logic[64]> /* undefined: _GEN_79 */ >>
         let _GEN_8 = <(0)::logic[64]> /* undefined: _GEN_8 */ >>
         let _GEN_9 = <(0)::logic[64]> /* undefined: _GEN_9 */ >>
-        let _ram_ext_R0_data = <(0)::logic[40]> /* <(0)::logic[64]> */ >>
+        let _ram_ext_R0_data = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let full = <(0)::logic> /* <(0)::logic[64]> */ >>
         let io_empty_0 = <(0)::logic> /* <(0)::logic[64]> */ >>
         let out_uop_br_mask = <(0)::logic[8]> /* <(0)::logic[64]> */ >>
@@ -392,7 +392,7 @@ proc BranchKillableQueue(
         send out_ep.io_deq_bits_uop_debug_fsrc (<(_GEN_78 [ *deq_ptr_value ])::logic[2]>) >>
         send out_ep.io_deq_bits_uop_debug_tsrc (<(_GEN_79 [ *deq_ptr_value ])::logic[2]>) >>
         send out_ep.io_deq_bits_addr (<(_ram_ext_R0_data)::logic[40]>) >>
-        send out_ep.io_deq_bits_is_hella (<(<(_ram_ext_R0_data >> 40)::logic>)::logic>) >>
+        send out_ep.io_deq_bits_is_hella (<(_ram_ext_R0_data [ 40 ])::logic>) >>
         send out_ep.io_deq_bits_sdq_id (<(<(_ram_ext_R0_data >> 41)::logic[5]>)::logic[5]>) >>
         send out_ep.io_empty (<(io_empty_0)::logic>) >>
         cycle 1

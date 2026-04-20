@@ -277,16 +277,16 @@ proc BoomFrontend(
         let f3_predicted_ghist_ras_idx = <(0)::logic[5]> /* undefined: f3_predicted_ghist_ras_idx */ >>
         let f3_io_enq_bits_ghist_ras_idx = <(0)::logic[5]> /* if _GEN_47 { f3_predicted_ghist_ras_idx } else { *s2_ghist_ras_idx } */ >>
         let f4_clear = <(0)::logic> /* *r_io_cpu_sfence_valid | *r_io_cpu_redirect_flush */ >>
-        let _GEN_45 = <(0)::logic> /* undefined: _GEN_45 */ >>
+        let _GEN_53 = <(0)::logic> /* undefined: _GEN_53 */ >>
         let _GEN_50 = <(0)::logic> /* undefined: _GEN_50 */ >>
         let _GEN_51 = <(0)::logic> /* undefined: _GEN_51 */ >>
-        let _GEN_53 = <(0)::logic> /* undefined: _GEN_53 */ >>
+        let _GEN_45 = <(0)::logic> /* undefined: _GEN_45 */ >>
         let _GEN_15 = <(0)::logic> /* undefined: _GEN_15 */ >>
         let _GEN_12 = <(0)::logic> /* <(0)::logic[64]> */ >>
         let f1_clear = <(0)::logic> /* _GEN_53 | (if ~ _GEN_45 | _GEN_51 { _GEN_12 | _GEN_15 } else { _GEN_50 | _GEN... */ >>
-        let _GEN_5 = <(0)::logic> /* undefined: _GEN_5 */ >>
         let _GEN_52 = <(0)::logic> /* undefined: _GEN_52 */ >>
         let _GEN_16 = <(0)::logic> /* undefined: _GEN_16 */ >>
+        let _GEN_5 = <(0)::logic> /* undefined: _GEN_5 */ >>
         let s0_vpc = <(0)::logic[40]> /* if *r_io_cpu_sfence_valid { 1'h0 } else { if *r_io_cpu_redirect_flush { *r_io... */ >>
         let _tlb_io_ptw_req_valid = <(0)::logic> /* <(0)::logic[64]> */ >>
         send out_ep.auto_icache_master_out_a_valid (1'b0) >>
@@ -335,7 +335,7 @@ proc BoomFrontend(
     }
 
     loop {
-        let _GEN = <(0)::logic> /* undefined: _GEN */ >>
+        let _GEN = <(0)::logic[2]> /* undefined: _GEN */ >>
         let _GEN_12 = <(0)::logic> /* <(0)::logic[64]> */ >>
         let _GEN_16 = <(0)::logic> /* undefined: _GEN_16 */ >>
         let _GEN_18 = <(0)::logic> /* undefined: _GEN_18 */ >>

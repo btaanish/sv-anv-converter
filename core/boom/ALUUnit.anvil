@@ -286,7 +286,7 @@ proc ALUUnit(
         send out_ep.io_brinfo_valid (<(brinfo_valid)::logic>) >>
         send out_ep.io_brinfo_mispredict (<(if pc_sel == 2'h2 { ~ *r_io_get_ftq_pc_next_val | (*r_io_get_ftq_pc_next_pc != jalr_target) | ~ *r_io_get_ftq_pc_entry_cfi_idx_valid | (*r_io_get_ftq_pc_entry_cfi_idx_bits != <(*r_io_req_bits_uop_pc_lob >> 1)::logic[2]>) } else { brinfo_valid & (if pc_sel == 2'h1 { ~ *r_io_req_bits_uop_taken } else { (pc_sel == 2'h0) & *r_io_req_bits_uop_taken }) })::logic>) >>
         send out_ep.io_brinfo_taken (<(*r_io_req_valid & _is_jalr_T & ( *r_io_req_bits_uop_is_br | *r_io_req_bits_uop_is_jalr | *r_io_req_bits_uop_is_jal ) & (pc_sel != 2'h0))::logic>) >>
-        send out_ep.io_brinfo_cfi_type (<(if is_jalr { 3'h3 } else { 2'h0 })::logic[3]>) >>
+        send out_ep.io_brinfo_cfi_type (<(if is_jalr { 3'h3 } else { 3'h0 })::logic[3]>) >>
         send out_ep.io_brinfo_pc_sel (<(pc_sel)::logic[2]>) >>
         send out_ep.io_brinfo_jalr_target (<(jalr_target)::logic[40]>) >>
         send out_ep.io_brinfo_target_offset (<(imm_xprlen_i30_20 [ 0 ])::logic[21]>) >>

@@ -80,7 +80,7 @@ proc FDivSqrtUnit(
         send out_ep.io_resp_bits_uop_uses_stq (<(r_out_uop_uses_stq)::logic>) >>
         send out_ep.io_resp_bits_uop_dst_rtype (<(r_out_uop_dst_rtype)::logic[2]>) >>
         send out_ep.io_resp_bits_uop_fp_val (<(r_out_uop_fp_val)::logic>) >>
-        send out_ep.io_resp_bits_data (<(if _io_resp_bits_data_T { 12'hFFF } else { r_out_wdata_double })::logic[65]>) >>
+        send out_ep.io_resp_bits_data (<(if _io_resp_bits_data_T { 65'h00000000000000FFF } else { r_out_wdata_double })::logic[65]>) >>
         send out_ep.io_resp_bits_fflags_valid (<(io_resp_valid_0)::logic>) >>
         send out_ep.io_resp_bits_fflags_bits_uop_rob_idx (<(r_out_uop_rob_idx)::logic[5]>) >>
         send out_ep.io_resp_bits_fflags_bits_flags (<(r_out_flags_double | (if _io_resp_bits_data_T { _downvert_d2s_io_exceptionFlags } else { 5'h0 }))::logic[5]>) >>

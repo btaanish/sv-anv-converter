@@ -48,7 +48,7 @@ proc FPU(
         let _fpmu_io_out_valid = <(0)::logic> /* <(0)::logic[64]> */ >>
         let _sfma_io_out_bits_exc = <(0)::logic[5]> /* <(0)::logic[64]> */ >>
         let _sfma_io_out_valid = <(0)::logic> /* <(0)::logic[64]> */ >>
-        send out_ep.io_resp_bits_data (<(if _dfma_io_out_valid { _dfma_io_out_bits_data } else { if _sfma_io_out_valid { 12'hFFF } else { if *fpiu_out_pipe_pipe_pipe_v { 1'h0 } else { if *fpmu_double_pipe_pipe_pipe_pipe_b { _fpmu_io_out_bits_data } else { 12'hFFF } } } })::logic[65]>) >>
+        send out_ep.io_resp_bits_data (<(if _dfma_io_out_valid { _dfma_io_out_bits_data } else { if _sfma_io_out_valid { 65'h00000000000000FFF } else { if *fpiu_out_pipe_pipe_pipe_v { 65'h00000000000000000 } else { if *fpmu_double_pipe_pipe_pipe_pipe_b { _fpmu_io_out_bits_data } else { 65'h00000000000000FFF } } } })::logic[65]>) >>
         send out_ep.io_resp_bits_fflags_valid (<(*fpiu_out_pipe_pipe_pipe_v | _fpmu_io_out_valid | _sfma_io_out_valid | _dfma_io_out_valid)::logic>) >>
         send out_ep.io_resp_bits_fflags_bits_flags (<(if _dfma_io_out_valid { _dfma_io_out_bits_exc } else { if _sfma_io_out_valid { _sfma_io_out_bits_exc } else { if *fpiu_out_pipe_pipe_pipe_v { *fpiu_out_pipe_pipe_pipe_b_exc } else { _fpmu_io_out_bits_exc } } })::logic[5]>) >>
         cycle 1

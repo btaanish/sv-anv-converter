@@ -19,9 +19,9 @@ proc SinkX(
     out_ep : right SinkX_out_ch
 ) {
     loop {
-        let _x_q_io_deq_bits_address = <(0)::logic[10]> /* <(0)::logic[64]> */ >>
+        let _x_q_io_deq_bits_address = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         send out_ep.io_req_valid (1'b0) >>
-        send out_ep.io_req_bits_tag (<(<(_x_q_io_deq_bits_address >> 31)::logic>)::logic[13]>) >>
+        send out_ep.io_req_bits_tag (<(_x_q_io_deq_bits_address [ 31 ])::logic[13]>) >>
         send out_ep.io_req_bits_set (<(<(_x_q_io_deq_bits_address >> 6)::logic[10]>)::logic[10]>) >>
         send out_ep.io_x_ready (1'b0) >>
         cycle 1

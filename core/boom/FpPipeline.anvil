@@ -209,7 +209,7 @@ proc FpPipeline(
         let _ll_wbarb_io_out_bits_uop_dst_rtype = <(0)::logic[2]> /* <(0)::logic[64]> */ >>
         let _ll_wbarb_io_out_bits_uop_pdst = <(0)::logic[6]> /* <(0)::logic[64]> */ >>
         let _ll_wbarb_io_out_valid = <(0)::logic> /* <(0)::logic[64]> */ >>
-        set REG := <(2'h3)::logic[10]> >>
+        set REG := <(10'h003)::logic[10]> >>
         set fregfile_io_write_ports_0_REG_valid := <(_ll_wbarb_io_out_valid & (_ll_wbarb_io_out_bits_uop_dst_rtype == 2'h1))::logic> >>
         set fregfile_io_write_ports_0_REG_bits_addr := <(_ll_wbarb_io_out_bits_uop_pdst)::logic[6]> >>
         set fregfile_io_write_ports_0_REG_bits_data := <(_ll_wbarb_io_out_bits_data)::logic[65]>

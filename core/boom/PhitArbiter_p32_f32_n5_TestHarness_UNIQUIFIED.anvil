@@ -48,7 +48,7 @@ proc PhitArbiter_p32_f32_n5_TestHarness_UNIQUIFIED(
         send out_ep.io_in_3_ready (<(*r_io_out_ready & *beat & (chosen_reg == 3'h3))::logic>) >>
         send out_ep.io_in_4_ready (<(*r_io_out_ready & *beat & (chosen_reg == 3'h4))::logic>) >>
         send out_ep.io_out_valid (<(_GEN [ chosen ])::logic>) >>
-        send out_ep.io_out_bits_phit (<(if *beat { _GEN_0 [ chosen ] } else { 29'h0 })::logic[32]>) >>
+        send out_ep.io_out_bits_phit (<(if *beat { _GEN_0 [ chosen ] } else { 32'h00000000 })::logic[32]>) >>
         cycle 1
     }
 

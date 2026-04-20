@@ -31,13 +31,13 @@ proc TLAToBeat_SerialRAM_a64d64s8k8z8c(
     reg is_body : logic;
 
     loop {
-        let _q_io_deq_bits_opcode = <(0)::logic[86]> /* <(0)::logic[64]> */ >>
+        let _q_io_deq_bits_opcode = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let _q_io_deq_valid = <(0)::logic> /* <(0)::logic[64]> */ >>
         let io_beat_bits_head_0 = <(0)::logic> /* <(0)::logic[64]> */ >>
         let io_beat_bits_tail_0 = <(0)::logic> /* <(0)::logic[64]> */ >>
         send out_ep.io_protocol_ready (1'b0) >>
         send out_ep.io_beat_valid (<(_q_io_deq_valid)::logic>) >>
-        send out_ep.io_beat_bits_payload (<(if *is_body { 13'h0 } else { _q_io_deq_bits_opcode })::logic[86]>) >>
+        send out_ep.io_beat_bits_payload (<(if *is_body { 86'h0000000000000000000000 } else { _q_io_deq_bits_opcode })::logic[86]>) >>
         send out_ep.io_beat_bits_head (<(io_beat_bits_head_0)::logic>) >>
         send out_ep.io_beat_bits_tail (<(io_beat_bits_tail_0)::logic>) >>
         cycle 1
@@ -45,7 +45,7 @@ proc TLAToBeat_SerialRAM_a64d64s8k8z8c(
 
     loop {
         let _GEN_0 = <(0)::logic> /* undefined: _GEN_0 */ >>
-        let _q_io_deq_bits_opcode = <(0)::logic[86]> /* <(0)::logic[64]> */ >>
+        let _q_io_deq_bits_opcode = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let _q_io_deq_valid = <(0)::logic> /* <(0)::logic[64]> */ >>
         let _tail_beats1_decode_T = <(0)::logic> /* undefined: _tail_beats1_decode_T */ >>
         let head = <(0)::logic> /* undefined: head */ >>

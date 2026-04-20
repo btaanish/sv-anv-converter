@@ -33,10 +33,10 @@ proc AsyncQueueSink_DebugInternalBundle(
     loop {
         let _source_valid_io_out = <(0)::logic> /* <(0)::logic[64]> */ >>
         let io_deq_valid_0 = <(0)::logic> /* *valid_reg & _source_valid_io_out */ >>
-        let _io_deq_bits_deq_bits_reg_io_q = <(0)::logic[10]> /* <(0)::logic[64]> */ >>
+        let _io_deq_bits_deq_bits_reg_io_q = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let reset = <(0)::logic> /* <(0)::logic[64]> */ >>
         send out_ep.io_deq_valid (<(io_deq_valid_0)::logic>) >>
-        send out_ep.io_deq_bits_resumereq (<(<(_io_deq_bits_deq_bits_reg_io_q >> 14)::logic>)::logic>) >>
+        send out_ep.io_deq_bits_resumereq (<(_io_deq_bits_deq_bits_reg_io_q [ 14 ])::logic>) >>
         send out_ep.io_deq_bits_hartsel (<(<(_io_deq_bits_deq_bits_reg_io_q >> 4)::logic[10]>)::logic[10]>) >>
         send out_ep.io_deq_bits_ackhavereset (<(_io_deq_bits_deq_bits_reg_io_q [ 3 ])::logic>) >>
         send out_ep.io_deq_bits_hrmask_0 (<(_io_deq_bits_deq_bits_reg_io_q [ 0 ])::logic>) >>

@@ -122,17 +122,17 @@ proc SourceD(
     loop {
         let s4_need_bs = <(0)::logic> /* <(0)::logic[64]> */ >>
         let _atomics_io_data_out = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
-        let s1_req_way = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
         let s4_beat = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
-        let s2_req_way = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
-        let s4_req_set = <(0)::logic[10]> /* <(0)::logic[64]> */ >>
-        let s2_req_set = <(0)::logic[10]> /* <(0)::logic[64]> */ >>
         let s1_req_set = <(0)::logic[10]> /* <(0)::logic[64]> */ >>
-        let s3_req_way = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
-        let s1_beat = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
-        let s4_req_way = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
         let s3_req_set = <(0)::logic[10]> /* <(0)::logic[64]> */ >>
-        let d_bits_opcode = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
+        let s1_req_way = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
+        let s1_beat = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
+        let s2_req_set = <(0)::logic[10]> /* <(0)::logic[64]> */ >>
+        let s4_req_way = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
+        let s3_req_way = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
+        let s4_req_set = <(0)::logic[10]> /* <(0)::logic[64]> */ >>
+        let s2_req_way = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
+        let d_bits_opcode = <(0)::logic[64]> /* <(0)::logic[64]> */ >>
         let s1_bypass = <(0)::logic> /* <(0)::logic[64]> */ >>
         let s1_req_reg_set = <(0)::logic[10]> /* <(0)::logic[64]> */ >>
         let s1_req_reg_way = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
@@ -151,7 +151,7 @@ proc SourceD(
         send out_ep.io_req_ready (<(~ *busy)::logic>) >>
         send out_ep.io_d_valid (<(*s3_valid_d)::logic>) >>
         send out_ep.io_d_bits_opcode (<(d_bits_opcode)::logic[3]>) >>
-        send out_ep.io_d_bits_param (<(if s3_req_prio_0 & ( (s3_req_opcode == 3'h6) | (s3_req_opcode == 3'hF) ) { 1'h0 } else { 2'h0 })::logic[2]>) >>
+        send out_ep.io_d_bits_param (<(if s3_req_prio_0 & ( (s3_req_opcode == 3'h6) | (s3_req_opcode == 3'hF) ) { 2'h0 } else { 2'h0 })::logic[2]>) >>
         send out_ep.io_d_bits_size (<(s3_req_size)::logic[3]>) >>
         send out_ep.io_d_bits_source (<(s3_req_source)::logic[6]>) >>
         send out_ep.io_d_bits_sink (<(s3_req_sink)::logic[3]>) >>

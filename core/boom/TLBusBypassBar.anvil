@@ -120,7 +120,7 @@ proc TLBusBypassBar(
         send out_ep.auto_out_1_d_ready (<(*r_auto_in_d_ready & ~ bypass)::logic>) >>
         send out_ep.auto_out_0_a_valid (<(~ stall & *r_auto_in_a_valid & bypass)::logic>) >>
         send out_ep.auto_out_0_a_bits_opcode (<(*r_auto_in_a_bits_opcode)::logic[3]>) >>
-        send out_ep.auto_out_0_a_bits_address (<(119'h0)::logic[128]>) >>
+        send out_ep.auto_out_0_a_bits_address (<(128'h00000000000000000000000000000000)::logic[128]>) >>
         send out_ep.auto_out_0_d_ready (<(*r_auto_in_d_ready & bypass)::logic>) >>
         cycle 1
     }

@@ -78,7 +78,7 @@ proc BoomProbeUnit(
         send out_ep.io_meta_write_valid (<(io_meta_write_valid_0)::logic>) >>
         send out_ep.io_meta_write_bits_idx (<(<(req_address >> 6)::logic[6]>)::logic[6]>) >>
         send out_ep.io_meta_write_bits_way_en (<(way_en)::logic[4]>) >>
-        send out_ep.io_meta_write_bits_data_coh_state (<(if _GEN { 2'h2 } else { if _r_T_49 { 2'h1 } else { if _r_T_45 { 2'h0 } else { 1'h0 } } })::logic[2]>) >>
+        send out_ep.io_meta_write_bits_data_coh_state (<(if _GEN { 2'h2 } else { if _r_T_49 { 2'h1 } else { if _r_T_45 { 2'h0 } else { 2'h0 } } })::logic[2]>) >>
         send out_ep.io_meta_write_bits_data_tag (<(<(req_address >> 12)::logic[20]>)::logic[20]>) >>
         send out_ep.io_wb_req_valid (<(io_wb_req_valid_0)::logic>) >>
         send out_ep.io_wb_req_bits_tag (<(<(req_address >> 12)::logic[20]>)::logic[20]>) >>
@@ -89,7 +89,7 @@ proc BoomProbeUnit(
         send out_ep.io_lsu_release_valid (<(io_lsu_release_valid_0)::logic>) >>
         send out_ep.io_lsu_release_bits_address (<(req_address)::logic[32]>) >>
         send out_ep.io_state_valid (<(*state)::logic>) >>
-        send out_ep.io_state_bits (<(8'h0)::logic[40]>) >>
+        send out_ep.io_state_bits (<(40'h0000000000)::logic[40]>) >>
         cycle 1
     }
 
