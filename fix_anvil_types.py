@@ -94,6 +94,10 @@ def fix_precedence(line):
             j = li
             while j >= 0:
                 if result[j] == '>':
+                    # Check for >> (shift operator) inside cast
+                    if depth > 0 and j > 0 and result[j-1] == '>':
+                        j -= 2
+                        continue
                     depth += 1
                 elif result[j] == '<':
                     depth -= 1
@@ -173,6 +177,8 @@ def fix_precedence(line):
 
 _REG_DECL = re.compile(r'reg\s+(\w+)\s*:\s*logic\[(\d+)\]')
 _LET_DECL = re.compile(r'let\s+(\w+)\s*=\s*<\([^)]*\)::logic\[(\d+)\]\>')
+_REG_DECL_1BIT = re.compile(r'reg\s+(\w+)\s*:\s*logic(?!\[)')
+_LET_DECL_1BIT = re.compile(r'let\s+(\w+)\s*=\s*<\([^)]*\)::logic(?!\[)\s*>')
 
 
 def _build_type_map(lines):
@@ -183,6 +189,12 @@ def _build_type_map(lines):
             types[m.group(1)] = int(m.group(2))
         for m in _LET_DECL.finditer(line):
             types[m.group(1)] = int(m.group(2))
+        for m in _REG_DECL_1BIT.finditer(line):
+            if m.group(1) not in types:
+                types[m.group(1)] = 1
+        for m in _LET_DECL_1BIT.finditer(line):
+            if m.group(1) not in types:
+                types[m.group(1)] = 1
     return types
 
 
@@ -520,6 +532,9 @@ def fix_if_condition_types(line, type_map):
                 var_name = var_ref.lstrip('*')
                 if var_name in type_map:
                     w = type_map[var_name]
+                    if w <= 1:
+                        new_parts.append(part)
+                        continue
                     zero = f"{w}'h" + '0' * ((w + 3) // 4)
                     if neg:
                         new_parts.append(f'({neg.strip()}{var_ref} != {zero})')
@@ -583,6 +598,194 @@ def fix_cast_literal_widths(line):
 
 
 # ---------------------------------------------------------------------------
+# 10. Fix if-else branch width mismatches
+# ---------------------------------------------------------------------------
+# In `if COND { *REG } else { K'hX }`, if REG has width M < K, cast *REG
+# to logic[K] so both branches match.
+
+def fix_if_else_branch_widths(line, type_map):
+    """Fix if-else branches where variable width doesn't match literal width."""
+    def _fix_fwd(m):
+        brace = m.group(1)
+        var_ref = m.group(2)
+        var_name = var_ref.lstrip('*')
+        mid = m.group(3)
+        lit_width = int(m.group(4))
+        lit_rest = m.group(5)
+        if lit_width > 1 and var_name in type_map and type_map[var_name] < lit_width:
+            return f'{brace}<({var_ref})::logic[{lit_width}]>{mid}{lit_width}{lit_rest}'
+        return m.group(0)
+
+    line = re.sub(
+        r'(\{\s*)(\*?\w+)(\s*\}\s*else\s*\{\s*)(\d+)(\'[hHdDbBoO])',
+        _fix_fwd,
+        line
+    )
+    return line
+
+
+# ---------------------------------------------------------------------------
+# 11. Fix bare variable in OR/AND chain before cast close
+# ---------------------------------------------------------------------------
+
+def fix_bare_var_or_cast_close(line, type_map):
+    """Fix bare variable in OR/AND right before )::logic[N]> cast close."""
+    def _fix(m):
+        op = m.group(1)
+        var_ref = m.group(2)
+        var_name = var_ref.lstrip('*')
+        n = int(m.group(3))
+        if n > 1 and var_name in type_map and type_map[var_name] != n:
+            return f'{op} <({var_ref})::logic[{n}]>)::logic[{n}]>'
+        return m.group(0)
+
+    line = re.sub(
+        r'([|&])\s*(\*?\w+)\s*\)\s*::\s*logic\[(\d+)\]\s*>',
+        _fix,
+        line
+    )
+
+    # Also handle: OP ~ VAR)::logic[N]> (negated variable)
+    def _fix_neg(m):
+        op = m.group(1)
+        var_ref = m.group(2)
+        var_name = var_ref.lstrip('*')
+        n = int(m.group(3))
+        if n > 1 and var_name in type_map and type_map[var_name] != n:
+            return f'{op} ~ <({var_ref})::logic[{n}]>)::logic[{n}]>'
+        return m.group(0)
+
+    line = re.sub(
+        r'([|&])\s*~\s*(\*?\w+)\s*\)\s*::\s*logic\[(\d+)\]\s*>',
+        _fix_neg,
+        line
+    )
+
+    # Also handle: <(VAR OP ...)::logic[N]> — variable at start of cast
+    # Must properly track nesting to find the matching cast close
+    for m in re.finditer(r'<\((\*?\w+)\s*([|&])', line):
+        var_ref = m.group(1)
+        var_name = var_ref.lstrip('*')
+        if var_name not in type_map:
+            continue
+        # Find the matching )::logic[N]> by tracking paren/cast depth
+        start = m.start()
+        depth = 1  # already inside <(
+        j = m.end()
+        while j < len(line):
+            if j + 1 < len(line) and line[j:j+2] == '<(':
+                depth += 1
+                j += 2
+                continue
+            elif line[j] == '(':
+                depth += 1
+            elif line[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    # Check for ::logic[N]>
+                    cm = re.match(r'\)\s*::\s*logic\[(\d+)\]\s*>', line[j:])
+                    if cm:
+                        n = int(cm.group(1))
+                        if n > 1 and type_map[var_name] < n:
+                            var_start = m.start(1)
+                            var_end = m.end(1)
+                            line = line[:var_start] + f'<({var_ref})::logic[{n}]>' + line[var_end:]
+                    break
+            j += 1
+
+    return line
+
+
+# ---------------------------------------------------------------------------
+# 12. Fix VAR[INDEX] at end of OR/AND chain before cast close
+# ---------------------------------------------------------------------------
+
+def fix_index_at_cast_close(line):
+    """Fix VAR[INDEX] producing 1-bit at end of expression in N-bit cast."""
+    def _fix(m):
+        op = m.group(1)
+        index_expr = m.group(2)
+        closing = m.group(3)
+        n = int(m.group(4))
+        if n > 1:
+            return f'{op} <({index_expr})::logic[{n}]>{closing})::logic[{n}]>'
+        return m.group(0)
+
+    return re.sub(
+        r'([|&])\s*(\w+\s*\[\s*\d+\s*\])\s*((?:\}\s*)*)\)\s*::\s*logic\[(\d+)\]\s*>',
+        _fix,
+        line
+    )
+
+
+# ---------------------------------------------------------------------------
+# 13. Fix <(*VAR)::logic> compared with K-bit literal (K > 1)
+# ---------------------------------------------------------------------------
+
+def fix_1bit_cast_comparison(line):
+    """Fix <(*VAR)::logic> compared with K-bit literal where K > 1."""
+    def _fix(m):
+        var = m.group(1)
+        op = m.group(2)
+        k = int(m.group(3))
+        lit_rest = m.group(4)
+        if k > 1:
+            return f'<(*{var})::logic[{k}]> {op} {k}{lit_rest}'
+        return m.group(0)
+
+    line = re.sub(
+        r'<\(\*(\w+)\)::logic\>\s*(==|!=)\s*(\d+)(\'[hHdDbBoO])',
+        _fix,
+        line
+    )
+
+    # Also handle non-dereferenced: <(VAR)::logic> == K'h
+    def _fix_noref(m):
+        var = m.group(1)
+        op = m.group(2)
+        k = int(m.group(3))
+        lit_rest = m.group(4)
+        if k > 1:
+            return f'<({var})::logic[{k}]> {op} {k}{lit_rest}'
+        return m.group(0)
+
+    line = re.sub(
+        r'<\((\w+)\)::logic\>\s*(==|!=)\s*(\d+)(\'[hHdDbBoO])',
+        _fix_noref,
+        line
+    )
+    return line
+
+
+# ---------------------------------------------------------------------------
+# 14. Fix cast comparison literal width mismatch
+# ---------------------------------------------------------------------------
+# <(EXPR)::logic[M]> == K'hX where M != K — resize literal to M
+
+def fix_cast_comparison_literal(line):
+    """Fix literal width in comparison to match cast expression width."""
+    def _fix(m):
+        cast_expr = m.group(1)
+        cast_width = int(m.group(2))
+        op = m.group(3)
+        lit_width = int(m.group(4))
+        base = m.group(5)
+        value = m.group(6)
+        if cast_width != lit_width and base.lower() == 'h':
+            val = int(value.replace('_', ''), 16)
+            hex_digits = (cast_width + 3) // 4
+            new_value = format(val, f'0{hex_digits}X')
+            return f'{cast_expr}::logic[{cast_width}]> {op} {cast_width}\'{base}{new_value}'
+        return m.group(0)
+
+    return re.sub(
+        r'(<\([^)]*\))::logic\[(\d+)\]\>\s*(==|!=)\s*(\d+)\'([hH])([0-9a-fA-F_]+)',
+        _fix,
+        line
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -604,6 +807,11 @@ def process(text):
         line = fix_cast_literal_widths(line)
         line = fix_index_oob(line, type_map)
         line = fix_double_cast(line)
+        line = fix_if_else_branch_widths(line, type_map)
+        line = fix_bare_var_or_cast_close(line, type_map)
+        line = fix_index_at_cast_close(line)
+        line = fix_1bit_cast_comparison(line)
+        line = fix_cast_comparison_literal(line)
         result.append(line)
     return '\n'.join(result)
 
