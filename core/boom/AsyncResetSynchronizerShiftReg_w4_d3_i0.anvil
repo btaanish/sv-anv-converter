@@ -20,4 +20,3 @@ proc AsyncResetSynchronizerShiftReg_w4_d3_i0(
     }
 
 }
-

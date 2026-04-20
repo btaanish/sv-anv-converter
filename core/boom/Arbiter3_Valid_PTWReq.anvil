@@ -80,4 +80,3 @@ proc Arbiter3_Valid_PTWReq(
     }
 
 }
-

@@ -58,4 +58,3 @@ proc SerialTL0ClockSinkDomain(
     }
 
 }
-

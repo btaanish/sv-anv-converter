@@ -26,4 +26,3 @@ proc JtagStateMachine(
     }
 
 }
-

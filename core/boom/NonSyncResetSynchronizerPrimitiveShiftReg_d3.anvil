@@ -35,4 +35,3 @@ proc NonSyncResetSynchronizerPrimitiveShiftReg_d3(
     }
 
 }
-

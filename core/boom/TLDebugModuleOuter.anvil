@@ -83,8 +83,8 @@ proc TLDebugModuleOuter(
     }
 
     loop {
-        let in_bits_read = <(0)::logic> /* <(0)::logic[64]> */ >>
         let _out_T_3 = <(0)::logic[32]> /* <(0)::logic[64]> */ >>
+        let in_bits_read = <(0)::logic> /* <(0)::logic[64]> */ >>
         let out_woready_9 = <(0)::logic> /* *r_auto_dmi_in_a_valid & *r_auto_dmi_in_d_ready & ~ in_bits_read & ~ ( *r_aut... */ >>
         let dmiNodeIn_d_bits_opcode = <(0)::logic[3]> /* <(0)::logic[64]> */ >>
         let hrmaskNxt_0 = <(0)::logic> /* <(0)::logic[64]> */ >>
@@ -131,4 +131,3 @@ proc TLDebugModuleOuter(
     }
 
 }
-

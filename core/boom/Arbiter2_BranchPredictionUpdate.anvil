@@ -252,4 +252,3 @@ proc Arbiter2_BranchPredictionUpdate(
     }
 
 }
-

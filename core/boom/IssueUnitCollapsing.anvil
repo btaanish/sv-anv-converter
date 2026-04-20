@@ -176,8 +176,8 @@ proc IssueUnitCollapsing(
         let _GEN_14 = <(0)::logic[64]> /* undefined: _GEN_14 */ >>
         let _GEN_13 = <(0)::logic[64]> /* undefined: _GEN_13 */ >>
         let issue_slots_4_grant = <(0)::logic[64]> /* _GEN_14 & ~ _GEN_13 */ >>
-        let _GEN_15 = <(0)::logic[64]> /* undefined: _GEN_15 */ >>
         let _GEN_16 = <(0)::logic[64]> /* undefined: _GEN_16 */ >>
+        let _GEN_15 = <(0)::logic[64]> /* undefined: _GEN_15 */ >>
         let issue_slots_5_grant = <(0)::logic[64]> /* _GEN_16 & ~ _GEN_15 */ >>
         let _GEN_18 = <(0)::logic[64]> /* undefined: _GEN_18 */ >>
         let _GEN_17 = <(0)::logic[64]> /* undefined: _GEN_17 */ >>
@@ -261,14 +261,14 @@ proc IssueUnitCollapsing(
         let _RANDOM = <(0)::logic[64]> /* undefined: _RANDOM */ >>
         let io_dis_uops_0_ready_REG = <(0)::logic[64]> /* _RANDOM [ 1'b0 ] [ 0 ] */ >>
         let io_dis_uops_0_ready = <(0)::logic> /* *io_dis_uops_0_ready_REG */ >>
-        let issue_slots_7_grant = <(0)::logic[64]> /* undefined: issue_slots_7_grant */ >>
-        let issue_slots_6_grant = <(0)::logic[64]> /* undefined: issue_slots_6_grant */ >>
-        let issue_slots_3_grant = <(0)::logic[64]> /* undefined: issue_slots_3_grant */ >>
-        let issue_slots_5_grant = <(0)::logic[64]> /* undefined: issue_slots_5_grant */ >>
         let issue_slots_0_grant = <(0)::logic[64]> /* undefined: issue_slots_0_grant */ >>
-        let issue_slots_2_grant = <(0)::logic[64]> /* undefined: issue_slots_2_grant */ >>
-        let issue_slots_1_grant = <(0)::logic[64]> /* undefined: issue_slots_1_grant */ >>
+        let issue_slots_3_grant = <(0)::logic[64]> /* undefined: issue_slots_3_grant */ >>
         let issue_slots_4_grant = <(0)::logic[64]> /* undefined: issue_slots_4_grant */ >>
+        let issue_slots_6_grant = <(0)::logic[64]> /* undefined: issue_slots_6_grant */ >>
+        let issue_slots_1_grant = <(0)::logic[64]> /* undefined: issue_slots_1_grant */ >>
+        let issue_slots_2_grant = <(0)::logic[64]> /* undefined: issue_slots_2_grant */ >>
+        let issue_slots_7_grant = <(0)::logic[64]> /* undefined: issue_slots_7_grant */ >>
+        let issue_slots_5_grant = <(0)::logic[64]> /* undefined: issue_slots_5_grant */ >>
         let io_iss_valids_0 = <(0)::logic> /* issue_slots_7_grant | issue_slots_6_grant | issue_slots_5_grant | issue_slots... */ >>
         let _slots_7_io_uop_uopc = <(0)::logic[64]> /* undefined: _slots_7_io_uop_uopc */ >>
         let io_iss_uops_0_uopc = <(0)::logic[7]> /* if issue_slots_7_grant { _slots_7_io_uop_uopc } else { if issue_slots_6_grant... */ >>
@@ -409,4 +409,3 @@ proc IssueUnitCollapsing(
     }
 
 }
-
