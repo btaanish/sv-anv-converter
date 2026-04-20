@@ -280,22 +280,45 @@ def fix_let_types(lines):
                         cast_types[var] = set()
                     cast_types[var].add(inferred)
 
+    # Collect variables that are used with array indexing - these must NOT be
+    # narrowed to logic even if they appear in boolean contexts
+    _indexed_var = re.compile(r'(\w+)\s*\[\s*[^]]+\s*\]')
+    indexed_vars = set()
+    for line in lines:
+        for m in _indexed_var.finditer(line):
+            indexed_vars.add(m.group(1))
+
+    # Variables with /* undefined: VAR */ comments should default to logic
+    # since the converter couldn't determine their expression
+    # BUT only if they're not used with array indexing
+    _undefined_let = re.compile(
+        r'let\s+(\w+)\s*=\s*<\(0\)::logic\[\d+\]\>\s*/\*\s*undefined:'
+    )
+    for line in lines:
+        m = _undefined_let.search(line)
+        if m:
+            var = m.group(1)
+            if var in let_decls and var not in cast_types and var not in indexed_vars:
+                cast_types[var] = {'logic'}
+
     # For variables NOT in cast_types, try to infer from boolean usage
     # Patterns that indicate a variable should be logic (1-bit):
     # - ~ VAR (direct NOT)
-    # - if VAR (condition)
+    # - if VAR or if (VAR) (condition)
     # - ~ ( VAR & ... ) (VAR in boolean AND inside NOT)
     _bool_patterns = [
-        re.compile(r'~\s*(\w+)'),           # ~ VAR
-        re.compile(r'if\s+(\w+)\s'),         # if VAR
-        re.compile(r'~\s*\(\s*(\w+)\s*&'),   # ~ ( VAR &
-        re.compile(r'~\s*\(\s*[^)]*&\s*(\w+)\s*\)'),  # ~ ( ... & VAR )
+        re.compile(r'~\s*(\w+)'),                      # ~ VAR
+        re.compile(r'if\s+(\w+)\s'),                    # if VAR
+        re.compile(r'if\s*\(\s*(\w+)\s*\)'),            # if (VAR)
+        re.compile(r'if\s*\(\s*~\s*(\w+)\s*\)'),        # if (~ VAR)
+        re.compile(r'~\s*\(\s*(\w+)\s*&'),              # ~ ( VAR &
+        re.compile(r'~\s*\(\s*[^)]*&\s*(\w+)\s*\)'),   # ~ ( ... & VAR )
     ]
     for line in lines:
         for pat in _bool_patterns:
             for m in pat.finditer(line):
                 var = m.group(1)
-                if var in let_decls and var not in cast_types:
+                if var in let_decls and var not in cast_types and var not in indexed_vars:
                     _, decl_type = let_decls[var]
                     if decl_type != 'logic':
                         cast_types[var] = {'logic'}
