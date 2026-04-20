@@ -1294,6 +1294,19 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     def _strip_lit_underscores(m):
         return m.group(0).replace('_', '')
     e = re.sub(r"\d+'[bdho][0-9a-fA-F_xXzZ]+", _strip_lit_underscores, e)
+    # Convert x/z in sized literals to 0 (Anvil has no x/z)
+    # N'bx → N'd0, N'bz → N'd0, N'bXXxZz → replace x/z with 0
+    def _convert_xz_literals(m):
+        width = m.group(1)
+        radix = m.group(2).lower()
+        digits = m.group(3)
+        # If ALL digits are x/z, just use N'd0
+        if all(c in 'xXzZ' for c in digits):
+            return f"{width}'d0"
+        # Otherwise replace x/z chars with 0
+        cleaned = re.sub(r'[xXzZ]', '0', digits)
+        return f"{width}'{radix}{cleaned}"
+    e = re.sub(r"(\d+)'([bdho])([0-9a-fA-F_xXzZ]*[xXzZ][0-9a-fA-F_xXzZ]*)", _convert_xz_literals, e)
     # Unsized literals: 'bXXX → 1'bXXX, 'hXXX → 1'hXXX, 'dXXX → 1'dXXX, 'oXXX → 1'oXXX
     # Negative lookbehind prevents matching inside already-sized literals like 1'b0
     e = re.sub(r"(?<!\d)'([bdho])([0-9a-fA-F_xXzZ]+)", r"1'\1\2", e)
@@ -1500,10 +1513,6 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
         return ''.join(result)
     e = _convert_concat_braces(e)
 
-    # Restore replication placeholders
-    for i, rep_text in enumerate(_rep_placeholders):
-        e = e.replace(f"__REP{i}__", rep_text)
-
     # Bit select [expr:expr] → truncation cast (before ternary)
     def replace_bit_select(m_sel):
         var = m_sel.group(1)
@@ -1577,6 +1586,10 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     # Ternary a ? b : c → if a { b } else { c }
     e = _convert_all_ternaries(e)
 
+    # Restore replication placeholders (after ternary conversion to avoid :: confusion)
+    for i, rep_text in enumerate(_rep_placeholders):
+        e = e.replace(f"__REP{i}__", rep_text)
+
     # Substitute param references (CVA6Cfg.X and bare parameter names)
     for pname, pval in params.items():
         if pname not in ("CVA6Cfg",):
@@ -1646,6 +1659,7 @@ def _convert_all_ternaries(expr: str) -> str:
     parts = _split_ternary(expr)
     if parts:
         cond, t_val, f_val = parts
+        cond = _convert_all_ternaries(cond.strip())
         t_val = _convert_all_ternaries(t_val.strip())
         f_val = _convert_all_ternaries(f_val.strip())
         return f"if {cond.strip()} {{ {t_val} }} else {{ {f_val} }}"
@@ -1696,15 +1710,22 @@ def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
     cond = expr[:q_pos]
     rest = expr[q_pos + 1:]
 
-    # Find the colon at depth 0
+    # Find the colon at depth 0, skipping '::' (type annotations in casts)
     depth = 0
-    for i, ch in enumerate(rest):
+    i = 0
+    while i < len(rest):
+        ch = rest[i]
         if ch in "([{":
             depth += 1
         elif ch in ")]}":
             depth -= 1
         elif ch == ":" and depth == 0:
+            # Skip '::' — it's a type annotation, not a ternary separator
+            if i + 1 < len(rest) and rest[i + 1] == ":":
+                i += 2
+                continue
             return (cond, rest[:i], rest[i + 1:])
+        i += 1
 
     return None
 
