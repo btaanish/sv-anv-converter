@@ -275,6 +275,17 @@ def fix_let_types(lines):
                     cast_types[var] = set()
                 cast_types[var].add(cast_type)
 
+    # Also detect bare variable casts <(VAR)::TYPE> anywhere in code
+    # This catches cases like: sels_0 & <(sel_fire_0)::logic[52]>
+    _any_var_cast = re.compile(r'<\(\s*(\w+)\s*\)::(logic\[\d+\])\s*>')
+    for line in lines:
+        for m in _any_var_cast.finditer(line):
+            var = m.group(1)
+            cast_type = m.group(2)
+            if var not in cast_types:
+                cast_types[var] = set()
+            cast_types[var].add(cast_type)
+
     # Collect all let placeholder declarations
     let_decls = {}  # var -> (line_idx, declared_type)
     for idx, line in enumerate(lines):
