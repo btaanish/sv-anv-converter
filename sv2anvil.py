@@ -2710,9 +2710,25 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         # Pattern: <(expr)::type> ] → <(expr)::type>
         code_part = re.sub(r'(::logic(?:\[\d+\])?>)\s*\]', r'\1', code_part)
 
-        # Fix operator precedence: add parens around comparisons before && / ||
-        # In SV, < > <= >= == != bind tighter than && ||, but Anvil may differ
-        # Pattern: expr OP expr && ... → (expr OP expr) && ...
+        # Fix operator precedence: in SV, == != < > bind tighter than & | ^ && ||
+        # Add parens around comparison expressions when preceded by bitwise operators
+        # Pattern: ... | expr == expr → ... | (expr == expr)
+        # Handle: *reg == lit, *reg != lit, *reg > lit, var == lit, etc.
+        # Use a function to properly parenthesize comparisons after bitwise ops
+        def _fix_bitwise_cmp_precedence(text):
+            # Match patterns: & or | followed by comparison
+            # The comparison operands can be: *reg, var, lit, <(...)::type>, or bracketed exprs
+            cmp_operand = r'(?:<\([^)]*\)::logic(?:\[\d+\])?>|\*\w+(?:\s*\[\s*\d+\s*\])?|\w+(?:\s*\[\s*\d+\s*\])?|\d+\'[hdbo][0-9a-fA-F]+|\d+)'
+            for cmp_op in ['==', '!=', '>=', '<=']:
+                pattern = rf'([&|^])\s*({cmp_operand})\s*({cmp_op})\s*({cmp_operand})'
+                text = re.sub(pattern, rf'\1 (\2 \3 \4)', text)
+            # For < and > (avoid matching << >> shift operators and <( cast syntax)
+            for cmp_op, pat in [('<', r'<(?![<=(\s])'), ('>', r'>(?![>=])')]:
+                pattern = rf'([&|^])\s*({cmp_operand})\s*({pat})\s*({cmp_operand})'
+                text = re.sub(pattern, rf'\1 (\2 {cmp_op} \4)', text)
+            return text
+        code_part = _fix_bitwise_cmp_precedence(code_part)
+        # Also fix: comparison && / || patterns
         code_part = re.sub(
             r'(\b\S+\s*(?:<(?!=)|>(?!=)|<=|>=|==|!=)\s*\S+)\s*(&&|\|\|)',
             r'(\1) \2', code_part)
