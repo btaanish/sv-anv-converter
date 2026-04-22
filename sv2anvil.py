@@ -1248,6 +1248,7 @@ class AnvilIR:
     endpoints: List[AnvilEndpoint]
     regs: List[AnvilReg]
     loop_bodies: list  # list of list of statements
+    signal_width_map: Dict[str, str]  # signal_name → anvil_type (e.g. "logic", "logic[32]")
 
 
 # ===========================================================================
@@ -1897,12 +1898,25 @@ def build_ir(module: SVModule) -> AnvilIR:
                 ff_loop.append(AnvilCycle(count=1))
             loop_bodies.append(ff_loop)
 
+    # Build signal width map for undefined variable resolution
+    signal_width_map = {}
+    for sig in module.signals:
+        atype = anvil_type_str(sig.width_msb, sig.width_lsb, params)
+        signal_width_map[sig.name] = atype
+        # Also map with _ prefix (common for submodule outputs)
+        signal_width_map[f"_{sig.name}"] = atype
+    for p in module.ports:
+        atype = anvil_type_str(p.width_msb, p.width_lsb, params,
+                               p.type_name if p.is_custom_type else None)
+        signal_width_map[p.name] = atype
+
     return AnvilIR(
         module_name=module.name,
         channels=channels,
         endpoints=endpoints,
         regs=regs,
         loop_bodies=loop_bodies,
+        signal_width_map=signal_width_map,
     )
 
 
@@ -2353,7 +2367,8 @@ def _stmts_to_inline(stmts: list) -> str:
 # MAIN
 # ===========================================================================
 
-def _postprocess_loop_body(stmts: list, reg_names: set, ep_msg_names: set) -> list:
+def _postprocess_loop_body(stmts: list, reg_names: set, ep_msg_names: set,
+                           signal_width_map: Optional[Dict[str, str]] = None) -> list:
     """Topologically sort let bindings and add placeholders for undefined ids."""
     # Separate let bindings from other stmts (recv, send, set, cycle)
     let_stmts = []
@@ -2426,8 +2441,9 @@ def _postprocess_loop_body(stmts: list, reg_names: set, ep_msg_names: set) -> li
         deps = _used_ids(s.expr)
         for dep in deps:
             if dep not in all_defined and dep not in let_map:
-                # Add placeholder with generic cast
-                final_lets.append(AnvilLetBinding(name=dep, expr=f"<(0)::logic[64]> /* undefined: {dep} */"))
+                # Add placeholder with type from signal declarations if available
+                undef_type = (signal_width_map or {}).get(dep, "logic[64]")
+                final_lets.append(AnvilLetBinding(name=dep, expr=f"<(0)::{undef_type}> /* undefined: {dep} */"))
                 all_defined.add(dep)
         all_defined.add(s.name)
         final_lets.append(s)
@@ -2456,7 +2472,8 @@ def _postprocess_loop_body(stmts: list, reg_names: set, ep_msg_names: set) -> li
     extra_lets = []
     for dep in sorted(after_ids):
         if dep not in all_defined and dep not in let_map:
-            extra_lets.append(AnvilLetBinding(name=dep, expr=f"<(0)::logic[64]> /* undefined: {dep} */"))
+            undef_type = (signal_width_map or {}).get(dep, "logic[64]")
+            extra_lets.append(AnvilLetBinding(name=dep, expr=f"<(0)::{undef_type}> /* undefined: {dep} */"))
             all_defined.add(dep)
 
     return other_stmts_before + final_lets + extra_lets + other_stmts_after
@@ -2472,7 +2489,8 @@ def _postprocess_ir(ir: 'AnvilIR'):
 
     new_bodies = []
     for loop_body in ir.loop_bodies:
-        new_bodies.append(_postprocess_loop_body(loop_body, reg_names, ep_msg_names))
+        new_bodies.append(_postprocess_loop_body(loop_body, reg_names, ep_msg_names,
+                                                  signal_width_map=ir.signal_width_map))
     ir.loop_bodies = new_bodies
 
 
