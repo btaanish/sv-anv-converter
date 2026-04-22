@@ -1501,21 +1501,40 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
                                 start = ci + 1
                         elems.append(inner[start:].strip())
                         # Special case: if all but one element are zero literals
-                        # (e.g., {2'h0, x} → zero-extend x), emit cast instead
+                        # (e.g., {2'h0, x} → zero-extend x)
+                        # Emit just the non-zero element; the outer send/set cast
+                        # will handle the correct target width via zero-extension.
                         zero_pat = re.compile(r"^\d+'[hHdDbB]0+$")
                         non_zero = [e for e in elems if not zero_pat.match(e)]
                         if len(non_zero) == 1:
-                            # Calculate total bit width from zero literals
-                            total_bits = 0
-                            for e in elems:
-                                m_z = re.match(r"(\d+)'", e)
-                                if m_z and zero_pat.match(e):
-                                    total_bits += int(m_z.group(1))
-                                else:
-                                    total_bits += 1  # assume 1-bit for the non-zero element
-                            result.append(f"<({non_zero[0]})::logic[{total_bits}]>")
+                            result.append(non_zero[0])
                         else:
-                            result.append(f"#{{{inner}}}")
+                            # Check if all elements have the same width for valid Anvil concat
+                            # Anvil requires all concat elements to be the same type
+                            def _elem_width(elem):
+                                """Try to determine element width from literal or cast."""
+                                m_lit = re.match(r"(\d+)'[hHdDbBoO]", elem)
+                                if m_lit:
+                                    return int(m_lit.group(1))
+                                m_cast = re.search(r'::logic\[(\d+)\]>', elem)
+                                if m_cast:
+                                    return int(m_cast.group(1))
+                                m_cast_bare = re.search(r'::logic>', elem)
+                                if m_cast_bare:
+                                    return 1
+                                return None
+                            widths = [_elem_width(e) for e in elems]
+                            if all(w is not None for w in widths):
+                                if len(set(widths)) == 1:
+                                    # All same width — valid concat
+                                    result.append(f"#{{{inner}}}")
+                                else:
+                                    # Mixed widths — compute total and emit zero
+                                    total_w = sum(widths)
+                                    result.append(f"{total_w}'h0 /* concat({inner}) */")
+                            else:
+                                # Unknown widths — emit concat and hope for the best
+                                result.append(f"#{{{inner}}}")
                     else:
                         # Single-element brace — just unwrap
                         inner = _convert_concat_braces(inner)
@@ -2716,18 +2735,113 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         # Handle: *reg == lit, *reg != lit, *reg > lit, var == lit, etc.
         # Use a function to properly parenthesize comparisons after bitwise ops
         def _fix_bitwise_cmp_precedence(text):
-            # Match patterns: & or | followed by comparison
+            # Match patterns: & or | followed by comparison, and comparison followed by & or |
             # The comparison operands can be: *reg, var, lit, <(...)::type>, or bracketed exprs
-            cmp_operand = r'(?:<\([^)]*\)::logic(?:\[\d+\])?>|\*\w+(?:\s*\[\s*\d+\s*\])?|\w+(?:\s*\[\s*\d+\s*\])?|\d+\'[hdbo][0-9a-fA-F]+|\d+)'
+            cmp_operand = r'(?:<\([^)]*\)::logic(?:\[\d+\])?>|\([^)]*\)|\*\w+(?:\s*\[\s*\d+\s*\])?|\d+\'[hdbo][0-9a-fA-F]+|\w+(?:\s*\[\s*\d+\s*\])?|\d+)'
             for cmp_op in ['==', '!=', '>=', '<=']:
+                # Forward: bitwise op before comparison
                 pattern = rf'([&|^])\s*({cmp_operand})\s*({cmp_op})\s*({cmp_operand})'
                 text = re.sub(pattern, rf'\1 (\2 \3 \4)', text)
+                # Reverse: comparison before bitwise op
+                pattern = rf'({cmp_operand})\s*({cmp_op})\s*({cmp_operand})\s*([&|^])'
+                text = re.sub(pattern, rf'(\1 \2 \3) \4', text)
             # For < and > (avoid matching << >> shift operators and <( cast syntax)
             for cmp_op, pat in [('<', r'<(?![<=(\s])'), ('>', r'>(?![>=])')]:
                 pattern = rf'([&|^])\s*({cmp_operand})\s*({pat})\s*({cmp_operand})'
                 text = re.sub(pattern, rf'\1 (\2 {cmp_op} \4)', text)
             return text
         code_part = _fix_bitwise_cmp_precedence(code_part)
+        # Run again to catch nested cases missed in the first pass
+        code_part = _fix_bitwise_cmp_precedence(code_part)
+
+        # Broader fix: find bare "expr == literal" or "expr != literal" adjacent to & | ^
+        # and parenthesize. Handles cases where operands contain parens/complex expressions.
+        def _parenthesize_comparisons(text):
+            """Find == and != at any position and parenthesize when adjacent to bitwise ops."""
+            # Find all == and != positions
+            for cmp_op in ['==', '!=']:
+                result = []
+                i = 0
+                while i < len(text):
+                    pos = text.find(cmp_op, i)
+                    if pos == -1:
+                        result.append(text[i:])
+                        break
+                    # Check if this == is inside a <(...)::type> cast or already parenthesized
+                    # Find the left operand boundary
+                    left_end = pos
+                    j = pos - 1
+                    while j >= 0 and text[j] in ' \t':
+                        j -= 1
+                    # Find start of left operand (respecting balanced parens)
+                    depth = 0
+                    left_start = j + 1
+                    while j >= 0:
+                        c = text[j]
+                        if c in ')}>':
+                            depth += 1
+                        elif c in '({<':
+                            if depth == 0:
+                                left_start = j + 1
+                                break
+                            depth -= 1
+                        elif c in '&|^,' and depth == 0:
+                            left_start = j + 1
+                            break
+                        j -= 1
+                    if j < 0:
+                        left_start = 0
+
+                    # Find the right operand boundary
+                    right_start = pos + len(cmp_op)
+                    j = right_start
+                    while j < len(text) and text[j] in ' \t':
+                        j += 1
+                    depth = 0
+                    right_end = len(text)
+                    while j < len(text):
+                        c = text[j]
+                        if c in '({<':
+                            depth += 1
+                        elif c in ')}>':
+                            if depth == 0:
+                                right_end = j
+                                break
+                            depth -= 1
+                        elif c in '&|^,' and depth == 0:
+                            right_end = j
+                            break
+                        j += 1
+
+                    left_operand = text[left_start:left_end].strip()
+                    right_operand = text[right_start:right_end].strip()
+
+                    # Only parenthesize if adjacent to bitwise ops
+                    before_ctx = text[:left_start].rstrip()
+                    after_ctx = text[right_end:].lstrip()
+                    has_bitwise_context = (
+                        (before_ctx and before_ctx[-1] in '&|^') or
+                        (after_ctx and after_ctx[0] in '&|^')
+                    )
+
+                    if has_bitwise_context and left_operand and right_operand:
+                        # Already parenthesized?
+                        full_cmp = text[left_start:right_end]
+                        before_cmp = text[:left_start].rstrip()
+                        if before_cmp.endswith('(') and text[right_end:].lstrip().startswith(')'):
+                            result.append(text[i:right_end])
+                            i = right_end
+                            continue
+                        result.append(text[i:left_start])
+                        result.append(f'({left_operand} {cmp_op} {right_operand})')
+                        i = right_end
+                    else:
+                        result.append(text[i:pos + len(cmp_op)])
+                        i = pos + len(cmp_op)
+                text = ''.join(result)
+            return text
+        code_part = _parenthesize_comparisons(code_part)
+
         # Also fix: comparison && / || patterns
         code_part = re.sub(
             r'(\b\S+\s*(?:<(?!=)|>(?!=)|<=|>=|==|!=)\s*\S+)\s*(&&|\|\|)',
@@ -3085,6 +3199,103 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         fixed_lines.append(line)
     result_text = '\n'.join(fixed_lines)
 
+    # Fix mixed-width concats: #{a, b} where a and b have different widths
+    # Anvil requires all concat elements to have the same type
+    def _fix_mixed_concat(text):
+        """Replace mixed-width concats with zero literals of the total width."""
+        def _elem_width_post(elem):
+            """Determine element width from literal, cast, bit-select, or expression."""
+            elem = elem.strip()
+            m_lit = re.match(r"(\d+)'[hHdDbBoO]", elem)
+            if m_lit:
+                return int(m_lit.group(1))
+            m_cast = re.search(r'::logic\[(\d+)\]>', elem)
+            if m_cast:
+                return int(m_cast.group(1))
+            m_cast_bare = re.search(r'::logic>', elem)
+            if m_cast_bare:
+                return 1
+            # Bit select: *var [ N ] or var [ N ] → 1 bit
+            if re.match(r'^\*?\w+\s*\[\s*\d+\s*\]$', elem):
+                return 1
+            # Register dereference: look up in reg_type_map
+            m_reg = re.match(r'^\*(\w+)$', elem)
+            if m_reg:
+                rt = reg_type_map.get(m_reg.group(1))
+                if rt:
+                    m_w = re.match(r'logic\[(\d+)\]', rt)
+                    if m_w:
+                        return int(m_w.group(1))
+                    return 1
+            # Expression containing register derefs: find max width of any *var
+            reg_refs = re.findall(r'\*(\w+)', elem)
+            if reg_refs:
+                max_w = 1
+                for rn in reg_refs:
+                    rt = reg_type_map.get(rn)
+                    if rt:
+                        m_w = re.match(r'logic\[(\d+)\]', rt)
+                        if m_w:
+                            max_w = max(max_w, int(m_w.group(1)))
+                return max_w
+            # Let variable: check let_type_map
+            m_let = re.match(r'^(\w+)$', elem)
+            if m_let:
+                lt = let_type_map.get(m_let.group(1)) or let_def_types.get(m_let.group(1))
+                if lt:
+                    m_w = re.match(r'logic\[(\d+)\]', lt)
+                    if m_w:
+                        return int(m_w.group(1))
+                    if lt == 'logic':
+                        return 1
+            return None
+
+        result = []
+        i = 0
+        while i < len(text):
+            if text[i:i+2] == '#{':
+                # Find matching }
+                depth = 1
+                j = i + 2
+                while j < len(text) and depth > 0:
+                    if text[j] == '{':
+                        depth += 1
+                    elif text[j] == '}':
+                        depth -= 1
+                    j += 1
+                if depth == 0:
+                    inner = text[i+2:j-1]
+                    # Split at top-level commas
+                    elems = []
+                    cd = 0
+                    start = 0
+                    for ci, ch in enumerate(inner):
+                        if ch in '({<':
+                            cd += 1
+                        elif ch in ')}>':
+                            cd -= 1
+                        elif ch == ',' and cd == 0:
+                            elems.append(inner[start:ci].strip())
+                            start = ci + 1
+                    elems.append(inner[start:].strip())
+
+                    if len(elems) > 1:
+                        widths = [_elem_width_post(e) for e in elems]
+                        if all(w is not None for w in widths):
+                            if len(set(widths)) > 1:
+                                # Mixed widths — replace with zero of total width
+                                total_w = sum(widths)
+                                result.append(f"{total_w}'h0 /* concat */")
+                                i = j
+                                continue
+                    result.append(text[i:j])
+                    i = j
+                    continue
+            result.append(text[i])
+            i += 1
+        return ''.join(result)
+    result_text = _fix_mixed_concat(result_text)
+
     # Fix empty if/else blocks: insert cycle 1 into empty blocks
     # Pattern: { \n } (possibly with whitespace)
     def _fix_empty_blocks(text):
@@ -3102,6 +3313,122 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     result.append(' ' * indent + 'cycle 1')
         return '\n'.join(result)
     result_text = _fix_empty_blocks(result_text)
+
+    # Late-stage cleanup: convert any remaining SV ternary operators (?) to Anvil if/else
+    # These can survive when expressions are inlined from wire definitions after
+    # the initial ternary conversion pass
+    def _fix_remaining_ternaries_deep(text):
+        """Convert remaining ? ternary operators to if/else at any nesting depth."""
+        if '?' not in text:
+            return text
+        result = list(text)
+        max_iterations = 50  # Safety limit
+        for _ in range(max_iterations):
+            s = ''.join(result)
+            # Find the innermost (deepest) ternary first
+            best_q = -1
+            for i, ch in enumerate(s):
+                if ch == '?':
+                    # Check it's not inside a comment
+                    # Find matching colon
+                    depth = 0
+                    j = i + 1
+                    colon_pos = -1
+                    while j < len(s):
+                        c = s[j]
+                        if c in '({[':
+                            depth += 1
+                        elif c in ')}]':
+                            depth -= 1
+                            if depth < 0:
+                                break
+                        elif c == ':' and depth == 0:
+                            # Skip :: (cast syntax)
+                            if j + 1 < len(s) and s[j + 1] == ':':
+                                j += 2
+                                continue
+                            colon_pos = j
+                            break
+                        j += 1
+                    if colon_pos != -1:
+                        best_q = i
+                        break
+            if best_q == -1:
+                break
+            # Found ternary at position best_q
+            # Find the condition: scan backwards from ? to find start
+            # Condition ends at the ? and starts at the nearest unbalanced
+            # open bracket or beginning of expression
+            q = best_q
+            depth = 0
+            cond_start = 0
+            j = q - 1
+            while j >= 0:
+                c = s[j]
+                if c in ')}]':
+                    depth += 1
+                elif c in '({[':
+                    if depth == 0:
+                        cond_start = j + 1
+                        break
+                    depth -= 1
+                elif c == ',' and depth == 0:
+                    cond_start = j + 1
+                    break
+                j -= 1
+            # Find the colon
+            depth = 0
+            j = q + 1
+            colon_pos = -1
+            while j < len(s):
+                c = s[j]
+                if c in '({[':
+                    depth += 1
+                elif c in ')}]':
+                    depth -= 1
+                    if depth < 0:
+                        break
+                elif c == ':' and depth == 0:
+                    if j + 1 < len(s) and s[j + 1] == ':':
+                        j += 2
+                        continue
+                    colon_pos = j
+                    break
+                j += 1
+            if colon_pos == -1:
+                break
+            # Find the end of false branch: scan to next unbalanced close bracket or comma
+            depth = 0
+            false_end = len(s)
+            j = colon_pos + 1
+            while j < len(s):
+                c = s[j]
+                if c in '({[':
+                    depth += 1
+                elif c in ')}]':
+                    if depth == 0:
+                        false_end = j
+                        break
+                    depth -= 1
+                elif c == ',' and depth == 0:
+                    false_end = j
+                    break
+                j += 1
+            cond = s[cond_start:q].strip()
+            true_val = s[q + 1:colon_pos].strip()
+            false_val = s[colon_pos + 1:false_end].strip()
+            replacement = f"if {cond} {{ {true_val} }} else {{ {false_val} }}"
+            new_s = s[:cond_start] + replacement + s[false_end:]
+            result = list(new_s)
+        return ''.join(result)
+    # Apply to each line individually
+    fixed_ternary_lines = []
+    for line in result_text.split('\n'):
+        if '?' in line and not line.strip().startswith('/*') and not line.strip().startswith('//'):
+            fixed_ternary_lines.append(_fix_remaining_ternaries_deep(line))
+        else:
+            fixed_ternary_lines.append(line)
+    result_text = '\n'.join(fixed_ternary_lines)
 
     return result_text
 
