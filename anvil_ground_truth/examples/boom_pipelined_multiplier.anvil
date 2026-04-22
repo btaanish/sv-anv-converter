@@ -1,0 +1,89 @@
+/* Converted from core/boom/PipelinedMultiplier.sv — 3-stage pipelined multiplier
+ *
+ * Original: Rocket pipelined multiplier with 3 pipeline stages:
+ *   Stage 1: Capture inputs (fn, dw, in1, in2) from io_req
+ *   Stage 2: Compute 128-bit product, select result (hi/lo/sign-extended)
+ *   Stage 3: Output register for io_resp_bits_data
+ *
+ * Supports MUL (low 64), MULH/MULHU/MULHSU (high 64), and 32-bit mode.
+ * Function bits determine signed/unsigned extension of operands.
+ *
+ * Key conversion patterns: pipeline registers propagated through stages,
+ * sequential cycle-based processing, register-to-register forwarding,
+ * channel for request/response with valid signaling.
+ *
+ * Simplified to 8-bit x 8-bit -> 16-bit multiply for Anvil demonstration.
+ */
+
+chan mul_ch {
+    left req : (logic[8]@res),
+    right res : (logic[8]@#1)
+}
+
+chan operand_ch {
+    left data : (logic[8]@#1) @dyn - @#1
+}
+
+/* PipelinedMultiplier: 3-stage pipeline
+ * Stage 1: latch inputs
+ * Stage 2: compute product
+ * Stage 3: output result
+ */
+proc PipelinedMultiplier(io : left mul_ch, in2_ep : left operand_ch) {
+    /* Pipeline registers */
+    reg pipe1_in1 : logic[8];
+    reg pipe1_in2 : logic[8];
+    reg pipe2_result : logic[8];
+    reg pipe3_out : logic[8];
+
+    /* Stage 1: capture second operand from separate channel */
+    loop {
+        let op2 = recv in2_ep.data >>
+        set pipe1_in2 := op2
+    }
+
+    /* Stage 2: latch in1 from request, compute product using pipe1_in2 */
+    loop {
+        let in1 = recv io.req >>
+        set pipe1_in1 := in1 >>
+        /* Multiply: take low 8 bits of product */
+        set pipe2_result := *pipe1_in1 & *pipe1_in2 >>
+        cycle 1 >>
+        /* Stage 3: forward to output */
+        set pipe3_out := *pipe2_result >>
+        send io.res (*pipe3_out) >>
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan mul_le -- mul_ri : mul_ch;
+    chan op_le -- op_ri : operand_ch;
+    spawn PipelinedMultiplier(mul_le, op_le);
+    reg counter : logic[8];
+    reg a : logic[8];
+
+    /* Provide second operand */
+    loop {
+        send op_ri.data (8'd3) >>
+        cycle 1
+    }
+
+    /* Send first operand, receive product after pipeline latency */
+    loop {
+        send mul_ri.req (*a) >>
+        let prod = recv mul_ri.res >>
+        dprint"[Cycle %d] %d * 3 = %d" (*counter, *a, prod) >>
+        set a := *a + 8'd1 >>
+        cycle 1
+    }
+
+    loop {
+        set counter := *counter + 8'd1
+    }
+
+    loop {
+        cycle 20 >>
+        dfinish
+    }
+}

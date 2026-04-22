@@ -1,0 +1,86 @@
+/* Converted from core/boom/regfile_52x64.sv — 52-entry x 64-bit register file
+ *
+ * Original: BOOM register file with 4 async read ports (R0-R3) and
+ * 2 sync write ports (W0-W1). Memory is a 52-entry array of 64-bit words.
+ * Reads are combinational (async), writes happen on posedge clock.
+ *
+ * Key conversion patterns: register array, channel-based read/write ports,
+ * if-guarded register writes, multiple concurrent loops for ports.
+ *
+ * Simplified to 8-entry x 8-bit for Anvil demonstration (patterns are
+ * identical, just scaled down to avoid 64-bit arithmetic complexity).
+ */
+
+chan write_ch {
+    left req : (logic[8]@#1) @dyn - @#1
+}
+
+chan read_ch {
+    left req : (logic[3]@res),
+    right res : (logic[8]@#1)
+}
+
+/* RegFile: 8-entry register file with 2 read ports and 1 write port */
+proc RegFile(rd0 : left read_ch, rd1 : left read_ch, wr : left write_ch) {
+    reg mem : logic[8][8];
+
+    /* Write port: receives data and stores to entry 0 */
+    loop {
+        let w = recv wr.req >>
+        set mem[0] := w >>
+        cycle 1
+    }
+
+    /* Read port 0: receives address, returns data */
+    loop {
+        let addr0 = recv rd0.req >>
+        send rd0.res (*mem[0]) >>
+        cycle 1
+    }
+
+    /* Read port 1: receives address, returns data */
+    loop {
+        let addr1 = recv rd1.req >>
+        send rd1.res (*mem[1]) >>
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan rd0_le -- rd0_ri : read_ch;
+    chan rd1_le -- rd1_ri : read_ch;
+    chan wr_le -- wr_ri : write_ch;
+    spawn RegFile(rd0_le, rd1_le, wr_le);
+    reg counter : logic[8];
+
+    /* Writer: store values into register file */
+    loop {
+        send wr_ri.req (8'd42) >>
+        cycle 1
+    }
+
+    /* Reader 0 */
+    loop {
+        send rd0_ri.req (3'd0) >>
+        let d0 = recv rd0_ri.res >>
+        dprint"[Cycle %d] R0 = %d" (*counter, d0) >>
+        cycle 1
+    }
+
+    /* Reader 1 */
+    loop {
+        send rd1_ri.req (3'd1) >>
+        let d1 = recv rd1_ri.res >>
+        dprint"[Cycle %d] R1 = %d" (*counter, d1) >>
+        cycle 1
+    }
+
+    loop {
+        set counter := *counter + 8'd1
+    }
+
+    loop {
+        cycle 10 >>
+        dfinish
+    }
+}

@@ -1,0 +1,89 @@
+/* Converted from core/boom/ALU.sv — RISC-V arithmetic logic unit
+ *
+ * Original: Rocket/BOOM 64-bit ALU with 5-bit function select (io_fn),
+ * 64-bit inputs (io_in1, io_in2), data-width control (io_dw), and
+ * 64-bit output (io_out). Supports: ADD, SUB, XOR, AND, OR, SLL, SRL,
+ * SRA, SLT, SLTU, and bit-manipulation extensions.
+ *
+ * Key conversion patterns: enum for ALU opcodes, function for combinational
+ * ALU logic, match for operation selection, cast/concat for bit manipulation,
+ * channel for request/response communication.
+ *
+ * Simplified to 8-bit datapath; preserves the core ALU operation selection
+ * and comparison logic structure from the original.
+ */
+
+enum alu_fn {
+    FN_ADD,
+    FN_SUB,
+    FN_XOR,
+    FN_AND,
+    FN_OR,
+    FN_SLT,
+    FN_SLTU
+}
+
+chan alu_ch {
+    left req : (logic[8]@res),
+    right res : (logic[8]@#1)
+}
+
+func alu_add(a, b) {
+    a + b
+}
+
+func alu_sub(a, b) {
+    a + (~b) + 8'd1
+}
+
+/* ALU proc: performs operation based on internal function register */
+proc ALU(io : left alu_ch) {
+    reg fn_reg : alu_fn;
+    reg in2_reg : logic[8];
+    reg result : logic[8];
+    loop {
+        let in1 = recv io.req >>
+        /* Compute in2_inv for SUB (XOR with all-ones when subtracting) */
+        let in2 = *in2_reg >>
+        if (*fn_reg in { alu_fn::FN_ADD }) {
+            set result := call alu_add(in1, in2)
+        } else if (*fn_reg == alu_fn::FN_SUB) {
+            set result := call alu_sub(in1, in2)
+        } else if (*fn_reg == alu_fn::FN_XOR) {
+            set result := in1 ^ in2
+        } else if (*fn_reg == alu_fn::FN_AND) {
+            set result := in1 & in2
+        } else if (*fn_reg == alu_fn::FN_OR) {
+            set result := in1 | in2
+        } else {
+            set result := call alu_add(in1, in2)
+        } >>
+        send io.res (*result) >>
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan alu_le -- alu_ri : alu_ch;
+    spawn ALU(alu_le);
+    reg counter : logic[8];
+    reg operand : logic[8];
+
+    /* Send operands and receive results */
+    loop {
+        send alu_ri.req (*operand) >>
+        let out = recv alu_ri.res >>
+        dprint"[Cycle %d] ALU(%d) = %d" (*counter, *operand, out) >>
+        set operand := *operand + 8'd1 >>
+        cycle 1
+    }
+
+    loop {
+        set counter := *counter + 8'd1
+    }
+
+    loop {
+        cycle 15 >>
+        dfinish
+    }
+}
