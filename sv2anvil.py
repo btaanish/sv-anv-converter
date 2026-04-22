@@ -1684,6 +1684,11 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     # Remove ' that aren't part of sized literals (N'bXX, N'hXX, etc.)
     e = re.sub(r"(?<![0-9])'(?![bdhoBDHO0-9])", "", e)
 
+    # Sanitize Anvil reserved words that commonly appear as SV variable names
+    # Only rename words that are clearly used as variables, not as Anvil syntax
+    for kw in ('set', 'cycle', 'chan', 'proc', 'sync', 'ready'):
+        e = re.sub(rf'\b{kw}\b(?!_m)', kw + '_m', e)
+
     return e
 
 
@@ -3123,8 +3128,9 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         # Pattern: operand < operand or operand > operand (not already parenthesized)
         def _paren_lt_gt(text):
             """Add parentheses around bare < and > comparisons."""
-            # Match operands: *var, var, var[N], <(...)::type>
-            operand = r'(?:<\([^)]*\)::logic(?:\[\d+\])?>|\*?\w+(?:\s*\[\s*\d+\s*\])?)'
+            # Match operands: *var, var, var[N], <(...)::type>, sized literals
+            # IMPORTANT: sized literals (N'hXX) must come before bare \w+ to prevent splitting
+            operand = r'(?:<\([^)]*\)::logic(?:\[\d+\])?>|\d+\'[hdbo][0-9a-fA-F]+|\*?\w+(?:\s*\[\s*\d+\s*\])?)'
             # Handle < (not <<, <=, <()
             text = re.sub(
                 rf'({operand})\s+(<)\s+({operand})',
