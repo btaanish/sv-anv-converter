@@ -2774,6 +2774,7 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     while j >= 0 and text[j] in ' \t':
                         j -= 1
                     # Find start of left operand (respecting balanced parens)
+                    # Don't cross statement boundaries (let, set, send, := , =)
                     depth = 0
                     left_start = j + 1
                     while j >= 0:
@@ -2786,6 +2787,10 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                                 break
                             depth -= 1
                         elif c in '&|^,' and depth == 0:
+                            left_start = j + 1
+                            break
+                        elif c == '=' and depth == 0:
+                            # Stop at = or := (let/set binding)
                             left_start = j + 1
                             break
                         j -= 1
@@ -3064,6 +3069,52 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             num = m.group(3)        # bare number
             return f"::{cast_type}> {op} <({num})::{cast_type}>"
         code_part = re.sub(r'::(logic\[\d+\])>\s*(\+|-)\s*(\d+)(?![\d\'bdhoBDHO])', _fix_cast_arith, code_part)
+
+        # Fix shift operations: cast shift amount to match shifted value's type
+        # In Anvil, both operands of << must have the same type
+        def _fix_shift_types(m):
+            lhs = m.group(1)  # value being shifted
+            op = m.group(2)   # << or >>
+            rhs = m.group(3)  # shift amount
+            # Determine left operand's type
+            lhs_type = None
+            # Check if lhs is a register deref
+            m_reg = re.match(r'^\*(\w+)$', lhs.strip())
+            if m_reg:
+                lhs_type = reg_type_map.get(m_reg.group(1))
+            # Check if lhs is a sized literal
+            m_lit = re.match(r"^(\d+)'[hdbo]", lhs.strip())
+            if m_lit:
+                lhs_type = f"logic[{m_lit.group(1)}]"
+            # Check if lhs is a cast
+            m_cast = re.search(r'::logic(\[\d+\])?\s*>$', lhs.strip())
+            if m_cast:
+                lhs_type = f"logic{m_cast.group(1) or ''}"
+            if lhs_type and lhs_type != "logic":
+                # Cast the shift amount to match
+                rhs_stripped = rhs.strip()
+                if not rhs_stripped.startswith('<('):
+                    return f"{lhs} {op} <({rhs_stripped})::{lhs_type}>"
+            return m.group(0)
+        code_part = re.sub(r'(\S+)\s*(<<|>>)\s*(\S+)', _fix_shift_types, code_part)
+
+        # Parenthesize bare < and > comparisons — Anvil requires (a < b) not a < b
+        # Must avoid matching <<, >>, <=, >=, <( (cast syntax), :: > (end of cast)
+        # Pattern: operand < operand or operand > operand (not already parenthesized)
+        def _paren_lt_gt(text):
+            """Add parentheses around bare < and > comparisons."""
+            # Match operands: *var, var, var[N], <(...)::type>
+            operand = r'(?:<\([^)]*\)::logic(?:\[\d+\])?>|\*?\w+(?:\s*\[\s*\d+\s*\])?)'
+            # Handle < (not <<, <=, <()
+            text = re.sub(
+                rf'({operand})\s+(<)\s+({operand})',
+                r'(\1 \2 \3)', text)
+            # Handle > (not >>, >=, ::type>)
+            text = re.sub(
+                rf'({operand})\s+(>)\s+({operand})',
+                r'(\1 \2 \3)', text)
+            return text
+        code_part = _paren_lt_gt(code_part)
 
         # Evaluate constant comparisons: number == 1'b0 → 1'b0/1'b1
         # These arise from parameter substitution (e.g., DEPTH=8 → 8 == 0)
