@@ -72,22 +72,30 @@ Follow this template:
 // Parameters — adapt manually:
 // param WIDTH = 32
 
+// Channel class definitions for each port group
+chan input_ch {
+    left data : (logic[32]@#1) @#1 - @#1
+}
+chan output_ch {
+    left data : (logic[32]@#1) @#1 - @#1
+}
+
 proc <module_name> (
-    <endpoint_list>
+    // Endpoints reference channel classes, not bare types
+    in_port : left input_ch,
+    out_port : right output_ch
 ) {
-    // Register declarations
-    reg <name> : <type>;
+    // Register declarations (no parens around type)
+    reg <name> : logic[32];
 
-    // Combinational logic
-    let <name> = <expr>;
-
-    // Sequential logic
+    // Sequential logic with combinational let bindings inside loop
     loop {
-        set <name> := <expr>;
+        let <name> = <expr> >>
+        set <name> := <expr>
     }
 
-    // Sub-module instantiations
-    spawn <module> (<endpoints>);
+    // Sub-module instantiations (positional args only)
+    // spawn <module>(<endpoints>);
 }
 ```
 
@@ -108,18 +116,18 @@ These are the same rules that `sv2anvil.py` implements, for manual application:
 
 | SV Direction | Anvil Endpoint | Rationale |
 |-------------|----------------|-----------|
-| `input` | `right` | Data flows into the process |
-| `output` | `left` | Data flows out of the process |
-| `inout` | Split into `left` + `right` | Bidirectional requires two endpoints |
+| `input` | `left <chan_class>` | Data flows in; must define a `chan` class first |
+| `output` | `right <chan_class>` | Data flows out; must define a `chan` class first |
+| `inout` | Split into `left` + `right` | Bidirectional requires two endpoints with channel classes |
 
 ### Width Conversion
 
-| SV Width | Anvil Type |
-|----------|-----------|
-| `logic` (no range) | `logic` |
-| `logic [N-1:0]` | `(logic[N])` |
-| `logic [7:0]` | `(logic[8])` |
-| `logic [MSB:LSB]` | `(logic[MSB - LSB + 1])` |
+| SV Width | Anvil Type (for `reg`) | Notes |
+|----------|-----------|-------|
+| `logic` (no range) | `logic` | Single bit |
+| `logic [N-1:0]` | `logic[N]` | No parens — `(logic[N])` creates a Tuple |
+| `logic [7:0]` | `logic[8]` | No parens around type |
+| `logic [MSB:LSB]` | `logic[MSB - LSB + 1]` | No parens around type |
 
 ### Clk/Rst Removal
 
@@ -131,8 +139,8 @@ Also remove any connections to these signals in sub-module instantiations.
 
 | SV | Anvil | Context |
 |----|-------|---------|
-| `assign x = expr;` | `let x = expr;` | Continuous combinational |
-| `x = expr;` (in `always_comb`) | `let x = expr;` | Blocking combinational |
+| `assign x = expr;` | `let x = expr >>` | Combinational; `let` must be inside `loop` |
+| `x = expr;` (in `always_comb`) | `let x = expr >>` | Blocking combinational; inside `loop` |
 | `x <= expr;` (in `always_ff`) | `set x := expr;` | Non-blocking sequential |
 
 ### Control Flow
@@ -141,7 +149,7 @@ Also remove any connections to these signals in sub-module instantiations.
 |----|-------|
 | `if (cond) ... else ...` | `if cond { ... } else { ... }` |
 | `a ? b : c` | `if a { b } else { c }` |
-| `case (sel) ... endcase` | `match sel { ... _ => (), }` |
+| `case (sel) ... endcase` | `match sel { ... _ => () }` (no trailing comma) |
 | `for (genvar i=0; i<N; i++)` | `generate (i : 0, N, 1) { }` |
 
 ### Miscellaneous

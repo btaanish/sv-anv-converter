@@ -40,24 +40,30 @@ Follow this order:
 // 1. Parameter comments (manual adaptation needed)
 // 2. Import comments (SV packages → manual adaptation)
 
+// 3. Channel class definitions for each port group
+chan port_a_ch {
+    left data : (logic[32]@#1) @#1 - @#1
+}
+chan port_b_ch {
+    left data : (logic[32]@#1) @#1 - @#1
+}
+
 proc module_name (
-    // 3. Endpoint list (no clk/rst)
-    port_a : right (logic[WIDTH]),
-    port_b : left (logic[WIDTH])
+    // 4. Endpoint list (no clk/rst) — reference channel classes, not bare types
+    port_a : left port_a_ch,
+    port_b : right port_b_ch
 ) {
-    // 4. Register declarations (from always_ff signals)
-    reg state : (logic[4]);
+    // 5. Register declarations (from always_ff signals)
+    reg state : logic[4];
 
-    // 5. Combinational logic (let bindings from assign/always_comb)
-    let sum = a + b;
-
-    // 6. Sequential logic (loop + set from always_ff)
+    // 6. Sequential logic with combinational let bindings inside loop
     loop {
-        set state := next_state;
+        let sum = *state + 4'd1 >>
+        set state := sum
     }
 
-    // 7. Sub-module instantiations (spawn)
-    spawn sub_module (endpoint_args);
+    // 7. Sub-module instantiations (spawn with positional args)
+    // spawn sub_module(endpoint_args);
 }
 ```
 
@@ -78,19 +84,19 @@ proc module_name (
 | SystemVerilog | Anvil | Notes |
 |---------------|-------|-------|
 | `module name (...);` | `proc name (...) { }` | Ports become endpoints |
-| `input logic [N:0] x` | `x : right (logic[N+1])` | Width = MSB - LSB + 1 |
-| `output logic [N:0] y` | `y : left (logic[N+1])` | Width = MSB - LSB + 1 |
+| `input logic [N:0] x` | `x : left x_ch` (define `chan x_ch`) | Width = MSB - LSB + 1; needs channel class |
+| `output logic [N:0] y` | `y : right y_ch` (define `chan y_ch`) | Width = MSB - LSB + 1; needs channel class |
 | `input logic clk_i` | *(removed)* | Implicit in Anvil |
 | `input logic rst_ni` | *(removed)* | Implicit in Anvil |
-| `logic [N:0] sig;` | `reg sig : (logic[N+1]);` | If written in `always_ff` |
-| `logic [N:0] sig;` | `let sig = ...;` | If written in `always_comb`/`assign` |
-| `assign y = a + b;` | `let y = a + b;` | Combinational |
-| `always_comb begin ... end` | `let x = ...;` (chain) | Convert to let-bindings |
+| `logic [N:0] sig;` | `reg sig : logic[N+1];` | If written in `always_ff`; no parens around type |
+| `logic [N:0] sig;` | `let sig = ... >>` | If written in `always_comb`/`assign`; must be inside `loop` |
+| `assign y = a + b;` | `let y = a + b >>` | Combinational; `let` must be inside `loop` |
+| `always_comb begin ... end` | `let x = ... >>` (chain) | Convert to let-bindings inside `loop` |
 | `always_ff @(posedge clk)` | `loop { set x := ...; }` | Register write, 1-cycle delay |
 | `x <= expr;` | `set x := expr;` | Non-blocking → set |
 | `x = expr;` (in comb) | `let x = expr;` | Blocking → let |
 | `a ? b : c` | `if a { b } else { c }` | Ternary → if-else |
-| `case (sel) ... endcase` | `match sel { ... _ => (), }` | Must have `_ =>` default |
+| `case (sel) ... endcase` | `match sel { ... _ => () }` | Must have `_ =>` default; no trailing comma |
 | `{a, b, c}` | `#{ a, b, c }` | Concatenation |
 | `module_name #(.P(V)) inst (.port(sig));` | `spawn module_name (sig)` | Instantiation |
 | `generate for (genvar i=0; ...)` | `generate (i : 0, N, 1) { }` | Parallel unroll |
@@ -115,12 +121,14 @@ end
 
 **Anvil:**
 ```
-reg counter_q : (logic[32]);
-
-loop {
-    set counter_q := counter_d;
+proc Top() {
+    reg counter_q : logic[32];
+    // Reset is implicit — the Anvil compiler initializes registers
+    loop {
+        let counter_d = *counter_q + 32'd1 >>
+        set counter_q := counter_d
+    }
 }
-// Reset is implicit — the Anvil compiler initializes registers
 ```
 
 ### Pattern 2: Combinational MUX via Case
@@ -139,12 +147,21 @@ end
 
 **Anvil:**
 ```
-let result = match sel {
-    2'b00 => a,
-    2'b01 => b,
-    2'b10 => c,
-    _ => 1'b0,
-};
+proc Top() {
+    reg sel : logic[2];
+    reg a : logic[8];
+    reg b : logic[8];
+    reg c : logic[8];
+    loop {
+        let result = match *sel {
+            2'b00 => *a,
+            2'b01 => *b,
+            2'b10 => *c,
+            _ => 8'b0
+        } >>
+        cycle 1
+    }
+}
 ```
 
 ### Pattern 3: Parameterized Bit Reversal (Generate)
@@ -160,8 +177,15 @@ endgenerate
 
 **Anvil:**
 ```
-generate (k : 0, WIDTH, 1) {
-    let reversed[k] = original[WIDTH - 1 - k];
+type byte = (logic[8]);
+proc Top() {
+    reg mem : byte[4];
+    loop {
+        generate (i : 0, 3, 1) {
+            set mem[i] := <(i)::logic[8]>
+        } >>
+        cycle 1
+    }
 }
 ```
 
@@ -181,11 +205,32 @@ alu #(
 
 **Anvil:**
 ```
-// clk_i and rst_ni connections removed — implicit in Anvil
-spawn alu /* CVA6Cfg */ (
-    fu_data_i = fu_data,
-    result_o = alu_result,
-);
+chan alu_ch {
+    left req : (logic[8]@res),
+    right res : (logic[8]@#1)
+}
+proc ALU(io : left alu_ch) {
+    reg result : logic[8];
+    loop {
+        let data = recv io.req >>
+        set result := data >>
+        send io.res (*result) >>
+        cycle 1
+    }
+}
+proc Top() {
+    // clk_i and rst_ni connections removed — implicit in Anvil
+    // spawn uses positional arguments only (no name = value syntax)
+    chan alu_le -- alu_ri : alu_ch;
+    spawn ALU(alu_le);
+    reg operand : logic[8];
+    loop {
+        send alu_ri.req (*operand) >>
+        let out = recv alu_ri.res >>
+        set operand := *operand + 8'd1 >>
+        cycle 1
+    }
+}
 ```
 
 ### Pattern 5: FSM (State Machine)
@@ -212,20 +257,22 @@ always_ff @(posedge clk_i)
 **Anvil:**
 ```
 enum state_t { IDLE, LOAD, EXEC, DONE }
-reg state_q : state_t;
-
-// Combinational next-state logic
-let state_d = match *state_q {
-    state_t::IDLE => if start { state_t::LOAD } else { *state_q },
-    state_t::LOAD => state_t::EXEC,
-    state_t::EXEC => if done { state_t::DONE } else { *state_q },
-    state_t::DONE => state_t::IDLE,
-    _ => *state_q,
-};
-
-// Sequential update
-loop {
-    set state_q := state_d;
+proc Top() {
+    reg state_q : state_t;
+    reg start : logic;
+    reg done_flag : logic;
+    loop {
+        // Combinational next-state logic (let must be inside loop)
+        let state_d = match *state_q {
+            state_t::IDLE => if *start == 1'b1 { state_t::LOAD } else { *state_q },
+            state_t::LOAD => state_t::EXEC,
+            state_t::EXEC => if *done_flag == 1'b1 { state_t::DONE } else { *state_q },
+            state_t::DONE => state_t::IDLE,
+            _ => *state_q
+        } >>
+        // Sequential update
+        set state_q := state_d
+    }
 }
 ```
 
@@ -238,8 +285,8 @@ loop {
 3. **Missing `_ =>` default in match.** Anvil requires an exhaustive default arm in every `match`.
 4. **Reading registers without `*` dereference.** In Anvil, `reg` values are read with `*reg_name`, not bare `reg_name`.
 5. **Confusing `>>` (sequential) with `;` (parallel).** In Anvil, `a; b` runs both in parallel; `a >> b` runs sequentially. This is the opposite of most programming languages.
-6. **Width mismatches.** SV `[31:0]` is 32 bits → Anvil `(logic[32])`. Off-by-one errors are common when computing `MSB - LSB + 1`.
-7. **Parametric widths.** SV `[CVA6Cfg.XLEN-1:0]` → Anvil `(logic[CVA6Cfg.XLEN])`. Simplify `MSB-1:0` to just `MSB`.
+6. **Width mismatches.** SV `[31:0]` is 32 bits → Anvil `logic[32]`. Off-by-one errors are common when computing `MSB - LSB + 1`. Do not use parentheses around `reg` types — `(logic[32])` creates a Tuple type.
+7. **Parametric widths.** SV `[CVA6Cfg.XLEN-1:0]` → Anvil `logic[CVA6Cfg.XLEN]`. Simplify `MSB-1:0` to just `MSB`.
 8. **`$signed`/`$unsigned` casts.** Strip these; Anvil's type system handles signedness differently.
 9. **Multi-driver signals.** SV allows a signal to be assigned in multiple `always` blocks. Anvil does not — consolidate into a single expression.
 10. **Timing of `set`.** `set` takes effect **next cycle**, not immediately. If SV code reads a value after a non-blocking assignment in the same cycle, the Anvil equivalent must use a separate `let` for the combinational value.
