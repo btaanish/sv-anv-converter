@@ -4,7 +4,7 @@
 **Date:** 2026-04-22
 **Issue:** tbc-db #3
 **Files Audited:** `agent_spec.md`, `worker_skill.md`, `sv2anvil.py`
-**Reference Material:** `anvil_ground_truth/` (9 compiler-validated examples + report.md)
+**Reference Material:** `anvil_ground_truth/` (9 compiler-validated examples + report.md), Anvil official docs (languageReference.html, communication.html)
 
 ---
 
@@ -19,6 +19,16 @@ All three files contain significant Anvil correctness issues. The most critical:
 ---
 
 ## 1. agent_spec.md — Detailed Findings
+
+### Confirmed by Official Docs
+
+The Anvil Language Reference (docs.anvil.kisp-lab.org/languageReference.html) confirms:
+- Proc endpoints MUST reference channel classes: `proc-endpoint ::= identifier ":" ( "left" | "right" ) identifier`
+- `let` is an EXPRESSION form (`let x = e1 >> e2`), not a statement — it cannot appear at proc body level
+- `spawn` takes positional endpoint args only: `"spawn" identifier "(" identifier ("," identifier)* ")"`
+- `reg` syntax: `reg $identifier : $data-type-expression;` — bare `logic[8]` is the correct type, `(logic[8])` wraps in a tuple
+- Sync pattern `@dyn - @dyn` is valid but "equivalent to writing no synchronization pattern" — weakest contract
+- Valid sync patterns: `@dyn - @#1`, `@#1 - @dyn`, `@#1 - @#1`, `@#msg + n - @#msg + n`, `@dyn - @#msg`, `@#msg - @dyn`, `@dyn - @dyn`
 
 ### CRITICAL: Bare-Type Endpoints (Lines 43-47)
 
