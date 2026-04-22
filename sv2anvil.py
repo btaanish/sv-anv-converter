@@ -2153,7 +2153,7 @@ def codegen(ir: AnvilIR) -> str:
         lines.append(f"chan {chan.name} {{")
         for i, msg in enumerate(chan.messages):
             comma = "," if i < len(chan.messages) - 1 else ""
-            lines.append(f"    left {msg.name} : ({msg.anvil_type}@#1) @dyn - @dyn{comma}")
+            lines.append(f"    left {msg.name} : ({msg.anvil_type}@#1) @dyn - @#1{comma}")
         lines.append("}")
         lines.append("")
 
@@ -2611,32 +2611,8 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     # Keep already-typed zeros only if no better type was inferred
                     new_lines.append(line)
                 else:
-                    # Replace expression with typed zero + comment
-                    # Determine suffix (>> or nothing)
-                    suffix = ""
-                    expr_clean = expr_rest.rstrip()
-                    if expr_clean.endswith('>>'):
-                        suffix = " >>"
-                        expr_clean = expr_clean[:-2].rstrip()
-
-                    # Choose type: use inferred type if available, then flag names, then default
-                    inferred_type = let_type_map.get(name)
-                    if inferred_type:
-                        type_str = inferred_type
-                    else:
-                        flag_names = {'adder_op_b_negate', 'shift_left', 'shift_arithmetic',
-                                      'sgn', 'less', 'adder_z_flag'}
-                        if name in flag_names:
-                            type_str = 'logic'
-                        else:
-                            type_str = f"logic[{default_width}]"
-
-                    # Clean expr for comment (remove nested comments)
-                    expr_comment = re.sub(r'/\*.*?\*/', '', expr_clean).strip()
-                    if len(expr_comment) > 80:
-                        expr_comment = expr_comment[:77] + '...'
-
-                    new_lines.append(f"{indent}let {_sanitize_ident(name)} = <(0)::{type_str}> /* {expr_comment} */{suffix}")
+                    # Preserve original expression (sanitize identifier only)
+                    new_lines.append(f"{indent}let {_sanitize_ident(name)} = {expr_rest}")
             else:
                 new_lines.append(line)
         elif stripped.startswith('set ') and ' := ' in stripped:
@@ -2747,15 +2723,11 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             return ''.join(result)
         code_part = _fix_shift_casts_in_line(code_part)
 
-        # Fix single-index array access: *reg [ N - 1 ] → <(*reg)::logic>
-        # This pattern appears when SV has reg_q[STAGES-1] for single-bit extraction
-        def _fix_single_index(m):
-            var = m.group(1)
-            return f"<({var})::logic>"
-        code_part = re.sub(r'(\*\w+)\s*\[\s*[^:\]]+\s*\]', _fix_single_index, code_part)
+        # Preserve array indexing syntax: *reg[N] stays as-is
+        # (Previously this was incorrectly replacing *reg[N] with <(*reg)::logic>)
 
-        # Fix struct field access on registers: *reg.field → *reg
-        code_part = re.sub(r'(\*\w+)\.\w+', r'\1', code_part)
+        # Preserve struct field access: *reg.field stays as-is
+        # (Previously this was incorrectly stripping field access to just *reg)
 
         # Fix comparisons: *reg == 1'b0 → *reg == <(1'b0)::type>
         # Only for register dereferences with known types
@@ -2819,8 +2791,19 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             return m.group(0)
         code_part = re.sub(r'(\*\w+)\s*([&|^])\s*(\d+\'[hdbo][0-9a-fA-F]+)', _fix_bitwise_sized_lit, code_part)
 
-        # Fix $clog2 that wasn't evaluated: $clog2 ( N ) → 1
-        code_part = re.sub(r'\$clog2\s*\(\s*[^)]+\s*\)', "1", code_part)
+        # Evaluate $clog2 when argument is a numeric literal, otherwise leave as-is
+        def _fix_clog2(m):
+            arg = m.group(1).strip()
+            try:
+                n = int(arg)
+                if n <= 0:
+                    return "0"
+                import math
+                return str(math.ceil(math.log2(n)) if n > 1 else 1)
+            except ValueError:
+                # Non-numeric argument — leave symbolic reference
+                return m.group(0)
+        code_part = re.sub(r'\$clog2\s*\(\s*([^)]+)\s*\)', _fix_clog2, code_part)
 
         # Fix bare integer in arithmetic with registers: *reg + 1, *reg - 1
         # Cast the integer to match the register's type
