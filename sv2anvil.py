@@ -1417,7 +1417,7 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
                 if k < len(text) and text[k] == '{':
                     count_str = text[j:k].strip()
                     # count_str should be non-empty and look like a number/expression
-                    if count_str and not count_str.startswith(','):
+                    if count_str and not count_str.startswith(',') and ',' not in count_str and '?' not in count_str:
                         # Find the matching '}' for the inner brace
                         inner_start = k
                         depth = 1
@@ -1518,6 +1518,11 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
                                 m_cast_bare = re.search(r'::logic>', elem)
                                 if m_cast_bare:
                                     return 1
+                                # Try scanning for any sized literal inside the expression
+                                # (e.g., in ternary branches like "cond ? 5'h5 : 5'h0")
+                                m_inner = re.search(r"(\d+)'[hHdDbBoO]", elem)
+                                if m_inner:
+                                    return int(m_inner.group(1))
                                 return None
                             zero_widths = []
                             for e in elems:
@@ -1529,9 +1534,13 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
                             if zero_widths and nz_width is not None:
                                 total_w = sum(zero_widths) + nz_width
                                 result.append(f"<({non_zero[0]})::logic[{total_w}]>")
+                            elif zero_widths:
+                                # Can't determine non-zero element width — assume 1-bit
+                                # (common case: boolean flags zero-extended)
+                                total_w = sum(zero_widths) + 1
+                                result.append(f"<({non_zero[0]})::logic[{total_w}]>")
                             else:
-                                # Can't determine non-zero element width — emit as-is
-                                # (the outer send/set cast will handle width)
+                                # Can't determine any widths — emit as-is
                                 result.append(non_zero[0])
                         else:
                             # Check if all elements have the same width for valid Anvil concat
@@ -1788,7 +1797,9 @@ def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
     rest = expr[q_pos + 1:]
 
     # Find the colon at depth 0, skipping :: (Anvil cast syntax)
+    # Track nested ternary ?:'s so we match the RIGHT colon for the outer ?
     depth = 0
+    ternary_depth = 0
     i = 0
     while i < len(rest):
         ch = rest[i]
@@ -1796,12 +1807,17 @@ def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
             depth += 1
         elif ch in ")]}":
             depth -= 1
+        elif ch == "?" and depth == 0:
+            ternary_depth += 1
         elif ch == ":" and depth == 0:
             # Skip :: (part of Anvil cast <(expr)::type>)
             if i + 1 < len(rest) and rest[i + 1] == ":":
                 i += 2
                 continue
-            return (cond, rest[:i], rest[i + 1:])
+            if ternary_depth > 0:
+                ternary_depth -= 1
+            else:
+                return (cond, rest[:i], rest[i + 1:])
         i += 1
 
     return None
@@ -3415,6 +3431,129 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         return ''.join(result)
     result_text = _fix_mixed_concat(result_text)
 
+    # Late-stage: convert remaining SV replications {N{expr}} to <(expr)::logic[N]>
+    # These can survive when replications are inside concats that were processed after
+    # the initial replication pass.
+    def _fix_remaining_replications(text):
+        result = []
+        i = 0
+        while i < len(text):
+            if text[i] == '{' and (i == 0 or text[i - 1] != '#'):
+                # Try to parse as replication: {count{expr}}
+                j = i + 1
+                while j < len(text) and text[j] == ' ':
+                    j += 1
+                k = j
+                while k < len(text) and text[k] not in '{}':
+                    k += 1
+                if k < len(text) and text[k] == '{':
+                    count_str = text[j:k].strip()
+                    # count must be a numeric expression (digits, operators, var names)
+                    # not '#' or other special characters
+                    if count_str and ',' not in count_str and '?' not in count_str and re.match(r'^[\w\s\+\-\*\/\(\)]+$', count_str):
+                        # Find matching '}' for inner brace
+                        depth = 1
+                        m = k + 1
+                        while m < len(text) and depth > 0:
+                            if text[m] == '{':
+                                depth += 1
+                            elif text[m] == '}':
+                                depth -= 1
+                            m += 1
+                        if depth == 0:
+                            inner_expr = text[k + 1:m - 1].strip()
+                            # Expect closing '}' for outer brace
+                            n = m
+                            while n < len(text) and text[n] == ' ':
+                                n += 1
+                            if n < len(text) and text[n] == '}':
+                                try:
+                                    count_val = str(int(eval(count_str, {"__builtins__": {}})))
+                                except Exception:
+                                    count_val = None
+                                if count_val is not None:
+                                    result.append(f"<({inner_expr})::logic[{count_val}]>")
+                                    i = n + 1
+                                    continue
+                result.append(text[i])
+                i += 1
+            else:
+                result.append(text[i])
+                i += 1
+        return ''.join(result)
+
+    fixed_rep_lines = []
+    for line in result_text.split('\n'):
+        if '{' in line and not line.strip().startswith('/*'):
+            fixed_rep_lines.append(_fix_remaining_replications(line))
+        else:
+            fixed_rep_lines.append(line)
+    result_text = '\n'.join(fixed_rep_lines)
+
+    # Late-stage: convert any remaining bare { expr , expr } to #{ expr , expr }
+    # These can survive when concat braces are introduced by wire inlining or
+    # when the initial concat pass couldn't process them (e.g. nested ternaries inside).
+    def _fix_remaining_bare_concats(text):
+        """Convert remaining SV-style {a, b} concatenations to Anvil #{a, b}."""
+        result = []
+        i = 0
+        while i < len(text):
+            if text[i] == '{' and (i == 0 or text[i - 1] != '#'):
+                # Check this isn't an if/else block brace (preceded by keyword or >>)
+                # Look at what precedes this brace
+                pre = text[:i].rstrip()
+                # Block braces follow: if/else/match keywords, or >> let-chain
+                is_block = False
+                if pre.endswith(('else', '>>')):
+                    is_block = True
+                elif re.search(r'\)\s*$', pre) or re.search(r'[}\]]\s*$', pre):
+                    # Could be if (cond) { or match { — check for if/else/match keyword
+                    # before the paren
+                    pass
+                # Also check: if the char after { is a newline, it's a block brace
+                if not is_block and i + 1 < len(text) and text[i + 1] == '\n':
+                    is_block = True
+                # Find matching close brace
+                if not is_block:
+                    depth = 1
+                    j = i + 1
+                    while j < len(text) and depth > 0:
+                        if text[j] == '{':
+                            depth += 1
+                        elif text[j] == '}':
+                            depth -= 1
+                        j += 1
+                    if depth == 0:
+                        inner = text[i + 1:j - 1]
+                        # Check for top-level comma (indicates concat)
+                        cd = 0
+                        has_comma = False
+                        for ch in inner:
+                            if ch in '({[':
+                                cd += 1
+                            elif ch in ')}]':
+                                cd -= 1
+                            elif ch == ',' and cd == 0:
+                                has_comma = True
+                                break
+                        if has_comma:
+                            result.append('#{')
+                            result.append(inner)
+                            result.append('}')
+                            i = j
+                            continue
+            result.append(text[i])
+            i += 1
+        return ''.join(result)
+
+    fixed_concat_lines = []
+    for line in result_text.split('\n'):
+        if '{' in line and ',' in line and not line.strip().startswith('/*') and not line.strip().startswith('//'):
+            fixed_concat_lines.append(_fix_remaining_bare_concats(line))
+        else:
+            fixed_concat_lines.append(line)
+    result_text = '\n'.join(fixed_concat_lines)
+
     # Fix empty if/else blocks: insert cycle 1 into empty blocks
     # Pattern: { \n } (possibly with whitespace)
     def _fix_empty_blocks(text):
@@ -3495,8 +3634,9 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     cond_start = j + 1
                     break
                 j -= 1
-            # Find the colon
+            # Find the colon (tracking nested ?:'s)
             depth = 0
+            ternary_depth = 0
             j = q + 1
             colon_pos = -1
             while j < len(s):
@@ -3507,12 +3647,17 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     depth -= 1
                     if depth < 0:
                         break
+                elif c == '?' and depth == 0:
+                    ternary_depth += 1
                 elif c == ':' and depth == 0:
                     if j + 1 < len(s) and s[j + 1] == ':':
                         j += 2
                         continue
-                    colon_pos = j
-                    break
+                    if ternary_depth > 0:
+                        ternary_depth -= 1
+                    else:
+                        colon_pos = j
+                        break
                 j += 1
             if colon_pos == -1:
                 break
