@@ -647,9 +647,11 @@ class Parser:
                 if fb:
                     ff_blocks.append(fb)
             elif self.at_any(TokenKind.LOGIC, TokenKind.WIRE, TokenKind.REG):
-                sig = self._parse_signal()
+                sig, inline_asgn = self._parse_signal()
                 if sig:
                     signals.extend(sig)
+                if inline_asgn:
+                    assigns.extend(inline_asgn)
             elif self.at(TokenKind.LOCALPARAM):
                 # Treat as parameter
                 self.advance()
@@ -827,8 +829,9 @@ class Parser:
                     depth -= 1
                 self.advance()
 
-    def _parse_signal(self) -> List[SVSignal]:
-        """Parse a signal declaration: logic/wire/reg [#delay] [msb:lsb] name, name2;"""
+    def _parse_signal(self):
+        """Parse a signal declaration: logic/wire/reg [#delay] [msb:lsb] name [= expr], name2;
+        Returns (List[SVSignal], List[SVAssign]) — inline assigns from 'wire x = expr;'."""
         self.advance()  # consume logic/wire/reg
         # Skip optional delay: #number or #number.number
         if self.at(TokenKind.HASH):
@@ -851,6 +854,7 @@ class Parser:
             self._skip_brackets()
 
         signals = []
+        inline_assigns = []
         while True:
             if self.at(TokenKind.IDENT):
                 name = self.advance().value
@@ -858,12 +862,17 @@ class Parser:
                 while self.at(TokenKind.LBRACKET):
                     self._skip_brackets()
                 signals.append(SVSignal(name=name, width_msb=width_msb, width_lsb=width_lsb))
+                # Check for inline initializer: wire [N:0] name = expr;
+                if self.at(TokenKind.EQUALS):
+                    self.advance()  # consume '='
+                    rhs = self.collect_expr_until(TokenKind.SEMI, TokenKind.COMMA).strip()
+                    inline_assigns.append(SVAssign(lhs=name, rhs=rhs))
             if self.at(TokenKind.COMMA):
                 self.advance()
             else:
                 break
         self.match(TokenKind.SEMI)
-        return signals
+        return (signals, inline_assigns)
 
     def _parse_assign(self) -> Optional[SVAssign]:
         """Parse: assign [#delay] lhs = rhs;"""
@@ -1471,21 +1480,37 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
                             has_top_comma = True
                             break
                     if has_top_comma:
-                        # Multi-element concat — use first element as placeholder
-                        # Full #{...} not used because Anvil requires same-type elements
+                        # Multi-element concat — emit Anvil #{a, b} syntax
                         inner = _convert_concat_braces(inner)
-                        # Extract first element (before first top-level comma)
-                        first_elem = inner
+                        # Split elements at top-level commas
+                        elems = []
                         cd = 0
+                        start = 0
                         for ci, ch in enumerate(inner):
                             if ch in '({<':
                                 cd += 1
                             elif ch in ')}>':
                                 cd -= 1
                             elif ch == ',' and cd == 0:
-                                first_elem = inner[:ci].strip()
-                                break
-                        result.append(first_elem)
+                                elems.append(inner[start:ci].strip())
+                                start = ci + 1
+                        elems.append(inner[start:].strip())
+                        # Special case: if all but one element are zero literals
+                        # (e.g., {2'h0, x} → zero-extend x), emit cast instead
+                        zero_pat = re.compile(r"^\d+'[hHdDbB]0+$")
+                        non_zero = [e for e in elems if not zero_pat.match(e)]
+                        if len(non_zero) == 1:
+                            # Calculate total bit width from zero literals
+                            total_bits = 0
+                            for e in elems:
+                                m_z = re.match(r"(\d+)'", e)
+                                if m_z and zero_pat.match(e):
+                                    total_bits += int(m_z.group(1))
+                                else:
+                                    total_bits += 1  # assume 1-bit for the non-zero element
+                            result.append(f"<({non_zero[0]})::logic[{total_bits}]>")
+                        else:
+                            result.append(f"#{{{inner}}}")
                     else:
                         # Single-element brace — just unwrap
                         inner = _convert_concat_braces(inner)
@@ -2153,7 +2178,7 @@ def codegen(ir: AnvilIR) -> str:
         lines.append(f"chan {chan.name} {{")
         for i, msg in enumerate(chan.messages):
             comma = "," if i < len(chan.messages) - 1 else ""
-            lines.append(f"    left {msg.name} : ({msg.anvil_type}@#1) @dyn - @#1{comma}")
+            lines.append(f"    left {msg.name} : ({msg.anvil_type}@#1) @#1{comma}")
         lines.append("}")
         lines.append("")
 
@@ -2644,14 +2669,10 @@ def convert_sv_to_anvil(sv_source: str) -> str:
     # Final cleanup: remove bare tick chars outside of comments and sized literals
     cleaned_lines = []
     for line in result.split('\n'):
-        # Split off inline comment
-        comment_start = line.find('/*')
-        if comment_start >= 0:
-            code_part = line[:comment_start]
-            comment_part = line[comment_start:]
-        else:
-            code_part = line
-            comment_part = ""
+        # Remove all inline /* ... */ comments from the line
+        # (they're just annotations and can interfere with code processing)
+        code_part = re.sub(r'/\*.*?\*/', '', line)
+        comment_part = ""
         # Remove bare ticks from code (not part of sized literals)
         code_part = re.sub(r"(?<![0-9])'(?![bdhoBDHO0-9])", "", code_part)
 
@@ -2662,18 +2683,72 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             r'(\b\S+\s*(?:<(?!=)|>(?!=)|<=|>=|==|!=)\s*\S+)\s*(&&|\|\|)',
             r'(\1) \2', code_part)
 
-        # Fix SV reduction operators: ( | *var ) or ( & *var ) → <(*var)::logic>
-        # These are unary reduction ops (OR-reduce, AND-reduce) → 1-bit result
-        code_part = re.sub(r'\(\s*[|&]\s*(\*\w+)\s*\)', r'<(\1)::logic>', code_part)
-        # Also handle without parens: | *var as unary reduction (only when not preceded by an operand)
-        # Must not match binary OR (e.g., "exp_empty | *reg")
-        def _reduce_or_replace(m):
-            # If preceded by a word char or closing paren/bracket/angle, it's binary OR — leave it
-            before = code_part[:m.start()].rstrip()
-            if before and (before[-1].isalnum() or before[-1] in ')]}>' or before[-1] == '_'):
-                return m.group(0)  # binary OR, don't replace
-            return f' <({m.group(1)})::logic>'
-        code_part = re.sub(r'\|\s*(\*\w+)\b(?!\s*[|])', _reduce_or_replace, code_part)
+        # Fix SV reduction operators (unary & and |) → cast to logic
+        # Step 1: Inside existing casts: <( & expr )::type> → <(expr)::logic>
+        code_part = re.sub(r'<\(\s*[|&]\s+([^)]+?)\s*\)::\w+(?:\[\d+\])?>',
+                           r'<(\1)::logic>', code_part)
+        # Step 2: Scan for unary [|&] and convert to <(operand)::logic>
+        # Handles: [|&] #{...}, [|&] (expr), [|&] *var, [|&] var
+        def _fix_reduction_ops(text):
+            result = []
+            i = 0
+            while i < len(text):
+                if text[i] in '|&':
+                    # Check if this is unary (not preceded by an operand)
+                    before = ''.join(result).rstrip()
+                    # After a comma, it's always unary (new element in concat/args)
+                    if before and before[-1] == ',':
+                        is_binary = False
+                    else:
+                        is_binary = before and (before[-1].isalnum() or before[-1] in ')]}>' or before[-1] == '_')
+                    if not is_binary:
+                        op_char = text[i]
+                        j = i + 1
+                        # Skip whitespace
+                        while j < len(text) and text[j] in ' \t':
+                            j += 1
+                        if j < len(text):
+                            operand = None
+                            end = j
+                            if text[j:j+2] == '#{':
+                                # Reduction of concat: [|&] #{...}
+                                depth = 1
+                                k = j + 2
+                                while k < len(text) and depth > 0:
+                                    if text[k] == '{': depth += 1
+                                    elif text[k] == '}': depth -= 1
+                                    k += 1
+                                if depth == 0:
+                                    operand = text[j:k]
+                                    end = k
+                            elif text[j] == '(':
+                                # Reduction of paren group: [|&] (expr)
+                                depth = 1
+                                k = j + 1
+                                while k < len(text) and depth > 0:
+                                    if text[k] == '(': depth += 1
+                                    elif text[k] == ')': depth -= 1
+                                    k += 1
+                                if depth == 0:
+                                    # Extract inner expr without parens
+                                    operand = text[j+1:k-1].strip()
+                                    end = k
+                            else:
+                                # Reduction of variable: [|&] *var or [|&] var
+                                m = re.match(r'(\*?\w+)', text[j:])
+                                if m:
+                                    operand = m.group(1)
+                                    end = j + m.end()
+                            if operand is not None:
+                                # Recursively process reduction ops in the operand
+                                operand = _fix_reduction_ops(operand)
+                                result.append(f'<({operand})::logic>')
+                                i = end
+                                continue
+                result.append(text[i])
+                i += 1
+            return ''.join(result)
+        code_part = _fix_reduction_ops(code_part)
 
         # Fix struct-like expressions in cast: <( field : value )::type> → <(0)::type>
         # Colons inside <(...)::type> that aren't part of :: indicate SV struct syntax
