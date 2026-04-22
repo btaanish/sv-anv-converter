@@ -219,10 +219,12 @@ def lex(source: str) -> List[Token]:
             i = j
             continue
 
-        # Sized literal: N'bXXX, N'dXXX, N'hXXX, N'oXXX
-        m = re.match(r"(\d+)'([bdho])([0-9a-fA-F_xXzZ]+)", source[i:])
+        # Sized literal: N'bXXX, N'dXXX, N'hXXX, N'oXXX (and signed: N'sb, N'sh, etc.)
+        m = re.match(r"(\d+)'s?([bdho])([0-9a-fA-F_xXzZ]+)", source[i:])
         if m:
-            tokens.append(Token(TokenKind.SIZED_LIT, m.group(0), line, col))
+            # Normalize signed to unsigned: N'shXXX → N'hXXX
+            norm_val = f"{m.group(1)}'{m.group(2)}{m.group(3)}"
+            tokens.append(Token(TokenKind.SIZED_LIT, norm_val, line, col))
             col += len(m.group(0))
             i += len(m.group(0))
             continue
@@ -2703,6 +2705,10 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         comment_part = ""
         # Remove bare ticks from code (not part of sized literals)
         code_part = re.sub(r"(?<![0-9])'(?![bdhoBDHO0-9])", "", code_part)
+
+        # Fix stray ] brackets after cast expressions (from SV array indexing on submodule outputs)
+        # Pattern: <(expr)::type> ] → <(expr)::type>
+        code_part = re.sub(r'(::logic(?:\[\d+\])?>)\s*\]', r'\1', code_part)
 
         # Fix operator precedence: add parens around comparisons before && / ||
         # In SV, < > <= >= == != bind tighter than && ||, but Anvil may differ
