@@ -35,12 +35,15 @@ You must understand:
 
 You must understand:
 - Processes (`proc`), endpoints (`left`/`right`), channel classes
-- Registers (`reg`, `set`, `*` dereference) — writes are 1-cycle delayed
-- Expressions: `let` bindings, `match`, `if/else`, `#{ }` concatenation
+- **Channel classes** (`chan`) — REQUIRED for all endpoints; bare types like `(logic[32])` are invalid as endpoint types
+- Registers (`reg`, `set`, `*` dereference) — writes are 1-cycle delayed; types use bare `logic[N]` (no parentheses)
+- Expressions: `let` bindings (must be inside `loop`), `match`, `if/else`, `#{ }` concatenation
+- **`send`/`recv`** — how data flows through channel endpoints (replaces SV port reads/writes)
 - Timing: `>>` (sequential wait), `;` (parallel join), `cycle N`
 - Threads: `loop { }` for continuous hardware behavior
-- Instantiation: `spawn` for sub-processes
-- Lifetimes: `@#1` (one cycle), `@dyn` (dynamic handshake)
+- Instantiation: `spawn` for sub-processes — positional endpoint args only (no named params)
+- Lifetimes: `@#1` (one cycle), `@res` (until response), `@dyn` (dynamic handshake)
+- Sync patterns: `@dyn - @#1`, `@dyn - @dyn`, `@#1 - @#1`, etc.
 - Implicit clock and reset — no explicit clk/rst ports
 
 ---
@@ -58,10 +61,16 @@ You must understand:
 
 ### Phase 2: Plan Anvil Structure
 
-1. Write the `proc` signature: name, endpoint list (skip clk/rst).
-2. Decide which signals are `reg` (written in `always_ff`) vs `let` (combinational).
-3. Plan the ordering of declarations and logic blocks.
-4. Identify any constructs that need manual handling (see "Unsupported Constructs" below).
+1. **Define channel classes** — this is the MOST IMPORTANT step:
+   - Group related SV inputs into an input channel class
+   - Group related SV outputs into an output channel class
+   - For request/response protocols (valid/ready), use a single channel with `@res` lifetime
+   - Choose sync patterns: `@dyn - @dyn` for permissive timing, `@dyn - @#1` for typical data
+   - Every endpoint MUST reference a channel class — bare types are a syntax error
+2. Write the `proc` signature: name, endpoint list (skip clk/rst). Each endpoint references a channel class with `left` or `right` direction.
+3. Decide which signals are `reg` (written in `always_ff`) vs `let` (combinational). Remember: `let` bindings must be inside `loop { }`.
+4. Plan `send`/`recv` operations for data I/O through channel endpoints.
+5. Identify any constructs that need manual handling (see "Unsupported Constructs" below).
 
 ### Phase 3: Write Anvil
 
@@ -72,29 +81,39 @@ Follow this template:
 // Parameters — adapt manually:
 // param WIDTH = 32
 
+// Channel class definitions (REQUIRED — define BEFORE the proc)
+chan input_ch {
+    left data : (logic[8]@#1) @dyn - @dyn
+}
+
+chan output_ch {
+    left result : (logic[8]@#1) @dyn - @dyn
+}
+
 proc <module_name> (
-    <endpoint_list>
+    in_ep : left input_ch,
+    out_ep : right output_ch
 ) {
-    // Register declarations
-    reg <name> : <type>;
+    // Register declarations (bare logic[N], no parentheses)
+    reg <name> : logic[8];
 
-    // Combinational logic
-    let <name> = <expr>;
-
-    // Sequential logic
+    // All logic inside loops — recv inputs, compute, send outputs
     loop {
-        set <name> := <expr>;
+        let <input> = recv in_ep.data >>
+        set <name> := <input> + 8'd1 >>
+        send out_ep.result (*<name>) >>
+        cycle 1
     }
 
-    // Sub-module instantiations
-    spawn <module> (<endpoints>);
+    // Sub-module instantiations (positional args only)
+    // spawn <module> (<endpoint>);
 }
 ```
 
 ### Phase 4: Verify
 
 1. Review against the quality checklist in `agent_spec.md`.
-2. Compile with the Anvil compiler.
+2. Compile with `anvil -just-check <file>`.
 3. Compare Anvil-generated SV output against the original SV for functional equivalence.
 4. Fix any discrepancies and re-verify.
 
@@ -104,22 +123,44 @@ proc <module_name> (
 
 These are the same rules that `sv2anvil.py` implements, for manual application:
 
-### Ports
+### Ports → Channel Classes + Endpoints
 
-| SV Direction | Anvil Endpoint | Rationale |
-|-------------|----------------|-----------|
-| `input` | `right` | Data flows into the process |
-| `output` | `left` | Data flows out of the process |
-| `inout` | Split into `left` + `right` | Bidirectional requires two endpoints |
+**Every SV port group must become a channel class.** You cannot use bare types as endpoint types.
+
+| SV Port Group | Anvil Channel + Endpoint | Example |
+|--------------|--------------------------|---------|
+| Input signals | `chan in_ch { left msg : (logic[N]@#1) @dyn - @dyn }` + `left` endpoint | Proc `recv`s data via `recv ep.msg` |
+| Output signals | `chan out_ch { left msg : (logic[N]@#1) @dyn - @dyn }` + `right` endpoint | Proc `send`s data via `send ep.msg (val)` |
+| Req/resp protocol | `chan io_ch { left req : (T@res), right res : (T@#1) }` + `left` endpoint | Proc `recv`s req, `send`s res |
+| `inout` | Split into separate input and output channels | Bidirectional requires two endpoints |
+
+### Direction Mapping (within channel context)
+
+| SV Direction | Channel Endpoint | Why | Data Flow |
+|-------------|-----------------|-----|-----------|
+| `input` | `left` endpoint on channel | Proc with `left` ep can `recv` left messages | `let x = recv ep.msg` |
+| `output` | `right` endpoint on channel | Proc with `right` ep can `send` left messages | `send ep.msg (val)` |
+| `inout` | Split into `left` + `right` on separate channels | Bidirectional requires two endpoints | Both `send` and `recv` |
+
+### Lifetime and Sync Pattern Guide
+
+| Use Case | Lifetime | Sync Pattern | Notes |
+|----------|----------|-------------|-------|
+| Simple data passing | `@#1` | `@dyn - @dyn` | Most permissive, good default |
+| Streaming data | `@#1` | `@dyn - @#1` | Receiver must consume within 1 cycle |
+| Request/response | `@res` (req), `@#1` (resp) | *(implicit)* | Request value lives until response arrives |
+| Handshake protocol | `@dyn` | `@dyn - @dyn` | Dynamic timing on both sides |
 
 ### Width Conversion
 
 | SV Width | Anvil Type |
 |----------|-----------|
 | `logic` (no range) | `logic` |
-| `logic [N-1:0]` | `(logic[N])` |
-| `logic [7:0]` | `(logic[8])` |
-| `logic [MSB:LSB]` | `(logic[MSB - LSB + 1])` |
+| `logic [N-1:0]` | `logic[N]` |
+| `logic [7:0]` | `logic[8]` |
+| `logic [MSB:LSB]` | `logic[MSB - LSB + 1]` |
+
+**Important:** Use bare `logic[N]` for register types (no parentheses). Parenthesized `(logic[N])` creates a Tuple type, causing type mismatch warnings.
 
 ### Clk/Rst Removal
 
@@ -131,9 +172,11 @@ Also remove any connections to these signals in sub-module instantiations.
 
 | SV | Anvil | Context |
 |----|-------|---------|
-| `assign x = expr;` | `let x = expr;` | Continuous combinational |
-| `x = expr;` (in `always_comb`) | `let x = expr;` | Blocking combinational |
+| `assign x = expr;` | `let x = expr;` | Combinational (must be inside `loop`) |
+| `x = expr;` (in `always_comb`) | `let x = expr;` | Blocking combinational (inside `loop`) |
 | `x <= expr;` (in `always_ff`) | `set x := expr;` | Non-blocking sequential |
+| Reading input port | `let x = recv ep.msg` | Input data via channel `recv` |
+| Driving output port | `send ep.msg (value)` | Output data via channel `send` |
 
 ### Control Flow
 
@@ -141,8 +184,8 @@ Also remove any connections to these signals in sub-module instantiations.
 |----|-------|
 | `if (cond) ... else ...` | `if cond { ... } else { ... }` |
 | `a ? b : c` | `if a { b } else { c }` |
-| `case (sel) ... endcase` | `match sel { ... _ => (), }` |
-| `for (genvar i=0; i<N; i++)` | `generate (i : 0, N, 1) { }` |
+| `case (sel) ... endcase` | `match sel { ... _ => () }` (no trailing comma on last arm) |
+| `for (genvar i=0; i<N; i++)` | `generate (i : 0, N-1, 1) { }` (range is inclusive) |
 
 ### Miscellaneous
 
@@ -150,7 +193,7 @@ Also remove any connections to these signals in sub-module instantiations.
 |----|-------|
 | `{a, b, c}` | `#{ a, b, c }` |
 | `$signed(x)` | `x` (strip) |
-| `module #(.P(V)) inst (.port(sig));` | `spawn module (sig);` |
+| `module #(.P(V)) inst (.port(sig));` | `spawn module (ep);` (positional args only) |
 | `typedef enum logic [1:0] { A, B }` | `enum name { A, B }` |
 | `typedef struct packed { ... }` | `struct name { ... }` |
 
@@ -162,10 +205,15 @@ Timing is the most nuanced part of SV-to-Anvil conversion. Refer to **`timing_ha
 
 - **Clock/reset are implicit** in Anvil — never declare them as endpoints.
 - **`set` is always 1-cycle delayed** — equivalent to SV non-blocking `<=` on posedge clk.
-- **`let` is combinational** — equivalent to SV `assign` or blocking `=` in `always_comb`.
+- **`let` is combinational** — equivalent to SV `assign` or blocking `=` in `always_comb`. Must be inside `loop { }`.
 - **`loop { }` models continuous hardware** — wraps sequential logic that runs every cycle.
 - **`>>` sequences operations across cycles** — use for multi-cycle behavior.
 - **Register reads use `*`** — `*counter` reads the current value; `set counter := *counter + 1` increments.
+- **Borrow checking** — values received from channels have limited lifetimes:
+  - `@#1` values must be used within 1 cycle (before any `set` or `cycle`)
+  - `@res` values live until the response message is sent
+  - Do not mutate borrowed registers between `send` and `recv`
+- **Every loop path must take ≥ 1 cycle** — add `cycle 1` or use `set` (which takes 1 cycle).
 
 ---
 
@@ -197,9 +245,10 @@ Use this format:
 [AgentName] Convert <module_name>.sv to Anvil
 
 - Converted N ports (removed clk/rst)
-- Converted M always_ff blocks to reg+set
-- Converted K always_comb blocks to let bindings
-- N spawn instantiations
+- Defined M channel classes with lifetimes/sync patterns
+- Converted K always_ff blocks to reg+set
+- Converted J always_comb blocks to let bindings inside loops
+- N spawn instantiations (positional args)
 - Flagged: <any unsupported constructs>
 ```
 
