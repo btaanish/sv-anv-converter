@@ -185,7 +185,7 @@ Auto-generated with some logic structure:
 - `cache_ctrl.anvil` (160 lines) — cache controller with state transitions
 - `axi_pkg.anvil` (120 lines, semi-manual) — correct type/enum definitions
 
-### compiles-correct (93 files) — Examples
+### compiles-correct (92 files) — Examples
 
 Hand-written with full logic:
 - `SyncSpRam.anvil` (57 lines) — working single-port RAM
