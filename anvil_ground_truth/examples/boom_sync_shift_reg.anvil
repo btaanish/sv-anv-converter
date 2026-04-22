@@ -1,0 +1,59 @@
+/* Converted from core/boom/AsyncResetSynchronizerPrimitiveShiftReg_d3_i0.sv
+ * — 3-stage synchronizer shift register
+ *
+ * Original: A depth-3 synchronizer used for clock domain crossing.
+ * Three flip-flops in series: io_d -> sync_2 -> sync_1 -> sync_0 -> io_q
+ * On each clock edge, each stage captures the value from the next stage.
+ * On reset, all stages clear to 0.
+ *
+ * Key conversion patterns: register chain for pipeline stages,
+ * sequential set statements for shift register behavior,
+ * channel for input/output sampling.
+ */
+
+chan sync_ch {
+    left din : (logic@dout),
+    right dout : (logic@#1)
+}
+
+/* SyncShiftReg: 3-stage synchronizer shift register
+ * Data propagates through 3 register stages with 3-cycle latency.
+ * Each cycle: sync_0 <= sync_1; sync_1 <= sync_2; sync_2 <= input
+ */
+proc SyncShiftReg(ep : left sync_ch) {
+    reg sync_0 : logic;
+    reg sync_1 : logic;
+    reg sync_2 : logic;
+    loop {
+        let d = recv ep.din >>
+        /* Shift chain: propagate values through pipeline */
+        set sync_0 := *sync_1;
+        set sync_1 := *sync_2;
+        set sync_2 := d >>
+        /* Output is the oldest sample (3 cycles delayed) */
+        send ep.dout (*sync_0) >>
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan ep_le -- ep_ri : sync_ch;
+    spawn SyncShiftReg(ep_le);
+    reg counter : logic[8];
+    reg input_val : logic;
+    loop {
+        send ep_ri.din (*input_val) >>
+        let q = recv ep_ri.dout >>
+        dprint"[Cycle %d] in=%d out=%d" (*counter, *input_val, q) >>
+        /* Toggle input every cycle to see propagation delay */
+        set input_val := ~(*input_val) >>
+        cycle 1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+    loop {
+        cycle 15 >>
+        dfinish
+    }
+}

@@ -1,0 +1,119 @@
+/* Converted from core/boom/JtagStateMachine.sv — JTAG TAP state machine
+ *
+ * Original: 16-state JTAG state machine driven by TMS input.
+ * States: TestLogicReset(0xF), RunTestIdle(0xC), SelectDRScan(0x7),
+ * CaptureDR(0x6), ShiftDR(0x2), Exit1DR(0x1), PauseDR(0x3),
+ * Exit2DR(0x0), UpdateDR(0x5), SelectIRScan(0x4), CaptureIR(0xE),
+ * ShiftIR(0xA), Exit1IR(0x9), PauseIR(0xB), Exit2IR(0x8), UpdateIR(0xD).
+ *
+ * Key conversion patterns: enum for states, match for transition table,
+ * register for current state, channel for TMS input / state output.
+ */
+
+enum jtag_state {
+    EXIT2_DR,
+    EXIT1_DR,
+    SHIFT_DR,
+    PAUSE_DR,
+    SELECT_IR_SCAN,
+    UPDATE_DR,
+    CAPTURE_DR,
+    SELECT_DR_SCAN,
+    EXIT2_IR,
+    EXIT1_IR,
+    SHIFT_IR,
+    PAUSE_IR,
+    RUN_TEST_IDLE,
+    UPDATE_IR,
+    CAPTURE_IR,
+    TEST_LOGIC_RESET
+}
+
+chan jtag_ch {
+    left tms : (logic@res),
+    right res : (logic[4]@#1)
+}
+
+func next_state(st, tms) {
+    match (st) {
+        jtag_state::TEST_LOGIC_RESET =>
+            if tms { jtag_state::TEST_LOGIC_RESET }
+            else { jtag_state::RUN_TEST_IDLE },
+        jtag_state::RUN_TEST_IDLE =>
+            if tms { jtag_state::SELECT_DR_SCAN }
+            else { jtag_state::RUN_TEST_IDLE },
+        jtag_state::SELECT_DR_SCAN =>
+            if tms { jtag_state::SELECT_IR_SCAN }
+            else { jtag_state::CAPTURE_DR },
+        jtag_state::CAPTURE_DR =>
+            if tms { jtag_state::EXIT1_DR }
+            else { jtag_state::SHIFT_DR },
+        jtag_state::SHIFT_DR =>
+            if tms { jtag_state::EXIT1_DR }
+            else { jtag_state::SHIFT_DR },
+        jtag_state::EXIT1_DR =>
+            if tms { jtag_state::UPDATE_DR }
+            else { jtag_state::PAUSE_DR },
+        jtag_state::PAUSE_DR =>
+            if tms { jtag_state::EXIT2_DR }
+            else { jtag_state::PAUSE_DR },
+        jtag_state::EXIT2_DR =>
+            if tms { jtag_state::UPDATE_DR }
+            else { jtag_state::SHIFT_DR },
+        jtag_state::UPDATE_DR =>
+            if tms { jtag_state::SELECT_DR_SCAN }
+            else { jtag_state::RUN_TEST_IDLE },
+        jtag_state::SELECT_IR_SCAN =>
+            if tms { jtag_state::TEST_LOGIC_RESET }
+            else { jtag_state::CAPTURE_IR },
+        jtag_state::CAPTURE_IR =>
+            if tms { jtag_state::EXIT1_IR }
+            else { jtag_state::SHIFT_IR },
+        jtag_state::SHIFT_IR =>
+            if tms { jtag_state::EXIT1_IR }
+            else { jtag_state::SHIFT_IR },
+        jtag_state::EXIT1_IR =>
+            if tms { jtag_state::UPDATE_IR }
+            else { jtag_state::PAUSE_IR },
+        jtag_state::PAUSE_IR =>
+            if tms { jtag_state::EXIT2_IR }
+            else { jtag_state::PAUSE_IR },
+        jtag_state::EXIT2_IR =>
+            if tms { jtag_state::UPDATE_IR }
+            else { jtag_state::SHIFT_IR },
+        _ =>
+            if tms { jtag_state::SELECT_DR_SCAN }
+            else { jtag_state::RUN_TEST_IDLE }
+    }
+}
+
+proc JtagStateMachine(ep : left jtag_ch) {
+    reg curr_state : jtag_state;
+    loop {
+        let tms_in = recv ep.tms >>
+        set curr_state := call next_state(*curr_state, tms_in) >>
+        send ep.res (4'd0) >>
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan ep_le -- ep_ri : jtag_ch;
+    spawn JtagStateMachine(ep_le);
+    reg counter : logic[8];
+    reg tms_val : logic;
+    loop {
+        send ep_ri.tms (*tms_val) >>
+        let st = recv ep_ri.res >>
+        dprint"[Cycle %d] state=%d" (*counter, st) >>
+        set tms_val := ~(*tms_val) >>
+        cycle 1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+    loop {
+        cycle 20 >>
+        dfinish
+    }
+}

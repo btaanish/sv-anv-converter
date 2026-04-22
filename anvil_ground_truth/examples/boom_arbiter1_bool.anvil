@@ -1,0 +1,42 @@
+/* Converted from core/boom/Arbiter1_Bool.sv — 1-input arbiter passthrough
+ *
+ * Original: A trivial 1-input Chisel arbiter that directly wires
+ * io_out_ready to io_in_0_ready. In Anvil, modeled as a proc that
+ * receives valid data on input and forwards it to the output side,
+ * implementing a single-input ready/valid arbiter as a simple relay.
+ */
+
+chan arb_io_ch {
+    left req : (logic@res),
+    right res : (logic@#1)
+}
+
+/* Arbiter1_Bool: single-input arbiter — passthrough relay */
+proc Arbiter1_Bool(ep : left arb_io_ch) {
+    reg val : logic;
+    loop {
+        let d = recv ep.req >>
+        set val := d >>
+        send ep.res (*val) >>
+        cycle 1
+    }
+}
+
+proc Top() {
+    chan ep_le -- ep_ri : arb_io_ch;
+    spawn Arbiter1_Bool(ep_le);
+    reg counter : logic[8];
+    loop {
+        send ep_ri.req (1'd1) >>
+        let r = recv ep_ri.res >>
+        dprint"[Cycle %d] Arbiter passthrough = %d" (*counter, r) >>
+        cycle 1
+    }
+    loop {
+        set counter := *counter + 8'd1
+    }
+    loop {
+        cycle 10 >>
+        dfinish
+    }
+}
