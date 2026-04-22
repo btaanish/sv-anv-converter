@@ -21,6 +21,9 @@ Ares's team achieved full compilation of all 43 CVA6 core modules. Independently
 ### 2026-04-19: M7 complete — 445/445 CVA6 files compile
 Full CVA6 conversion achieved in 7 cycles. Converter improved to handle 416/445 files automatically; 15 complex files (cache subsystem, MMU, frontend, testbench) hand-written by Dana and Leo. All 445 .anvil files verified passing `anvil -just-check`. CVA6 phase complete. Next challenge: Chisel-based repos (BOOM, Rocket) — no JVM in environment.
 
+### 2026-04-22: Human intervention — URGENT quality audit required
+Human flagged that agent_spec.md and sv2anvil.py contain wrong results that don't adhere to Anvil principles. Compilation pass != semantic correctness. Must audit and fix foundational tools before proceeding. M8 repurposed as quality audit milestone; BOOM work deferred.
+
 ## Milestones
 
 ### M1: Research & Foundation (budget: 4 impl cycles)
@@ -48,8 +51,22 @@ Full CVA6 conversion achieved in 7 cycles. Converter improved to handle 416/445 
 **Status:** COMPLETE ✓ (verified 2026-04-19)
 **Results:** All 445 CVA6 .anvil files pass `anvil -just-check`. Maya improved converter (190→416 auto-pass), Dana and Leo hand-wrote 15 complex files (cache subsystem, MMU, frontend).
 
-### M8: BOOM SV Generation & Batch Conversion (budget: 10 cycles)
-**Status:** NEXT
+### M8: Semantic Quality Audit & Fix Foundational Tools (budget: 8 cycles)
+**Status:** IN PROGRESS — human flagged urgent quality issues (2026-04-22)
+**Goal:** Before proceeding with BOOM/Rocket, fix the foundational tools (agent_spec.md, worker_skill.md, sv2anvil.py) to adhere to correct Anvil principles. Audit existing 445 CVA6 conversions for semantic correctness. The human flagged that "the agentic description and the sv2anvil converter python file currently contain some very wrong results that do not adhere to Anvil principles."
+**Key issues identified so far:**
+- Converted files compile but many are semantic stubs (e.g., decoder.anvil has [MANUAL-CLEANUP-NEEDED] tags, cva6_accel_first_pass_decoder ignores input)
+- All converted files use `@dyn - @dyn` sync patterns uniformly — likely not correct for all use cases
+- agent_spec.md code examples may not compile or may teach wrong patterns
+- sv2anvil.py generates channel-based Anvil that compiles but may not model original SV behavior
+**Acceptance criteria:**
+1. All code examples in agent_spec.md compile with `anvil -just-check`
+2. sv2anvil.py output produces semantically equivalent Anvil (not just compilable stubs)
+3. Audit report categorizing quality of all 445 converted files
+4. Fixed agent_spec.md and worker_skill.md reflecting correct Anvil idioms
+
+### M8-original: BOOM SV Generation & Batch Conversion (budget: 10 cycles)
+**Status:** BLOCKED by M8 quality audit
 **Goal:** Install JVM/SBT/Chisel toolchain, clone BOOM repo, generate SV from Chisel, run sv2anvil.py on generated SV, fix converter failures, achieve full compilation of all BOOM .anvil files.
 **Key risk:** No JVM available in environment — installation is prerequisite. If JVM install fails, explore pre-generated Verilog from Chipyard releases or BOOM CI artifacts.
 **Acceptance criteria:** All BOOM .anvil files pass `anvil -just-check` with exit code 0.
