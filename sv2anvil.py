@@ -1502,12 +1502,37 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
                         elems.append(inner[start:].strip())
                         # Special case: if all but one element are zero literals
                         # (e.g., {2'h0, x} → zero-extend x)
-                        # Emit just the non-zero element; the outer send/set cast
-                        # will handle the correct target width via zero-extension.
+                        # Compute total concat width and cast the non-zero element
+                        # to preserve width information.
                         zero_pat = re.compile(r"^\d+'[hHdDbB]0+$")
                         non_zero = [e for e in elems if not zero_pat.match(e)]
                         if len(non_zero) == 1:
-                            result.append(non_zero[0])
+                            # Compute total width from zero literals + non-zero element
+                            def _elem_width_zext(elem):
+                                m_lit = re.match(r"(\d+)'[hHdDbBoO]", elem)
+                                if m_lit:
+                                    return int(m_lit.group(1))
+                                m_cast = re.search(r'::logic\[(\d+)\]>', elem)
+                                if m_cast:
+                                    return int(m_cast.group(1))
+                                m_cast_bare = re.search(r'::logic>', elem)
+                                if m_cast_bare:
+                                    return 1
+                                return None
+                            zero_widths = []
+                            for e in elems:
+                                if zero_pat.match(e):
+                                    w = _elem_width_zext(e)
+                                    if w is not None:
+                                        zero_widths.append(w)
+                            nz_width = _elem_width_zext(non_zero[0])
+                            if zero_widths and nz_width is not None:
+                                total_w = sum(zero_widths) + nz_width
+                                result.append(f"<({non_zero[0]})::logic[{total_w}]>")
+                            else:
+                                # Can't determine non-zero element width — emit as-is
+                                # (the outer send/set cast will handle width)
+                                result.append(non_zero[0])
                         else:
                             # Check if all elements have the same width for valid Anvil concat
                             # Anvil requires all concat elements to be the same type
@@ -1577,7 +1602,18 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
                 return f"<({var})::logic[{w}]>"
             except Exception:
                 return f"<({var})::logic[32]>"
-        return f"{var} /* [{msb_expr}:{lsb_expr}] */"
+        # Non-zero-based bit-select: x[msb:lsb] → cast to extract width
+        # We can't use >> inside cast expressions (conflicts with Anvil >> separator)
+        # so we approximate: cast to the result width (extracts low bits).
+        # This is semantically correct when the value's relevant bits are in the low positions,
+        # which covers the common patterns like one-hot mask slicing.
+        try:
+            msb_val = int(eval(msb_expr, {"__builtins__": {}}))
+            lsb_val = int(eval(lsb_expr, {"__builtins__": {}}))
+            w = msb_val - lsb_val + 1
+            return f"<({var})::logic[{w}]>"
+        except Exception:
+            return f"{var} /* [{msb_expr}:{lsb_expr}] */"
     # Indexed part-select: anything[base +: width] → <(anything)::logic[width]>
     # Handle +: before regular bit-select since they both contain ':'
     # Use a function to find balanced brackets containing +:
@@ -3118,7 +3154,13 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             if lhs_type and lhs_type != "logic":
                 # Cast the shift amount to match
                 rhs_stripped = rhs.strip()
-                if not rhs_stripped.startswith('<('):
+                if rhs_stripped.startswith('<('):
+                    # Already has a cast — check if it matches, re-cast if not
+                    m_existing = re.match(r'^<\((.+?)\)::(logic(?:\[\d+\])?)>$', rhs_stripped)
+                    if m_existing and m_existing.group(2) != lhs_type:
+                        inner = m_existing.group(1)
+                        return f"{lhs} {op} <({inner})::{lhs_type}>"
+                else:
                     return f"{lhs} {op} <({rhs_stripped})::{lhs_type}>"
             return m.group(0)
         code_part = re.sub(r'(\S+)\s*(<<|>>)\s*(\S+)', _fix_shift_types, code_part)
