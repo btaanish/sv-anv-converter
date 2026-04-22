@@ -1303,6 +1303,8 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
     def _strip_lit_underscores(m):
         return m.group(0).replace('_', '')
     e = re.sub(r"\d+'[bdho][0-9a-fA-F_xXzZ]+", _strip_lit_underscores, e)
+    # Convert x/z (unknown/high-impedance) literals to zero: N'bx → N'h0, N'hx → N'h0
+    e = re.sub(r"(\d+)'[bBhHdDoO][xXzZ]+", r"\1'h0", e)
     # Unsized literals: 'bXXX → 1'bXXX, 'hXXX → 1'hXXX, 'dXXX → 1'dXXX, 'oXXX → 1'oXXX
     # Negative lookbehind prevents matching inside already-sized literals like 1'b0
     e = re.sub(r"(?<!\d)'([bdho])([0-9a-fA-F_xXzZ]+)", r"1'\1\2", e)
@@ -1671,9 +1673,10 @@ def _convert_all_ternaries(expr: str) -> str:
     parts = _split_ternary(expr)
     if parts:
         cond, t_val, f_val = parts
+        cond = _convert_all_ternaries(cond.strip())
         t_val = _convert_all_ternaries(t_val.strip())
         f_val = _convert_all_ternaries(f_val.strip())
-        return f"if {cond.strip()} {{ {t_val} }} else {{ {f_val} }}"
+        return f"if {cond} {{ {t_val} }} else {{ {f_val} }}"
     # Not at top level — scan for sub-expressions in parens that contain ?
     result = list(expr)
     i = 0
@@ -1721,15 +1724,22 @@ def _split_ternary(expr: str) -> Optional[Tuple[str, str, str]]:
     cond = expr[:q_pos]
     rest = expr[q_pos + 1:]
 
-    # Find the colon at depth 0
+    # Find the colon at depth 0, skipping :: (Anvil cast syntax)
     depth = 0
-    for i, ch in enumerate(rest):
+    i = 0
+    while i < len(rest):
+        ch = rest[i]
         if ch in "([{":
             depth += 1
         elif ch in ")]}":
             depth -= 1
         elif ch == ":" and depth == 0:
+            # Skip :: (part of Anvil cast <(expr)::type>)
+            if i + 1 < len(rest) and rest[i + 1] == ":":
+                i += 2
+                continue
             return (cond, rest[:i], rest[i + 1:])
+        i += 1
 
     return None
 
@@ -2891,7 +2901,7 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             if reg_t and reg_t != "logic":
                 return f"{var_name} {op} <({num})::{reg_t}>"
             return m.group(0)
-        code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\d+)(?!\')', _fix_arith_int, code_part)
+        code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\d+)(?![\d\'bdhoBDHO])', _fix_arith_int, code_part)
 
         # Fix bare integer after cast value: <(N)::type> - 1 → <(N)::type> - <(1)::type>
         def _fix_cast_arith(m):
@@ -2899,7 +2909,7 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             op = m.group(2)         # + or -
             num = m.group(3)        # bare number
             return f"::{cast_type}> {op} <({num})::{cast_type}>"
-        code_part = re.sub(r'::(logic\[\d+\])>\s*(\+|-)\s*(\d+)(?!\')', _fix_cast_arith, code_part)
+        code_part = re.sub(r'::(logic\[\d+\])>\s*(\+|-)\s*(\d+)(?![\d\'bdhoBDHO])', _fix_cast_arith, code_part)
 
         # Evaluate constant comparisons: number == 1'b0 → 1'b0/1'b1
         # These arise from parameter substitution (e.g., DEPTH=8 → 8 == 0)
