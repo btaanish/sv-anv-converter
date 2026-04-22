@@ -3062,6 +3062,26 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             return m.group(0)
         code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\d+)(?![\d\'bdhoBDHO])', _fix_arith_int, code_part)
 
+        # Fix arithmetic between registers of different widths: *reg1 + *reg2
+        # Cast the narrower register to match the wider one
+        def _fix_arith_reg_reg(m):
+            lhs = m.group(1)
+            op = m.group(2)
+            rhs = m.group(3)
+            lhs_name = lhs.lstrip('*').strip()
+            rhs_name = rhs.lstrip('*').strip()
+            lhs_t = reg_type_map.get(lhs_name)
+            rhs_t = reg_type_map.get(rhs_name)
+            if lhs_t and rhs_t and lhs_t != rhs_t:
+                lhs_w = int(re.search(r'\[(\d+)\]', lhs_t).group(1)) if '[' in lhs_t else 1
+                rhs_w = int(re.search(r'\[(\d+)\]', rhs_t).group(1)) if '[' in rhs_t else 1
+                if lhs_w > rhs_w:
+                    return f"{lhs} {op} <({rhs})::{lhs_t}>"
+                elif rhs_w > lhs_w:
+                    return f"<({lhs})::{rhs_t}> {op} {rhs}"
+            return m.group(0)
+        code_part = re.sub(r'(\*\w+)\s*(\+|-)\s*(\*\w+)', _fix_arith_reg_reg, code_part)
+
         # Fix bare integer after cast value: <(N)::type> - 1 → <(N)::type> - <(1)::type>
         def _fix_cast_arith(m):
             cast_type = m.group(1)  # e.g., logic[4]
