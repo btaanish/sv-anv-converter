@@ -25,7 +25,10 @@ Full CVA6 conversion achieved in 7 cycles. Converter improved to handle 416/445 
 Human flagged that agent_spec.md and sv2anvil.py contain wrong results that don't adhere to Anvil principles. Compilation pass != semantic correctness. Must audit and fix foundational tools before proceeding. M8 repurposed as quality audit milestone; BOOM work deferred.
 
 ### 2026-04-22: M8 complete — quality audit passed
-agent_spec.md fixed (all examples compile), sv2anvil.py fixed (no more zeroing of wire expressions), quality report categorizing all 445 files written. Verified by Rex (8/8 compile, 7/8 correct logic) and Vera (specs all compile). BOOM SV files already exist (578 files from CI). Initial converter test: ~40% pass rate on BOOM files — similar starting point as CVA6 M4.
+agent_spec.md fixed (all 7 examples compile), sv2anvil.py fixed (ternary, concat, width propagation, tick-literal bugs), 6 BOOM ground truth files created. Verified by Quinn (82% compile rate = 475/578) and Vera (all doc examples compile). Converter improved from ~40% to 82% on BOOM files across 8 Hugo commits.
+
+### 2026-04-22: M9 planning — BOOM at 82% baseline
+Athena independently verified: 15/20 random sample compiled (75%, within variance of 82% full-corpus). Key remaining failures: TL* interconnect modules, FP pipeline, complex decoders. 103 files still fail. Strategy: fix converter for remaining error patterns + hand-convert complex files.
 
 ## Milestones
 
@@ -58,14 +61,14 @@ agent_spec.md fixed (all examples compile), sv2anvil.py fixed (no more zeroing o
 **Status:** COMPLETE ✓ (verified 2026-04-22)
 **Results:** agent_spec.md fixed (all examples compile), sv2anvil.py fixed (no more zeroing), quality report written (21% correct, 32% partial, 36% stubs, 11% cleanup). All 454 .anvil files compile. Verified by Rex and Vera.
 
-### M9: BOOM Batch Conversion — 578 Files to Anvil (budget: 10 cycles)
-**Status:** IN PROGRESS
-**Goal:** Convert all 578 BOOM SystemVerilog files to Anvil using the improved sv2anvil.py. Fix converter failures for BOOM-specific patterns. Achieve 100% compilation of all BOOM .anvil files.
-**Starting point:** 578 SV files already in `core/boom/` (from CI elaboration). Converter currently passes ~40% of BOOM files.
+### M9: BOOM Full Conversion — 578 Files to Anvil (budget: 8 cycles)
+**Status:** NOT STARTED
+**Goal:** Convert all 578 BOOM SystemVerilog files to Anvil. Fix converter for remaining 18% failures (TL* interconnect, FP pipeline, complex decoders). Hand-convert files the converter can't handle.
+**Starting point:** 578 SV files in `core/boom/`. Converter at 82% (475/578). 6 ground truth files exist. 103 files still fail.
 **Acceptance criteria:**
-1. All BOOM .anvil files pass `anvil -just-check` with exit code 0
-2. compiled.md updated with all BOOM .anvil files
-3. Semantic spot-check: at least 80% of a 20-file sample has non-stub logic
+1. All 578 BOOM .anvil files pass `anvil -just-check` with exit code 0
+2. Semantic spot-check: ≥80% of a 20-file random sample contains non-stub logic (channels, registers, real assignments)
+3. All 6 ground truth BOOM files still compile (no regression)
 
 ### M10: Rocket Chip Conversion (budget: TBD)
 **Status:** NOT STARTED
@@ -96,7 +99,7 @@ Maya improved sv2anvil.py from 49% to 100% vendor pass rate across 8 commits. Co
 - CVA6 utility+SoC: 39/39 compile ✓
 - CVA6 vendor: 153/153 compile ✓
 - CVA6 remaining (core extras, corev_apu, common, configs): 214/214 compile ✓
-- BOOM: 578 SV files available, ~40% auto-convert pass rate, conversion starting
+- BOOM: 578 SV files available, 82% auto-convert pass rate (475/578), 103 remaining
 - Rocket Chip: not started (Chisel-based, no SV source yet)
 - Total converted: 445 files / 445 CVA6 total ✓
 
