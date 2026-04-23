@@ -17,7 +17,7 @@ from typing import List, Optional, Tuple, Dict
 ANVIL_RESERVED = {
     "chan", "proc", "reg", "set", "loop", "cycle", "recv", "send",
     "let", "if", "else", "match", "logic", "left", "right", "sync",
-    "ready",
+    "ready", "put", "type", "in", "spawn", "import",
 }
 
 def _sanitize_ident(name: str) -> str:
@@ -1666,7 +1666,40 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
         return text
     e = _replace_all_part_selects(e)
 
-    e = re.sub(r"(\w+(?:\.\w+)*)\s*\[\s*([^\]]+?)\s*:\s*([^\]]+?)\s*\]", replace_bit_select, e)
+    e = re.sub(r"(\w+(?:\.\w+)*)\s*\[\s*([^\[\]]+?)\s*:\s*([^\[\]]+?)\s*\]", replace_bit_select, e)
+
+    # Array indexing with cast expression inside: var[<(expr)::type>] → var
+    # This handles the case where bit-select conversion produced a cast inside brackets.
+    # Must run after bit-select conversion.
+    def _strip_cast_array_indices(text):
+        """Remove array indices that contain Anvil cast expressions (from bit-select conversion)."""
+        result = []
+        i = 0
+        while i < len(text):
+            if text[i] == '[':
+                # Check if preceded by identifier
+                pre = ''.join(result).rstrip()
+                if pre and (pre[-1].isalnum() or pre[-1] == '_'):
+                    # Find matching ]
+                    depth = 1
+                    j = i + 1
+                    while j < len(text) and depth > 0:
+                        if text[j] == '[':
+                            depth += 1
+                        elif text[j] == ']':
+                            depth -= 1
+                        j += 1
+                    if depth == 0:
+                        inner = text[i+1:j-1].strip()
+                        # Only strip if inner contains a cast <(...)::logic[...]>
+                        # (this means a bit-select was converted inside an array index)
+                        if '::logic' in inner and '<(' in inner:
+                            i = j
+                            continue
+            result.append(text[i])
+            i += 1
+        return ''.join(result)
+    e = _strip_cast_array_indices(e)
 
     # Ternary a ? b : c → if a { b } else { c }
     e = _convert_all_ternaries(e)
@@ -1731,7 +1764,7 @@ def convert_sv_expr(expr: str, params: Dict[str, str], reg_names: Optional[set] 
 
     # Sanitize Anvil reserved words that commonly appear as SV variable names
     # Only rename words that are clearly used as variables, not as Anvil syntax
-    for kw in ('set', 'cycle', 'chan', 'proc', 'sync', 'ready'):
+    for kw in ('set', 'cycle', 'chan', 'proc', 'sync', 'ready', 'put', 'type', 'in', 'spawn', 'import'):
         e = re.sub(rf'\b{kw}\b(?!_m)', kw + '_m', e)
 
     return e
@@ -2784,7 +2817,9 @@ def convert_sv_to_anvil(sv_source: str) -> str:
 
         # Fix stray ] brackets after cast expressions (from SV array indexing on submodule outputs)
         # Pattern: <(expr)::type> ] → <(expr)::type>
+        # Also fix orphaned [ before casts: var [ <(...)::type> → var
         code_part = re.sub(r'(::logic(?:\[\d+\])?>)\s*\]', r'\1', code_part)
+        code_part = re.sub(r'(\w+)\s*\[\s*(<\([^)]*\)::logic(?:\[\d+\])?>)\s*\]?', r'\1', code_part)
 
         # Fix operator precedence: in SV, == != < > bind tighter than & | ^ && ||
         # Add parens around comparison expressions when preceded by bitwise operators
@@ -2919,7 +2954,7 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             result = []
             i = 0
             while i < len(text):
-                if text[i] in '|&':
+                if text[i] in '|&^':
                     # Check if this is unary (not preceded by an operand)
                     before = ''.join(result).rstrip()
                     # After a comma, it's always unary (new element in concat/args)
@@ -3153,6 +3188,9 @@ def convert_sv_to_anvil(sv_source: str) -> str:
             lhs = m.group(1)  # value being shifted
             op = m.group(2)   # << or >>
             rhs = m.group(3)  # shift amount
+            # Don't match if RHS is just an operator (~, !) or starts with #{ (concat)
+            if rhs.strip() in ('~', '!', '#{') or rhs.startswith('#{'):
+                return m.group(0)
             # Determine left operand's type
             lhs_type = None
             # Check if lhs is a register deref
@@ -3179,7 +3217,8 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                 else:
                     return f"{lhs} {op} <({rhs_stripped})::{lhs_type}>"
             return m.group(0)
-        code_part = re.sub(r'(\S+)\s*(<<|>>)\s*(\S+)', _fix_shift_types, code_part)
+        # Don't apply shift fixer when RHS starts with #{ (concat) — would break it
+        code_part = re.sub(r'(\S+)\s*(<<|>>)\s*(\S+)(?!\{)', _fix_shift_types, code_part)
 
         # Parenthesize bare < and > comparisons — Anvil requires (a < b) not a < b
         # Must avoid matching <<, >>, <=, >=, <( (cast syntax), :: > (end of cast)
@@ -3338,12 +3377,43 @@ def convert_sv_to_anvil(sv_source: str) -> str:
     # Anvil requires all concat elements to have the same type
     def _fix_mixed_concat(text):
         """Replace mixed-width concats with zero literals of the total width."""
+        def _split_concat_elems(inner):
+            """Split concat inner text at top-level commas."""
+            elems = []
+            cd = 0
+            start = 0
+            for ci, ch in enumerate(inner):
+                if ch in '({<':
+                    cd += 1
+                elif ch in ')}>':
+                    cd -= 1
+                elif ch == ',' and cd == 0:
+                    elems.append(inner[start:ci].strip())
+                    start = ci + 1
+            elems.append(inner[start:].strip())
+            return elems
+
         def _elem_width_post(elem):
             """Determine element width from literal, cast, bit-select, or expression."""
             elem = elem.strip()
             m_lit = re.match(r"(\d+)'[hHdDbBoO]", elem)
             if m_lit:
                 return int(m_lit.group(1))
+            # if-else expression: if cond { val_t } else { val_f } → width from branch values
+            # Must check BEFORE general cast search, since conditions contain casts too
+            if elem.startswith('if '):
+                # First check for sized literals in branch values
+                branch_lits = re.findall(r"(\d+)'[hHdDbBoO]", elem)
+                if branch_lits:
+                    return int(branch_lits[0])
+                branch_casts = re.findall(r'::logic\[(\d+)\]>', elem)
+                if branch_casts:
+                    return int(branch_casts[0])
+                return None
+            # Simple cast: entire element is <(expr)::logic[N]>
+            m_cast_full = re.match(r'^<\(.+\)::logic\[(\d+)\]>$', elem)
+            if m_cast_full:
+                return int(m_cast_full.group(1))
             m_cast = re.search(r'::logic\[(\d+)\]>', elem)
             if m_cast:
                 return int(m_cast.group(1))
@@ -3362,6 +3432,24 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     if m_w:
                         return int(m_w.group(1))
                     return 1
+            # Nested concat #{...} → sum of inner element widths
+            if elem.startswith('#{'):
+                inner_m = re.match(r'^#\{(.+)\}$', elem)
+                if inner_m:
+                    inner_elems = _split_concat_elems(inner_m.group(1))
+                    inner_widths = [_elem_width_post(ie) for ie in inner_elems]
+                    if all(w is not None for w in inner_widths):
+                        return sum(inner_widths)
+                    # Default unknown inner widths to 1
+                    return sum(w if w is not None else 1 for w in inner_widths)
+            # Negation of expression: ~ expr → same width as expr
+            if elem.startswith('~'):
+                inner = elem[1:].strip()
+                if inner.startswith('(') and inner.endswith(')'):
+                    inner = inner[1:-1].strip()
+                w = _elem_width_post(inner)
+                if w is not None:
+                    return w
             # Expression containing register derefs: find max width of any *var
             reg_refs = re.findall(r'\*(\w+)', elem)
             if reg_refs:
@@ -3416,13 +3504,14 @@ def convert_sv_to_anvil(sv_source: str) -> str:
 
                     if len(elems) > 1:
                         widths = [_elem_width_post(e) for e in elems]
-                        if all(w is not None for w in widths):
-                            if len(set(widths)) > 1:
-                                # Mixed widths — replace with zero of total width
-                                total_w = sum(widths)
-                                result.append(f"{total_w}'h0 /* concat */")
-                                i = j
-                                continue
+                        # Default unknown widths to 1 so we can still compute total
+                        resolved_widths = [w if w is not None else 1 for w in widths]
+                        if len(set(resolved_widths)) > 1:
+                            # Mixed widths — replace with zero of total width
+                            total_w = sum(resolved_widths)
+                            result.append(f"{total_w}'h0 /* concat */")
+                            i = j
+                            continue
                     result.append(text[i:j])
                     i = j
                     continue
@@ -3553,6 +3642,9 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         else:
             fixed_concat_lines.append(line)
     result_text = '\n'.join(fixed_concat_lines)
+
+    # Now run _fix_mixed_concat after bare concats have been converted to #{...}
+    result_text = _fix_mixed_concat(result_text)
 
     # Fix empty if/else blocks: insert cycle 1 into empty blocks
     # Pattern: { \n } (possibly with whitespace)
