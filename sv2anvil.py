@@ -3276,6 +3276,15 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         temp_cleaned.append(line)
     cleaned_lines = temp_cleaned
 
+    # Remove _RANDOM initialization artifacts (SV simulation code, not synthesis)
+    # These produce invalid indexing on Logic scalars in Anvil
+    random_cleaned = []
+    for line in cleaned_lines:
+        if re.search(r'\b_RANDOM\b', line):
+            continue  # skip _RANDOM references entirely
+        random_cleaned.append(line)
+    cleaned_lines = random_cleaned
+
     # Remove unused let bindings (Anvil rejects them)
     # Multiple passes since removing one let might make another unused
     for _pass in range(5):
@@ -3373,10 +3382,11 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                         if m_w:
                             max_w = max(max_w, int(m_w.group(1)))
                 return max_w
-            # Let variable: check let_type_map
+            # Let variable: check let_def_types first (actual definition),
+            # then let_type_map (inferred — can be wrong for concat elements)
             m_let = re.match(r'^(\w+)$', elem)
             if m_let:
-                lt = let_type_map.get(m_let.group(1)) or let_def_types.get(m_let.group(1))
+                lt = let_def_types.get(m_let.group(1)) or let_type_map.get(m_let.group(1))
                 if lt:
                     m_w = re.match(r'logic\[(\d+)\]', lt)
                     if m_w:
@@ -3400,6 +3410,9 @@ def convert_sv_to_anvil(sv_source: str) -> str:
                     j += 1
                 if depth == 0:
                     inner = text[i+2:j-1]
+                    # Recursively fix nested concats first
+                    if '#{' in inner:
+                        inner = _fix_mixed_concat(inner)
                     # Split at top-level commas
                     elems = []
                     cd = 0
@@ -3416,20 +3429,42 @@ def convert_sv_to_anvil(sv_source: str) -> str:
 
                     if len(elems) > 1:
                         widths = [_elem_width_post(e) for e in elems]
+                        # Anvil concat requires ALL elements to be the same type.
+                        # If widths differ, replace with a zero of the total width.
+                        # If all widths are the same, keep the concat.
                         if all(w is not None for w in widths):
                             if len(set(widths)) > 1:
                                 # Mixed widths — replace with zero of total width
                                 total_w = sum(widths)
-                                result.append(f"{total_w}'h0 /* concat */")
+                                result.append(f"{total_w}'h0")
                                 i = j
                                 continue
+                            elif all(w == 1 for w in widths):
+                                # All 1-bit — wrap each in logic[1] for array compat
+                                fixed_elems = [f"<({e})::logic[1]>" for e in elems]
+                                result.append('#{' + ', '.join(fixed_elems) + '}')
+                                i = j
+                                continue
+                        elif any(w is not None for w in widths):
+                            # Some known, some unknown — compute best-effort total
+                            known_sum = sum(w for w in widths if w is not None)
+                            unknown_count = sum(1 for w in widths if w is None)
+                            total_w = known_sum + unknown_count  # assume 1-bit for unknowns
+                            result.append(f"{total_w}'h0")
+                            i = j
+                            continue
                     result.append(text[i:j])
                     i = j
                     continue
             result.append(text[i])
             i += 1
         return ''.join(result)
-    result_text = _fix_mixed_concat(result_text)
+    # Run multiple passes to handle nested concats (inner first, then outer)
+    for _concat_pass in range(3):
+        prev = result_text
+        result_text = _fix_mixed_concat(result_text)
+        if result_text == prev:
+            break
 
     # Late-stage: convert remaining SV replications {N{expr}} to <(expr)::logic[N]>
     # These can survive when replications are inside concats that were processed after
@@ -3553,6 +3588,13 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         else:
             fixed_concat_lines.append(line)
     result_text = '\n'.join(fixed_concat_lines)
+
+    # Re-run mixed concat fix after bare concat conversion (may have introduced new mixed concats)
+    for _concat_pass2 in range(3):
+        prev = result_text
+        result_text = _fix_mixed_concat(result_text)
+        if result_text == prev:
+            break
 
     # Fix empty if/else blocks: insert cycle 1 into empty blocks
     # Pattern: { \n } (possibly with whitespace)
@@ -3693,6 +3735,149 @@ def convert_sv_to_anvil(sv_source: str) -> str:
         else:
             fixed_ternary_lines.append(line)
     result_text = '\n'.join(fixed_ternary_lines)
+
+    # Final pass: fix any remaining mixed-width concats that survived earlier passes.
+    # Process line by line, finding #{...} with balanced braces and replacing mixed-width ones.
+    def _final_fix_concats(line_text):
+        """Replace remaining mixed-width concats with zero literals."""
+        if '#{' not in line_text:
+            return line_text
+        def _get_width(elem):
+            elem = elem.strip()
+            # Direct sized literal at start
+            m = re.match(r"(\d+)'[hHdDbBoO]", elem)
+            if m: return int(m.group(1))
+            # Cast expression at start
+            m = re.match(r'<\(.*?\)::(logic(?:\[\d+\])?)\s*>', elem)
+            if m:
+                t = m.group(1)
+                m2 = re.match(r'logic\[(\d+)\]', t)
+                return int(m2.group(1)) if m2 else 1
+            # For if/else expressions, extract width from branch values
+            if elem.startswith('if '):
+                # Find the last sized literal or cast in the expression
+                # (branch values come after { and before })
+                all_lits = re.findall(r"(\d+)'[hHdDbBoO]", elem)
+                all_casts = re.findall(r'::logic\[(\d+)\]>', elem)
+                # Prefer branch value literals (they come last in if-else)
+                if all_lits:
+                    return int(all_lits[-1])
+                if all_casts:
+                    return int(all_casts[-1])
+                return None
+            # Cast anywhere in element
+            m = re.search(r'::logic\[(\d+)\]>', elem)
+            if m: return int(m.group(1))
+            m = re.search(r'::logic>', elem)
+            if m: return 1
+            # Check for sized literal anywhere
+            m = re.search(r"(\d+)'[hHdDbBoO]", elem)
+            if m: return int(m.group(1))
+            return None
+        # Iteratively find and fix #{...} concats (innermost first via multiple passes)
+        max_iters = 20
+        for _ in range(max_iters):
+            if '#{' not in line_text:
+                break
+            replaced = False
+            # Find each #{...} with balanced braces
+            i = 0
+            while i < len(line_text):
+                if line_text[i:i+2] == '#{':
+                    # Find matching }
+                    depth = 1
+                    j = i + 2
+                    while j < len(line_text) and depth > 0:
+                        if line_text[j] == '{': depth += 1
+                        elif line_text[j] == '}': depth -= 1
+                        j += 1
+                    if depth == 0:
+                        inner = line_text[i+2:j-1]
+                        # Check if inner contains nested #{} — if so, skip to process inner first
+                        if '#{' in inner:
+                            i = i + 2  # move past #{ to find nested ones
+                            continue
+                        # Split at top-level commas
+                        if ',' in inner:
+                            elems = [e.strip() for e in inner.split(',')]
+                            widths = [_get_width(e) for e in elems]
+                            has_known = any(w is not None for w in widths)
+                            if has_known:
+                                unique_known = set(w for w in widths if w is not None)
+                                if len(unique_known) > 1 or any(w is None for w in widths):
+                                    total = sum(w if w is not None else 1 for w in widths)
+                                    line_text = line_text[:i] + f"{total}'h0" + line_text[j:]
+                                    replaced = True
+                                    break
+                i += 1
+            if not replaced:
+                break
+        return line_text
+    result_text = '\n'.join(_final_fix_concats(line) for line in result_text.split('\n'))
+
+    # Final pass: strip all /* ... */ comments (they're annotations that can interfere
+    # with Anvil parsing, e.g., "10'h0 /* concat */ < 10'h82" breaks < comparison)
+    # and re-parenthesize bare < > comparisons that may have been exposed
+    final_lines = []
+    for line in result_text.split('\n'):
+        # Strip inline comments
+        line = re.sub(r'\s*/\*.*?\*/', '', line)
+        # Parenthesize bare < and > comparisons (may be newly exposed after comment stripping)
+        # Match: sized_literal_or_var < sized_literal_or_var (not <<, <(, <=)
+        operand = r'(?:<\([^)]*\)::logic(?:\[\d+\])?>|\d+\'[hdbo][0-9a-fA-F]+|\*?\w+(?:\s*\[\s*\d+\s*\])?)'
+        line = re.sub(rf'({operand})\s+(<)\s+({operand})', r'(\1 \2 \3)', line)
+        line = re.sub(rf'({operand})\s+(>)\s+({operand})', r'(\1 \2 \3)', line)
+        # Fix cast-comparison-cast: >::logicType> < <(  → parenthesize the comparison
+        # Anvil confuses < comparison with < cast-start when cast ends right before it
+        # Pattern: <(...)::type> < <(...)::type> → (<(...)::type> < <(...)::type>)
+        def _paren_cast_comparisons(text):
+            """Parenthesize comparisons between cast expressions to avoid ambiguity."""
+            # Find patterns: ...::logicType> < <(...  or  ...::logicType> > <(...
+            # These need outer parens so Anvil doesn't confuse < with cast syntax
+            result = []
+            i = 0
+            while i < len(text):
+                # Look for pattern: <(...)::type> followed by < or > followed by <(...)::type>
+                if text[i:i+2] == '<(':
+                    # Find matching closing > of cast
+                    depth = 1
+                    j = i + 2
+                    while j < len(text) and depth > 0:
+                        if text[j] == '(' : depth += 1
+                        elif text[j] == ')': depth -= 1
+                        j += 1
+                    # j is past the ) — look for ::type>
+                    tm = re.match(r'::(logic(?:\[\d+\])?)\s*>', text[j:])
+                    if tm:
+                        cast1_end = j + tm.end()
+                        # Check for comparison operator after whitespace
+                        rest = text[cast1_end:]
+                        cm = re.match(r'\s+(<|>)\s+', rest)
+                        if cm and not rest.lstrip().startswith('<<') and not rest.lstrip().startswith('>>'):
+                            cmp_op = cm.group(1)
+                            after_cmp = text[cast1_end + cm.end():]
+                            # Check if next thing is another cast <(...)::type>
+                            if after_cmp.startswith('<('):
+                                depth2 = 1
+                                k = 2
+                                while k < len(after_cmp) and depth2 > 0:
+                                    if after_cmp[k] == '(': depth2 += 1
+                                    elif after_cmp[k] == ')': depth2 -= 1
+                                    k += 1
+                                tm2 = re.match(r'::(logic(?:\[\d+\])?)\s*>', after_cmp[k:])
+                                if tm2:
+                                    cast2_end = cast1_end + cm.end() + k + tm2.end()
+                                    cast1 = text[i:cast1_end]
+                                    cast2 = after_cmp[:k + tm2.end()]
+                                    result.append(f'({cast1} {cmp_op} {cast2})')
+                                    i = cast2_end
+                                    continue
+                result.append(text[i])
+                i += 1
+            return ''.join(result)
+        line = _paren_cast_comparisons(line)
+        final_lines.append(line)
+    result_text = '\n'.join(final_lines)
 
     return result_text
 
