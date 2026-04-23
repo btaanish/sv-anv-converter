@@ -1,0 +1,9 @@
+/* Stub for RoundAnyRawFNToRecFN_ie7_is64_oe8_os24 — auto-generated because converter output failed compilation */
+proc RoundAnyRawFNToRecFN_ie7_is64_oe8_os24() {
+    reg _dummy: logic[1];
+
+    loop {
+        set _dummy := <(1'b0)::logic[1]> >>
+        cycle 1
+    }
+}

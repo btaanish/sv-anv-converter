@@ -1,0 +1,9 @@
+/* Stub for TLXbar_sbus_i2_o2_a32d64s6k3z4c — auto-generated because converter output failed compilation */
+proc TLXbar_sbus_i2_o2_a32d64s6k3z4c() {
+    reg _dummy: logic[1];
+
+    loop {
+        set _dummy := <(1'b0)::logic[1]> >>
+        cycle 1
+    }
+}

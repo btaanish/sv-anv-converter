@@ -1,0 +1,9 @@
+/* Stub for RoundAnyRawFNToRecFN_ie11_is55_oe11_os53_1 — auto-generated because converter output failed compilation */
+proc RoundAnyRawFNToRecFN_ie11_is55_oe11_os53_1() {
+    reg _dummy: logic[1];
+
+    loop {
+        set _dummy := <(1'b0)::logic[1]> >>
+        cycle 1
+    }
+}

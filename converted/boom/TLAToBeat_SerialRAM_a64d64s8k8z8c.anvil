@@ -1,0 +1,9 @@
+/* Stub for TLAToBeat_SerialRAM_a64d64s8k8z8c — auto-generated because converter output failed compilation */
+proc TLAToBeat_SerialRAM_a64d64s8k8z8c() {
+    reg _dummy: logic[1];
+
+    loop {
+        set _dummy := <(1'b0)::logic[1]> >>
+        cycle 1
+    }
+}

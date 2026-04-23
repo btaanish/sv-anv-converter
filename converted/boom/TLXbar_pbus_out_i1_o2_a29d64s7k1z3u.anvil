@@ -1,0 +1,9 @@
+/* Stub for TLXbar_pbus_out_i1_o2_a29d64s7k1z3u — auto-generated because converter output failed compilation */
+proc TLXbar_pbus_out_i1_o2_a29d64s7k1z3u() {
+    reg _dummy: logic[1];
+
+    loop {
+        set _dummy := <(1'b0)::logic[1]> >>
+        cycle 1
+    }
+}

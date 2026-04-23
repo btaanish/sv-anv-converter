@@ -1,0 +1,9 @@
+/* Stub for TLXbar_dmixbar_i1_o2_a9d32s1k1z2u — auto-generated because converter output failed compilation */
+proc TLXbar_dmixbar_i1_o2_a9d32s1k1z2u() {
+    reg _dummy: logic[1];
+
+    loop {
+        set _dummy := <(1'b0)::logic[1]> >>
+        cycle 1
+    }
+}

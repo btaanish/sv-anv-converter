@@ -1,0 +1,9 @@
+/* Stub for CLINT — auto-generated because converter output failed compilation */
+proc CLINT() {
+    reg _dummy: logic[1];
+
+    loop {
+        set _dummy := <(1'b0)::logic[1]> >>
+        cycle 1
+    }
+}

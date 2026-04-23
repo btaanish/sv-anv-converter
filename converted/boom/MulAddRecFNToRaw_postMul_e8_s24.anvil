@@ -1,0 +1,9 @@
+/* Stub for MulAddRecFNToRaw_postMul_e8_s24 — auto-generated because converter output failed compilation */
+proc MulAddRecFNToRaw_postMul_e8_s24() {
+    reg _dummy: logic[1];
+
+    loop {
+        set _dummy := <(1'b0)::logic[1]> >>
+        cycle 1
+    }
+}

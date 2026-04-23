@@ -1,0 +1,9 @@
+/* Stub for PMPChecker_s3 — auto-generated because converter output failed compilation */
+proc PMPChecker_s3() {
+    reg _dummy: logic[1];
+
+    loop {
+        set _dummy := <(1'b0)::logic[1]> >>
+        cycle 1
+    }
+}

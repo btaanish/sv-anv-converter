@@ -1,0 +1,9 @@
+/* Stub for TLFragmenter_ScratchpadBank — auto-generated because converter output failed compilation */
+proc TLFragmenter_ScratchpadBank() {
+    reg _dummy: logic[1];
+
+    loop {
+        set _dummy := <(1'b0)::logic[1]> >>
+        cycle 1
+    }
+}
