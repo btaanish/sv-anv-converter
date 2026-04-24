@@ -51,8 +51,8 @@ proc RoundAnyRawFNToRecFN_ie7_is64_oe11_os53(
 
     loop {
         let roundingMode_near_even = *r_io_roundingMode == <(3'h0)::logic[3]> >>
-        let _GEN = 11'h0 >>
-        let roundedSig = if ( roundingMode_near_even | (*r_io_roundingMode == <(3'h4)::logic[3]>) ) & *r_io_in_sig [ 10 ] | ( (*r_io_roundingMode == <(3'h2)::logic[3]>) & *r_io_in_sign | (*r_io_roundingMode == <(3'h3)::logic[3]>) & ~ *r_io_in_sign ) & ( <(_GEN)::logic> ) { <(<(*r_io_in_sig)::logic[54]>)::logic[2]> + 55'h1 & 64'h0 } else { 57'h0 } >>
+        let _GEN = 2'h0 >>
+        let roundedSig = if ( roundingMode_near_even | (*r_io_roundingMode == <(3'h4)::logic[3]>) ) & *r_io_in_sig [ 10 ] | ( (*r_io_roundingMode == <(3'h2)::logic[3]>) & *r_io_in_sign | (*r_io_roundingMode == <(3'h3)::logic[3]>) & ~ *r_io_in_sign ) & ( <(_GEN)::logic> ) { <(<(*r_io_in_sig)::logic[54]>)::logic[55]> + 55'h1 & 55'h0 } else { 55'h0 } >>
         send out_ep.io_out (<(65'h0)::logic[65]>) >>
         send out_ep.io_exceptionFlags (<(~ *r_io_in_isZero & ( <(_GEN)::logic> ))::logic[5]>) >>
         cycle 1

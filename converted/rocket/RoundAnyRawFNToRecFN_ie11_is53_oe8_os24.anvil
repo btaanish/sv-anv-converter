@@ -79,15 +79,15 @@ proc RoundAnyRawFNToRecFN_ie11_is53_oe8_os24(
         let _GEN = <(<(_roundMask_T_1)::logic[6]>)::logic[60]> >>
         let roundMask_shift = 65'h10000000000000000 >> <(_GEN)::logic[65]>  >>
         let roundMask_shift_1 = 65'h10000000000000000 >> <(_GEN)::logic[65]>  >>
-        let _roundMask_T_74 = if _roundMask_T_1 [ 8 ] { (if _roundMask_T_1 [ 7 ] { 4'h0 } else { <(if _roundMask_T_1 [ 6 ] { #{<(<(<(<(<(<(roundMask_shift_1 [ 0 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift_1 [ 1 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift_1 [ 2 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>} } else { 3'h0 })::logic[25]> }) } else { 25'h0 } >>
-        let _GEN_0 = 2'h0 >>
-        let _GEN_1 = 55'h0 >>
+        let _roundMask_T_74 = if _roundMask_T_1 [ 8 ] { (if _roundMask_T_1 [ 7 ] { 25'h0 } else { <(if _roundMask_T_1 [ 6 ] { #{<(<(<(<(<(<(roundMask_shift_1 [ 0 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift_1 [ 1 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift_1 [ 2 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>} } else { 3'h0 })::logic[25]> }) } else { 25'h0 } >>
+        let _GEN_0 = 26'h0 >>
+        let _GEN_1 = 26'h0 >>
         let _roundPosBit_T = <(*r_io_in_sig)::logic[26]> & _GEN_0 & _GEN_1 >>
-        let _anyRoundExtra_T = 53'h0 & _GEN_1 >>
-        let _GEN_2 = 31'h0 >>
+        let _anyRoundExtra_T = 26'h0 & _GEN_1 >>
+        let _GEN_2 = 52'h0 >>
         let _overflow_roundMagUp_T = roundingMode_near_even | (*r_io_roundingMode == <(3'h4)::logic[3]>) >>
-        let roundedSig = if _overflow_roundMagUp_T & ( <(_roundPosBit_T)::logic> ) | roundMagUp & ( <(_GEN_2)::logic> ) { <(<(*r_io_in_sig)::logic[25]> | _roundMask_T_74)::logic[2]> + 26'h1 & ~ (if roundingMode_near_even & ( <(_roundPosBit_T)::logic> ) & (_anyRoundExtra_T == 26'h0) { 55'h0 } else { 26'h0 }) } else { <(<(*r_io_in_sig)::logic[25]> & ~ _roundMask_T_74)::logic[2]> | (if roundingMode_odd & ( <(_GEN_2)::logic> ) { _GEN_0 & _GEN_1 } else { 26'h0 }) } >>
-        let sRoundedExp = 6'h0 + <(<(roundedSig)::logic[2]>)::logic[14]> >>
+        let roundedSig = if _overflow_roundMagUp_T & ( <(_roundPosBit_T)::logic> ) | roundMagUp & ( <(_GEN_2)::logic> ) { <(<(*r_io_in_sig)::logic[25]> | _roundMask_T_74)::logic[26]> + 26'h1 & ~ (if roundingMode_near_even & ( <(_roundPosBit_T)::logic> ) & (_anyRoundExtra_T == 26'h0) { 26'h0 } else { 26'h0 }) } else { <(<(*r_io_in_sig)::logic[25]> & ~ _roundMask_T_74)::logic[26]> | (if roundingMode_odd & ( <(_GEN_2)::logic> ) { _GEN_0 & _GEN_1 } else { 26'h0 }) } >>
+        let sRoundedExp = 15'h0 + <(<(roundedSig)::logic[2]>)::logic[15]> >>
         let common_totalUnderflow = ((sRoundedExp < 15'h6B)) >>
         let isNaNOut = *r_io_invalidExc | *r_io_in_isNaN >>
         let commonCase = ~ isNaNOut & ~ *r_io_in_isInf & ~ *r_io_in_isZero >>

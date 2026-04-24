@@ -98,13 +98,13 @@ proc SBToTL(
         let _GEN_5 = 102'h0 >>
         let _GEN_6 = 116'h0 >>
         let _GEN_7 = 100'h0 >>
-        let io_rdLegal_0 = ~ ( <(<(*r_io_addrIn)::logic[115]>)::logic> ) | ~ ( <(_GEN_0)::logic> ) |(239'h0 == 112'h0)| ~ ( <(_GEN_1)::logic> ) | ~ ( <(_GEN_2)::logic> ) | ~ ( <(_GEN_3)::logic> ) | ~ ( <(_GEN_4)::logic> ) | ~ ( <(_GEN_5)::logic> ) | ~ ( <(_GEN_6)::logic> ) | ~ ( <(_GEN_7)::logic> ) >>
+        let io_rdLegal_0 = ~ ( <(<(*r_io_addrIn)::logic[115]>)::logic> ) | ~ ( <(_GEN_0)::logic> ) |(112'h0 == 112'h0)| ~ ( <(_GEN_1)::logic> ) | ~ ( <(_GEN_2)::logic> ) | ~ ( <(_GEN_3)::logic> ) | ~ ( <(_GEN_4)::logic> ) | ~ ( <(_GEN_5)::logic> ) | ~ ( <(_GEN_6)::logic> ) | ~ ( <(_GEN_7)::logic> ) >>
         let io_wrLegal_0 = ~ ( <(<(*r_io_addrIn)::logic[115]>)::logic> ) | ~ ( <(_GEN_0)::logic> ) | ~ ( <(_GEN_1)::logic> ) | ~ ( <(_GEN_2)::logic> ) | ~ ( <(_GEN_3)::logic> ) | ~ ( <(_GEN_4)::logic> ) | ~ ( <(_GEN_5)::logic> ) | ~ ( <(_GEN_6)::logic> ) | ~ ( <(_GEN_7)::logic> ) >>
         let _nodeOut_a_valid_T = *sbState == <(3'h1)::logic[3]> >>
         let _nodeOut_a_valid_T_1 = *sbState == <(3'h2)::logic[3]> >>
         let _d_q_io_deq_valid = <(0)::logic>  >>
         let rdTxValid = _rdTxValid_T & _d_q_io_deq_valid & d_q_io_deq_ready >>
-        let txLast = <(*counter)::logic[5]> == ( 8'h1 << <(*r_io_sizeIn)::logic[8]> ) - 8'h1 >>
+        let txLast = <(*counter)::logic[8]> == ( 8'h1 << <(*r_io_sizeIn)::logic[8]> ) - 8'h1 >>
         let _GEN_8 = *sbState == <(3'h0)::logic[3]> >>
         let nodeOut_a_valid = _nodeOut_a_valid_T | _nodeOut_a_valid_T_1 >>
         let wrTxValid = _nodeOut_a_valid_T_1 & nodeOut_a_valid & *r_auto_out_a_ready >>
@@ -113,7 +113,7 @@ proc SBToTL(
         let _d_q_io_deq_bits_denied = <(0)::logic>  >>
         send out_ep.auto_out_a_valid (<(nodeOut_a_valid)::logic>) >>
         send out_ep.auto_out_a_bits_opcode (<(_nodeOut_a_valid_T)::logic[3]>) >>
-        send out_ep.auto_out_a_bits_size (<(*r_io_sizeIn)::logic[2]>) >>
+        send out_ep.auto_out_a_bits_size (<(*r_io_sizeIn)::logic[4]>) >>
         send out_ep.auto_out_a_bits_address (<(*r_io_addrIn)::logic[32]>) >>
         send out_ep.auto_out_a_bits_data (<(if _nodeOut_a_valid_T { 8'h0 } else { <(_GEN)::logic[32]> })::logic[8]>) >>
         send out_ep.auto_out_d_ready (1'b0) >>

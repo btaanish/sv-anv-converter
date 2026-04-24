@@ -86,13 +86,13 @@ proc RoundAnyRawFNToRecFN_ie11_is55_oe11_os53(
         let _roundMask_T_128 = if _roundMask_T_1 [ 11 ] { (if _roundMask_T_1 [ 10 ] { 5'h0  } else { <(if _roundMask_T_1 [ 9 ] & _roundMask_T_1 [ 8 ] & _roundMask_T_1 [ 7 ] & _roundMask_T_1 [ 6 ] { #{<(<(<(<(<(<(roundMask_shift_1 [ 0 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift_1 [ 1 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift_1 [ 2 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>} } else { 3'h0 })::logic[54]> }) } else { 54'h0 } >>
         let _common_underflow_T_4 = _roundMask_T_128 [ 0 ] | *r_io_in_sig [ 55 ] >>
         let _GEN_0 = 55'h0 >>
-        let _GEN_1 = 110'h0 >>
+        let _GEN_1 = 55'h0 >>
         let _roundPosBit_T = <(*r_io_in_sig)::logic[55]> & _GEN_0 & _GEN_1 >>
         let _anyRoundExtra_T = <(*r_io_in_sig)::logic[55]> & _GEN_1 >>
         let _GEN_2 = #{_roundPosBit_T , _anyRoundExtra_T} >>
         let _overflow_roundMagUp_T = roundingMode_near_even | (*r_io_roundingMode == <(3'h4)::logic[3]>) >>
-        let roundedSig = if _overflow_roundMagUp_T & ( <(_roundPosBit_T)::logic> ) | roundMagUp & ( <(_GEN_2)::logic> ) { <(<(*r_io_in_sig)::logic[54]> | 109'h0)::logic[2]> + 55'h1 & ~ (if roundingMode_near_even & ( <(_roundPosBit_T)::logic> ) & (_anyRoundExtra_T == 55'h0) { 110'h0 } else { 55'h0 }) } else { <(<(*r_io_in_sig)::logic[54]> & 54'h0)::logic[2]> | (if roundingMode_odd & ( <(_GEN_2)::logic> ) { _GEN_0 & _GEN_1 } else { 55'h0 }) } >>
-        let sRoundedExp = 14'h0 + <(<(roundedSig)::logic[2]>)::logic[13]> >>
+        let roundedSig = if _overflow_roundMagUp_T & ( <(_roundPosBit_T)::logic> ) | roundMagUp & ( <(_GEN_2)::logic> ) { <(<(*r_io_in_sig)::logic[54]> | 54'h0)::logic[55]> + 55'h1 & ~ (if roundingMode_near_even & ( <(_roundPosBit_T)::logic> ) & (_anyRoundExtra_T == 55'h0) { 55'h0 } else { 55'h0 }) } else { <(<(*r_io_in_sig)::logic[54]> & 54'h0)::logic[55]> | (if roundingMode_odd & ( <(_GEN_2)::logic> ) { _GEN_0 & _GEN_1 } else { 55'h0 }) } >>
+        let sRoundedExp = 14'h0 + <(<(roundedSig)::logic[2]>)::logic[14]> >>
         let common_totalUnderflow = ((sRoundedExp < 14'h3CE)) >>
         let isNaNOut = *r_io_invalidExc | *r_io_in_isNaN >>
         let notNaN_isSpecialInfOut = *r_io_infiniteExc | *r_io_in_isInf >>

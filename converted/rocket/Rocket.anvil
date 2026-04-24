@@ -497,8 +497,8 @@ proc Rocket(
         let _mem_cfi_taken_T = *mem_ctrl_branch & *mem_br_taken >>
         let _mem_br_target_T_6 = if *mem_reg_rvc { 4'h2 } else { 4'h4 } >>
         let _mem_br_target_T_8 = if _mem_cfi_taken_T { 32'h0 } else { if *mem_ctrl_jal { 32'h0 } else { 29'h0 } } >>
-        let _mem_br_target_T_9 = *mem_reg_pc + 9'h0 >>
-        let _mem_npc_T_4 = if *mem_ctrl_jalr | *mem_reg_sfence { 64'h0 } else { _mem_br_target_T_9 } >>
+        let _mem_br_target_T_9 = *mem_reg_pc + 40'h0 >>
+        let _mem_npc_T_4 = if *mem_ctrl_jalr | *mem_reg_sfence { 40'h0 } else { _mem_br_target_T_9 } >>
         let mem_npc = _mem_npc_T_4 & 40'hFFFFFFFFFE >>
         let _ibuf_io_inst_0_valid = <(0)::logic>  >>
         let _ibuf_io_pc = <(0)::logic[40]>  >>
@@ -644,7 +644,7 @@ proc Rocket(
         let hazard_targets_1_1 = ( <(_id_ctrl_decoder_decoded_orMatrixOutputs_T_61)::logic> ) & ( <(_ibuf_io_inst_0_bits_inst_rs2)::logic> ) >>
         let _ibuf_io_inst_0_bits_inst_rd = <(0)::logic[5]>  >>
         let hazard_targets_2_1 = ( <(_id_ctrl_decoder_decoded_orMatrixOutputs_T_10)::logic> ) & ( <(_ibuf_io_inst_0_bits_inst_rd)::logic> ) >>
-        let r = <(<(*_r)::logic[31]>)::logic[2]> >>
+        let r = <(<(*_r)::logic[31]>)::logic[32]> >>
         let _GEN_8 = <(_ibuf_io_inst_0_bits_inst_rs1)::logic[28]> >>
         let _id_sboard_hazard_T = r >> _GEN_8 >>
         let _GEN_9 = <(_ibuf_io_inst_0_bits_inst_rs2)::logic[28]> >>
@@ -783,7 +783,7 @@ proc Rocket(
         send out_ep.io_imem_btb_update_bits_pc (<(io_imem_bht_update_bits_pc_0)::logic[39]>) >>
         send out_ep.io_imem_btb_update_bits_isValid (<(mem_cfi)::logic>) >>
         send out_ep.io_imem_btb_update_bits_br_pc (<(_io_imem_btb_update_bits_br_pc_T_1)::logic[39]>) >>
-        send out_ep.io_imem_btb_update_bits_cfiType (<(if _io_imem_btb_update_bits_cfiType_T_9 & *mem_reg_inst [ 7 ] { 2'h2 } else { if *mem_ctrl_jalr &(#{<(*mem_reg_inst)::logic[2]> , <(*mem_reg_inst)::logic[2]>} == 4'h1 { 2'h3 } else { <(_io_imem_btb_update_bits_cfiType_T_9)::logic[2]> })})::logic[2]>) >>
+        send out_ep.io_imem_btb_update_bits_cfiType (<(if _io_imem_btb_update_bits_cfiType_T_9 & *mem_reg_inst [ 7 ] { 2'h2 } else { if *mem_ctrl_jalr &(#{<(*mem_reg_inst)::logic[2]> , <(*mem_reg_inst)::logic[2]>} == 4'h1) { 2'h3 } else { <(_io_imem_btb_update_bits_cfiType_T_9)::logic[2]> }})::logic[2]>) >>
         send out_ep.io_imem_bht_update_valid (<(*mem_reg_valid & ~ take_pc_wb)::logic>) >>
         send out_ep.io_imem_bht_update_bits_prediction_history (<(*mem_reg_btb_resp_bht_history)::logic[8]>) >>
         send out_ep.io_imem_bht_update_bits_pc (<(io_imem_bht_update_bits_pc_0)::logic[39]>) >>
@@ -793,7 +793,7 @@ proc Rocket(
         send out_ep.io_imem_flush_icache (<(*wb_reg_valid & *wb_ctrl_fence_i & ~ *r_io_dmem_s2_nack)::logic>) >>
         send out_ep.io_imem_progress (<(*io_imem_progress_REG)::logic>) >>
         send out_ep.io_dmem_req_valid (<(io_dmem_req_valid_0)::logic>) >>
-        send out_ep.io_dmem_req_bits_addr ((<(if 64'h0)::logic[40]>) >>
+        send out_ep.io_dmem_req_bits_addr (<(40'h0)::logic[40]>) >>
         send out_ep.io_dmem_req_bits_tag (<(7'h0)::logic[7]>) >>
         send out_ep.io_dmem_req_bits_cmd (<(*ex_ctrl_mem_cmd)::logic[5]>) >>
         send out_ep.io_dmem_req_bits_size (<(*ex_reg_mem_size)::logic[2]>) >>
@@ -871,7 +871,7 @@ proc Rocket(
         send out_ep.io_fpu_fromint_data (<(ex_rs_0)::logic[64]>) >>
         send out_ep.io_fpu_fcsr_rm (3'd0) >>
         send out_ep.io_fpu_ll_resp_val (<(dmem_resp_valid & *r_io_dmem_resp_bits_tag [ 0 ])::logic>) >>
-        send out_ep.io_fpu_ll_resp_type (<(*r_io_dmem_resp_bits_size)::logic[2]>) >>
+        send out_ep.io_fpu_ll_resp_type (<(*r_io_dmem_resp_bits_size)::logic[3]>) >>
         send out_ep.io_fpu_ll_resp_tag (<(*r_io_dmem_resp_bits_tag)::logic[5]>) >>
         send out_ep.io_fpu_ll_resp_data (<(*r_io_dmem_resp_bits_data)::logic[64]>) >>
         send out_ep.io_fpu_valid (<(~ ctrl_killd & ( <(_id_ctrl_decoder_decoded_orMatrixOutputs_T_67)::logic> ))::logic>) >>
@@ -1074,7 +1074,7 @@ proc Rocket(
         let reset = <(0)::logic>  >>
         let take_pc_wb = <(0)::logic>  >>
         let wb_xcpt = <(0)::logic>  >>
-        set id_reg_pause := (<(~ ( <(_csr_io_time)::logic[5]> == 5'h0) | _csr_io_inhibit_cycle | *r_io_dmem_perf_release | ibuf_io_kill ) & ( ~ ctrl_killd & ( <(_id_ctrl_decoder_decoded_andMatrixOutputs_T_5)::logic> ) & (<(_ibuf_io_inst_0_bits_inst_bits)::logic[4]> == 4'h0) | *id_reg_pause ))::logic> >>
+        set id_reg_pause := <( (~ ( <(_csr_io_time)::logic[5]> == 5'h0) | _csr_io_inhibit_cycle | *r_io_dmem_perf_release | ibuf_io_kill) & ( ~ ctrl_killd & ( <(_id_ctrl_decoder_decoded_andMatrixOutputs_T_5)::logic> ) & (<(_ibuf_io_inst_0_bits_inst_bits)::logic[4]> == 4'h0) | *id_reg_pause) )::logic> >>
         set imem_might_request_reg := <(ex_pc_valid | mem_pc_valid | _csr_io_customCSRs_0_value [ 1 ])::logic> >>
         if (~ ctrl_killd) {
             set ex_ctrl_fp := <(_id_ctrl_decoder_decoded_orMatrixOutputs_T_67)::logic> >>
