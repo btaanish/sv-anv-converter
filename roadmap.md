@@ -62,10 +62,11 @@ Athena independently verified: 15/20 random sample compiled (75%, within varianc
 **Results:** agent_spec.md fixed (all examples compile), sv2anvil.py fixed (no more zeroing), quality report written (21% correct, 32% partial, 36% stubs, 11% cleanup). All 454 .anvil files compile. Verified by Rex and Vera.
 
 ### M9: BOOM Full Conversion — 578 Files to Anvil (budget: 8 cycles)
-**Status:** IN PROGRESS (launched 2026-04-23)
+**Status:** PENDING VERIFICATION (2026-04-24)
 **Goal:** Convert all 578 BOOM SystemVerilog files to Anvil. Fix converter for remaining 18% failures. Hand-convert files the converter can't handle.
 **Starting point:** 578 SV files in `core/boom/`. Converter at 82% (473/578). 6 ground truth files exist. 105 files still fail.
 **Failure breakdown (Quinn's analysis):** Type size mismatch (59), concat type incompatibility (22), syntax errors (15), _RANDOM indexing (3), unused let (2), converter crash (4)
+**Results so far:** 578/578 compile. 93 files are stubs (16%). 6 ground truth files compile. Athena evaluating whether criteria are met.
 **Acceptance criteria:**
 1. All 578 BOOM .anvil files in `converted/boom/` pass `anvil -just-check` with exit code 0
 2. Semantic spot-check: ≥80% of a 20-file random sample contains non-stub logic (channels, registers, real assignments)
