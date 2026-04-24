@@ -422,21 +422,21 @@ proc PMPChecker_s2(
     }
 
     loop {
-        let res_hit = if *r_io_pmp_7_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_7_addr)::logic[3]> ) & ~ *r_io_pmp_7_mask ) == 32'h0 } else { *r_io_pmp_7_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_6_addr)::logic[3]>) & ((*r_io_addr < <(*r_io_pmp_7_addr)::logic[3]>)) } >>
+        let res_hit = if *r_io_pmp_7_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_7_addr)::logic[32]> ) & ~ *r_io_pmp_7_mask ) == 32'h0 } else { *r_io_pmp_7_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_6_addr)::logic[32]>) & ((*r_io_addr < <(*r_io_pmp_7_addr)::logic[32]>)) } >>
         let res_ignore = *r_io_prv [ 1 ] & ~ *r_io_pmp_7_cfg_l >>
-        let res_hit_1 = if *r_io_pmp_6_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_6_addr)::logic[3]> ) & ~ *r_io_pmp_6_mask ) == 32'h0 } else { *r_io_pmp_6_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_5_addr)::logic[3]>) & ((*r_io_addr < <(*r_io_pmp_6_addr)::logic[3]>)) } >>
+        let res_hit_1 = if *r_io_pmp_6_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_6_addr)::logic[32]> ) & ~ *r_io_pmp_6_mask ) == 32'h0 } else { *r_io_pmp_6_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_5_addr)::logic[32]>) & ((*r_io_addr < <(*r_io_pmp_6_addr)::logic[32]>)) } >>
         let res_ignore_1 = *r_io_prv [ 1 ] & ~ *r_io_pmp_6_cfg_l >>
-        let res_hit_2 = if *r_io_pmp_5_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_5_addr)::logic[3]> ) & ~ *r_io_pmp_5_mask ) == 32'h0 } else { *r_io_pmp_5_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_4_addr)::logic[3]>) & ((*r_io_addr < <(*r_io_pmp_5_addr)::logic[3]>)) } >>
+        let res_hit_2 = if *r_io_pmp_5_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_5_addr)::logic[32]> ) & ~ *r_io_pmp_5_mask ) == 32'h0 } else { *r_io_pmp_5_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_4_addr)::logic[32]>) & ((*r_io_addr < <(*r_io_pmp_5_addr)::logic[32]>)) } >>
         let res_ignore_2 = *r_io_prv [ 1 ] & ~ *r_io_pmp_5_cfg_l >>
-        let res_hit_3 = if *r_io_pmp_4_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_4_addr)::logic[3]> ) & ~ *r_io_pmp_4_mask ) == 32'h0 } else { *r_io_pmp_4_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_3_addr)::logic[3]>) & ((*r_io_addr < <(*r_io_pmp_4_addr)::logic[3]>)) } >>
+        let res_hit_3 = if *r_io_pmp_4_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_4_addr)::logic[32]> ) & ~ *r_io_pmp_4_mask ) == 32'h0 } else { *r_io_pmp_4_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_3_addr)::logic[32]>) & ((*r_io_addr < <(*r_io_pmp_4_addr)::logic[32]>)) } >>
         let res_ignore_3 = *r_io_prv [ 1 ] & ~ *r_io_pmp_4_cfg_l >>
-        let res_hit_4 = if *r_io_pmp_3_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_3_addr)::logic[3]> ) & ~ *r_io_pmp_3_mask ) == 32'h0 } else { *r_io_pmp_3_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_2_addr)::logic[3]>) & ((*r_io_addr < <(*r_io_pmp_3_addr)::logic[3]>)) } >>
+        let res_hit_4 = if *r_io_pmp_3_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_3_addr)::logic[32]> ) & ~ *r_io_pmp_3_mask ) == 32'h0 } else { *r_io_pmp_3_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_2_addr)::logic[32]>) & ((*r_io_addr < <(*r_io_pmp_3_addr)::logic[32]>)) } >>
         let res_ignore_4 = *r_io_prv [ 1 ] & ~ *r_io_pmp_3_cfg_l >>
-        let res_hit_5 = if *r_io_pmp_2_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_2_addr)::logic[3]> ) & ~ *r_io_pmp_2_mask ) == 32'h0 } else { *r_io_pmp_2_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_1_addr)::logic[3]>) & ((*r_io_addr < <(*r_io_pmp_2_addr)::logic[3]>)) } >>
+        let res_hit_5 = if *r_io_pmp_2_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_2_addr)::logic[32]> ) & ~ *r_io_pmp_2_mask ) == 32'h0 } else { *r_io_pmp_2_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_1_addr)::logic[32]>) & ((*r_io_addr < <(*r_io_pmp_2_addr)::logic[32]>)) } >>
         let res_ignore_5 = *r_io_prv [ 1 ] & ~ *r_io_pmp_2_cfg_l >>
-        let res_hit_6 = if *r_io_pmp_1_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_1_addr)::logic[3]> ) & ~ *r_io_pmp_1_mask ) == 32'h0 } else { *r_io_pmp_1_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_0_addr)::logic[3]>) & ((*r_io_addr < <(*r_io_pmp_1_addr)::logic[3]>)) } >>
+        let res_hit_6 = if *r_io_pmp_1_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_1_addr)::logic[32]> ) & ~ *r_io_pmp_1_mask ) == 32'h0 } else { *r_io_pmp_1_cfg_a [ 0 ] & (*r_io_addr >= <(*r_io_pmp_0_addr)::logic[32]>) & ((*r_io_addr < <(*r_io_pmp_1_addr)::logic[32]>)) } >>
         let res_ignore_6 = *r_io_prv [ 1 ] & ~ *r_io_pmp_1_cfg_l >>
-        let res_hit_7 = if *r_io_pmp_0_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_0_addr)::logic[3]> ) & ~ *r_io_pmp_0_mask ) == 32'h0 } else { *r_io_pmp_0_cfg_a [ 0 ] & ((*r_io_addr < <(*r_io_pmp_0_addr)::logic[3]>)) } >>
+        let res_hit_7 = if *r_io_pmp_0_cfg_a [ 1 ] { ( ( *r_io_addr ^ <(*r_io_pmp_0_addr)::logic[32]> ) & ~ *r_io_pmp_0_mask ) == 32'h0 } else { *r_io_pmp_0_cfg_a [ 0 ] & ((*r_io_addr < <(*r_io_pmp_0_addr)::logic[32]>)) } >>
         let res_ignore_7 = *r_io_prv [ 1 ] & ~ *r_io_pmp_0_cfg_l >>
         send out_ep.io_r (<(if res_hit_7 { *r_io_pmp_0_cfg_r | res_ignore_7 } else { if res_hit_6 { *r_io_pmp_1_cfg_r | res_ignore_6 } else { if res_hit_5 { *r_io_pmp_2_cfg_r | res_ignore_5 } else { if res_hit_4 { *r_io_pmp_3_cfg_r | res_ignore_4 } else { if res_hit_3 { *r_io_pmp_4_cfg_r | res_ignore_3 } else { if res_hit_2 { *r_io_pmp_5_cfg_r | res_ignore_2 } else { if res_hit_1 { *r_io_pmp_6_cfg_r | res_ignore_1 } else { if res_hit { *r_io_pmp_7_cfg_r | res_ignore } else { *r_io_prv [ 1 ] } } } } } } } })::logic>) >>
         send out_ep.io_w (<(if res_hit_7 { *r_io_pmp_0_cfg_w | res_ignore_7 } else { if res_hit_6 { *r_io_pmp_1_cfg_w | res_ignore_6 } else { if res_hit_5 { *r_io_pmp_2_cfg_w | res_ignore_5 } else { if res_hit_4 { *r_io_pmp_3_cfg_w | res_ignore_4 } else { if res_hit_3 { *r_io_pmp_4_cfg_w | res_ignore_3 } else { if res_hit_2 { *r_io_pmp_5_cfg_w | res_ignore_2 } else { if res_hit_1 { *r_io_pmp_6_cfg_w | res_ignore_1 } else { if res_hit { *r_io_pmp_7_cfg_w | res_ignore } else { *r_io_prv [ 1 ] } } } } } } } })::logic>) >>

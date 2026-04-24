@@ -660,10 +660,10 @@ proc PTW(
         let _leaf_T_5 = count == 2'h1 >>
         let _leaf_T_8 = count == 2'h2 >>
         let _GEN = ( <(count)::logic> ) | _leaf_T_8 >>
-        let r_req_addr = <(0)::logic[27]>  >>
+        let r_req_addr = <(0)::logic[32]>  >>
         let pte_addr_vpn_idx = if _GEN { <(r_req_addr)::logic[9]> } else { if _leaf_T_5 { <(r_req_addr)::logic[9]> } else { <(r_req_addr)::logic[9]> } } >>
         let r_pte_ppn = <(0)::logic[44]>  >>
-        let _GEN_0 = 63'h0 >>
+        let _GEN_0 = 32'h0 >>
         let tags_0 = <(0)::logic[32]>  >>
         let _hits_T = tags_0 == _GEN_0 >>
         let tags_1 = <(0)::logic[32]>  >>
@@ -683,33 +683,33 @@ proc PTW(
         let hits = #{_hits_T_7 , _hits_T_6 , _hits_T_5 , _hits_T_4 , _hits_T_3 , _hits_T_2 , _hits_T_1 , _hits_T} & *valid >>
         let pte_cache_hit = ( <(hits)::logic> ) & ~ ( count [ 1 ] ) >>
         let _r_pte_T_6 = *state == <(3'h1)::logic[3]> >>
-        let _pmpHomogeneous_T = <(r_pte_ppn)::logic[13]> >>
+        let _pmpHomogeneous_T = <(r_pte_ppn)::logic[32]> >>
         let _GEN_1 = 30'h0 >>
-        let _GEN_2 = <(<(r_pte_ppn)::logic[20]>)::logic[13]> >>
+        let _GEN_2 = <(<(r_pte_ppn)::logic[20]>)::logic[32]> >>
         let _GEN_3 = 28'h0 >>
-        let _GEN_4 = <(*r_io_dpath_pmp_0_addr)::logic[27]> >>
+        let _GEN_4 = <(*r_io_dpath_pmp_0_addr)::logic[32]> >>
         let pmpHomogeneous_pgMask = if _GEN { 32'hFFFFF000 } else { if _leaf_T_5 { 32'hFFE00000 } else { 32'hC0000000 } } >>
-        let _GEN_5 = <(*r_io_dpath_pmp_1_addr)::logic[27]> >>
+        let _GEN_5 = <(*r_io_dpath_pmp_1_addr)::logic[32]> >>
         let pmpHomogeneous_pgMask_1 = if _GEN { 32'hFFFFF000 } else { if _leaf_T_5 { 32'hFFE00000 } else { 32'hC0000000 } } >>
         let _GEN_6 = _GEN_2 & pmpHomogeneous_pgMask_1 >>
-        let _GEN_7 = <(*r_io_dpath_pmp_2_addr)::logic[27]> >>
+        let _GEN_7 = <(*r_io_dpath_pmp_2_addr)::logic[32]> >>
         let pmpHomogeneous_pgMask_2 = if _GEN { 32'hFFFFF000 } else { if _leaf_T_5 { 32'hFFE00000 } else { 32'hC0000000 } } >>
         let _GEN_8 = _GEN_2 & pmpHomogeneous_pgMask_2 >>
-        let _GEN_9 = <(*r_io_dpath_pmp_3_addr)::logic[27]> >>
+        let _GEN_9 = <(*r_io_dpath_pmp_3_addr)::logic[32]> >>
         let pmpHomogeneous_pgMask_3 = if _GEN { 32'hFFFFF000 } else { if _leaf_T_5 { 32'hFFE00000 } else { 32'hC0000000 } } >>
         let _GEN_10 = _GEN_2 & pmpHomogeneous_pgMask_3 >>
-        let _GEN_11 = <(*r_io_dpath_pmp_4_addr)::logic[27]> >>
+        let _GEN_11 = <(*r_io_dpath_pmp_4_addr)::logic[32]> >>
         let pmpHomogeneous_pgMask_4 = if _GEN { 32'hFFFFF000 } else { if _leaf_T_5 { 32'hFFE00000 } else { 32'hC0000000 } } >>
         let _GEN_12 = _GEN_2 & pmpHomogeneous_pgMask_4 >>
-        let _GEN_13 = <(*r_io_dpath_pmp_5_addr)::logic[27]> >>
+        let _GEN_13 = <(*r_io_dpath_pmp_5_addr)::logic[32]> >>
         let pmpHomogeneous_pgMask_5 = if _GEN { 32'hFFFFF000 } else { if _leaf_T_5 { 32'hFFE00000 } else { 32'hC0000000 } } >>
         let _GEN_14 = _GEN_2 & pmpHomogeneous_pgMask_5 >>
-        let _GEN_15 = <(*r_io_dpath_pmp_6_addr)::logic[27]> >>
+        let _GEN_15 = <(*r_io_dpath_pmp_6_addr)::logic[32]> >>
         let pmpHomogeneous_pgMask_6 = if _GEN { 32'hFFFFF000 } else { if _leaf_T_5 { 32'hFFE00000 } else { 32'hC0000000 } } >>
         let _GEN_16 = _GEN_2 & pmpHomogeneous_pgMask_6 >>
         let pmpHomogeneous_pgMask_7 = if _GEN { 32'hFFFFF000 } else { if _leaf_T_5 { 32'hFFE00000 } else { 32'hC0000000 } } >>
         let _GEN_17 = _GEN_2 & pmpHomogeneous_pgMask_7 >>
-        let homogeneous = (if _GEN { (<(r_pte_ppn)::logic[43]> == 43'h0) |(44'h0 == 44'h0)|(40'h0 == 40'h0)|(43'h0 == 43'h0)|(40'h0 == 40'h0)|(44'h0 == 44'h0)|(40'h0 == 40'h0)| (_GEN_1 == 30'h0) |(44'h0 == 44'h0)| (_GEN_3 == 28'h0) } else { _leaf_T_5 & ( (_GEN_1 == 30'h0) | (_GEN_3 == 28'h0) ) }) & (if *r_io_dpath_pmp_0_cfg_a [ 1 ] { (if _GEN { *r_io_dpath_pmp_0_mask [ 11 ] } else { if _leaf_T_5 { *r_io_dpath_pmp_0_mask [ 20 ] } else { *r_io_dpath_pmp_0_mask [ 29 ] } }) | (if _GEN { ( <(44'h0)::logic> ) } else { if _leaf_T_5 { ( <(35'h0)::logic> ) } else { ( <(26'h0)::logic> ) } }) } else { ~ ( *r_io_dpath_pmp_0_cfg_a [ 0 ] ) | (_pmpHomogeneous_T >= _GEN_4) | ( _GEN_2 & pmpHomogeneous_pgMask ) < ( <(*r_io_dpath_pmp_0_addr)::logic[3]> & pmpHomogeneous_pgMask ) }) & (if *r_io_dpath_pmp_1_cfg_a [ 1 ] { (if _GEN { *r_io_dpath_pmp_1_mask [ 11 ] } else { if _leaf_T_5 { *r_io_dpath_pmp_1_mask [ 20 ] } else { *r_io_dpath_pmp_1_mask [ 29 ] } }) | (if _GEN { ( <(44'h0)::logic> ) } else { if _leaf_T_5 { ( <(35'h0)::logic> ) } else { ( <(26'h0)::logic> ) } }) } else { ~ ( *r_io_dpath_pmp_1_cfg_a [ 0 ] ) | _GEN_6 < ( <(*r_io_dpath_pmp_0_addr)::logic[3]> & pmpHomogeneous_pgMask_1 ) | (_pmpHomogeneous_T >= _GEN_5) | (_pmpHomogeneous_T >= _GEN_4) & _GEN_6 < ( <(*r_io_dpath_pmp_1_addr)::logic[3]> & pmpHomogeneous_pgMask_1 ) }) & (if *r_io_dpath_pmp_2_cfg_a [ 1 ] { (if _GEN { *r_io_dpath_pmp_2_mask [ 11 ] } else { if _leaf_T_5 { *r_io_dpath_pmp_2_mask [ 20 ] } else { *r_io_dpath_pmp_2_mask [ 29 ] } }) | (if _GEN { ( <(44'h0)::logic> ) } else { if _leaf_T_5 { ( <(35'h0)::logic> ) } else { ( <(26'h0)::logic> ) } }) } else { ~ ( *r_io_dpath_pmp_2_cfg_a [ 0 ] ) | _GEN_8 < ( <(*r_io_dpath_pmp_1_addr)::logic[3]> & pmpHomogeneous_pgMask_2 ) | (_pmpHomogeneous_T >= _GEN_7) | (_pmpHomogeneous_T >= _GEN_5) & _GEN_8 < ( <(*r_io_dpath_pmp_2_addr)::logic[3]> & pmpHomogeneous_pgMask_2 ) }) & (if *r_io_dpath_pmp_3_cfg_a [ 1 ] { (if _GEN { *r_io_dpath_pmp_3_mask [ 11 ] } else { if _leaf_T_5 { *r_io_dpath_pmp_3_mask [ 20 ] } else { *r_io_dpath_pmp_3_mask [ 29 ] } }) | (if _GEN { ( <(44'h0)::logic> ) } else { if _leaf_T_5 { ( <(35'h0)::logic> ) } else { ( <(26'h0)::logic> ) } }) } else { ~ ( *r_io_dpath_pmp_3_cfg_a [ 0 ] ) | _GEN_10 < ( <(*r_io_dpath_pmp_2_addr)::logic[3]> & pmpHomogeneous_pgMask_3 ) | (_pmpHomogeneous_T >= _GEN_9) | (_pmpHomogeneous_T >= _GEN_7) & _GEN_10 < ( <(*r_io_dpath_pmp_3_addr)::logic[3]> & pmpHomogeneous_pgMask_3 ) }) & (if *r_io_dpath_pmp_4_cfg_a [ 1 ] { (if _GEN { *r_io_dpath_pmp_4_mask [ 11 ] } else { if _leaf_T_5 { *r_io_dpath_pmp_4_mask [ 20 ] } else { *r_io_dpath_pmp_4_mask [ 29 ] } }) | (if _GEN { ( <(44'h0)::logic> ) } else { if _leaf_T_5 { ( <(35'h0)::logic> ) } else { ( <(26'h0)::logic> ) } }) } else { ~ ( *r_io_dpath_pmp_4_cfg_a [ 0 ] ) | _GEN_12 < ( <(*r_io_dpath_pmp_3_addr)::logic[3]> & pmpHomogeneous_pgMask_4 ) | (_pmpHomogeneous_T >= _GEN_11) | (_pmpHomogeneous_T >= _GEN_9) & _GEN_12 < ( <(*r_io_dpath_pmp_4_addr)::logic[3]> & pmpHomogeneous_pgMask_4 ) }) & (if *r_io_dpath_pmp_5_cfg_a [ 1 ] { (if _GEN { *r_io_dpath_pmp_5_mask [ 11 ] } else { if _leaf_T_5 { *r_io_dpath_pmp_5_mask [ 20 ] } else { *r_io_dpath_pmp_5_mask [ 29 ] } }) | (if _GEN { ( <(44'h0)::logic> ) } else { if _leaf_T_5 { ( <(35'h0)::logic> ) } else { ( <(26'h0)::logic> ) } }) } else { ~ ( *r_io_dpath_pmp_5_cfg_a [ 0 ] ) | _GEN_14 < ( <(*r_io_dpath_pmp_4_addr)::logic[3]> & pmpHomogeneous_pgMask_5 ) | (_pmpHomogeneous_T >= _GEN_13) | (_pmpHomogeneous_T >= _GEN_11) & _GEN_14 < ( <(*r_io_dpath_pmp_5_addr)::logic[3]> & pmpHomogeneous_pgMask_5 ) }) & (if *r_io_dpath_pmp_6_cfg_a [ 1 ] { (if _GEN { *r_io_dpath_pmp_6_mask [ 11 ] } else { if _leaf_T_5 { *r_io_dpath_pmp_6_mask [ 20 ] } else { *r_io_dpath_pmp_6_mask [ 29 ] } }) | (if _GEN { ( <(44'h0)::logic> ) } else { if _leaf_T_5 { ( <(35'h0)::logic> ) } else { ( <(26'h0)::logic> ) } }) } else { ~ ( *r_io_dpath_pmp_6_cfg_a [ 0 ] ) | _GEN_16 < ( <(*r_io_dpath_pmp_5_addr)::logic[3]> & pmpHomogeneous_pgMask_6 ) | (_pmpHomogeneous_T >= _GEN_15) | (_pmpHomogeneous_T >= _GEN_13) & _GEN_16 < ( <(*r_io_dpath_pmp_6_addr)::logic[3]> & pmpHomogeneous_pgMask_6 ) }) & (if *r_io_dpath_pmp_7_cfg_a [ 1 ] { (if _GEN { *r_io_dpath_pmp_7_mask [ 11 ] } else { if _leaf_T_5 { *r_io_dpath_pmp_7_mask [ 20 ] } else { *r_io_dpath_pmp_7_mask [ 29 ] } }) | (if _GEN { ( <(44'h0)::logic> ) } else { if _leaf_T_5 { ( <(35'h0)::logic> ) } else { ( <(26'h0)::logic> ) } }) } else { ~ ( *r_io_dpath_pmp_7_cfg_a [ 0 ] ) | _GEN_17 < ( <(*r_io_dpath_pmp_6_addr)::logic[3]> & pmpHomogeneous_pgMask_7 ) | (_pmpHomogeneous_T >= <(*r_io_dpath_pmp_7_addr)::logic[27]>) | (_pmpHomogeneous_T >= _GEN_15) & _GEN_17 < ( <(*r_io_dpath_pmp_7_addr)::logic[3]> & pmpHomogeneous_pgMask_7 ) }) >>
+        let homogeneous = <(0)::logic> >>
         let resp_gf = <(0)::logic>  >>
         let hi = #{_hits_T_7 , _hits_T_6 , _hits_T_5 , _hits_T_4} & <(*valid)::logic[4]> >>
         let _GEN_21 = <(hi)::logic[3]> | #{_hits_T_3 , _hits_T_2 , _hits_T_1} & <(*valid)::logic[3]> >>

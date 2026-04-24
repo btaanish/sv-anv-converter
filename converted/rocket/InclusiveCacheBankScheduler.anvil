@@ -181,7 +181,7 @@ proc InclusiveCacheBankScheduler(
         let _GEN_6 = <(_GEN_3)::logic[4]> | <(_GEN_3)::logic[4]> >>
         let _GEN_7 = _GEN_3 [ 1 ] | _robin_request_T [ 0 ] >>
         let _GEN_8 = _GEN_6 [ 1 ] | _robin_request_T [ 0 ] >>
-        let _GEN_9 = 14'h0 & #{_mshr_request_T_160 , _mshr_request_T_137 , _mshr_request_T_114 , _mshr_request_T_91 , _mshr_request_T_68 , _mshr_request_T_45 , _mshr_request_T_22 , _robin_request_T} >>
+        let _GEN_9 = 8'h0 >>
         let mshr_selectOH = <(_GEN_9)::logic[7]> | <(_GEN_9)::logic[7]> >>
         let _mshrs_2_io_schedule_bits_reload = <(0)::logic>  >>
         let _mshrs_5_io_schedule_bits_reload = <(0)::logic>  >>
