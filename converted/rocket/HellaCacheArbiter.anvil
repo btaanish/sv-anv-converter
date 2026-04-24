@@ -282,7 +282,7 @@ proc HellaCacheArbiter(
         send out_ep.io_requestor_1_req_ready (<(*r_io_mem_req_ready & ~ *r_io_requestor_0_req_valid)::logic>) >>
         send out_ep.io_requestor_1_s2_nack (<(*r_io_mem_s2_nack & *s2_id)::logic>) >>
         send out_ep.io_requestor_1_resp_valid (<(*r_io_mem_resp_valid & *r_io_mem_resp_bits_tag [ 0 ])::logic>) >>
-        send out_ep.io_requestor_1_resp_bits_tag (<(<(*r_io_mem_resp_bits_tag)::logic[6]>)::logic[2]>) >>
+        send out_ep.io_requestor_1_resp_bits_tag (<(<(*r_io_mem_resp_bits_tag)::logic[6]>)::logic[7]>) >>
         send out_ep.io_requestor_1_resp_bits_size (<(*r_io_mem_resp_bits_size)::logic[2]>) >>
         send out_ep.io_requestor_1_resp_bits_data (<(*r_io_mem_resp_bits_data)::logic[64]>) >>
         send out_ep.io_requestor_1_resp_bits_replay (<(*r_io_mem_resp_bits_replay)::logic>) >>

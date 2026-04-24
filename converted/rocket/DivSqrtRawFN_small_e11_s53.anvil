@@ -162,8 +162,8 @@ proc DivSqrtRawFN_small_e11_s53(
         let skipCycle2 = <(0)::logic>  >>
         if (( <(*cycleNum)::logic> ) | entering) {
             set cycleNum := <(6'h0)::logic[6]> >>
-            set inReady := <(entering & ~ normalCase_S | ~ entering & ~ skipCycle2 & *cycleNum - (1'b1) | skipCycle2)::logic> >>
-            set rawOutValid := <(entering & ~ normalCase_S | ~ entering & ~ skipCycle2 & *cycleNum - (1'b1) | skipCycle2)::logic>
+            set inReady := <(entering & ~ normalCase_S | ~ entering & ~ skipCycle2 & ( <(*cycleNum - 6'h1)::logic> ) | skipCycle2)::logic> >>
+            set rawOutValid := <(entering & ~ normalCase_S | ~ entering & ~ skipCycle2 & ( <(*cycleNum - 6'h1)::logic> ) | skipCycle2)::logic>
         } else {
             cycle 1
         } >>

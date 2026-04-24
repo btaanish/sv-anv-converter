@@ -54,7 +54,6 @@ proc DivSqrtRawFN_small_e5_s11(
     reg r_io_b_sig : logic[12];
     reg r_io_roundingMode : logic[3];
 
-    /* State registers (reset: cycleNum=0, inReady=1, rawOutValid=0, rest undefined) */
     reg cycleNum : logic[4];
     reg inReady : logic;
     reg rawOutValid : logic;
@@ -70,6 +69,21 @@ proc DivSqrtRawFN_small_e5_s11(
     reg rem_Z : logic[13];
     reg notZeroRem_Z : logic;
     reg sigX_Z : logic[13];
+    reg n_cycleNum : logic[4];
+    reg n_inReady : logic;
+    reg n_rawOutValid : logic;
+    reg n_sqrtOp_Z : logic;
+    reg n_majorExc_Z : logic;
+    reg n_isNaN_Z : logic;
+    reg n_isInf_Z : logic;
+    reg n_isZero_Z : logic;
+    reg n_sign_Z : logic;
+    reg n_sExp_Z : logic[7];
+    reg n_fractB_Z : logic[11];
+    reg n_roundingMode_Z : logic[3];
+    reg n_rem_Z : logic[13];
+    reg n_notZeroRem_Z : logic;
+    reg n_sigX_Z : logic[13];
 
     loop {
         let io_inValid = recv in_ep.io_inValid >>
@@ -167,6 +181,12 @@ proc DivSqrtRawFN_small_e5_s11(
     /* State update loop: compute next state and set registers each cycle.
        Key: use *reg directly inline to avoid borrow conflicts with set statements. */
     loop {
+        let cur_sigX_Z = *sigX_Z >>
+        let cur_fractB_Z = *fractB_Z >>
+        let cur_cycleNum = *cycleNum >>
+        let cur_inReady = *inReady >>
+        let cur_sqrtOp_Z = *sqrtOp_Z >>
+        let cur_rem_Z = *rem_Z >>
         let io_sqrtOp = *r_io_sqrtOp >>
         let io_a_isNaN = *r_io_a_isNaN >>
         let io_a_isInf = *r_io_a_isInf >>
@@ -201,7 +221,7 @@ proc DivSqrtRawFN_small_e5_s11(
 
         /* skipCycle2 = cycleNum == 4'h3 & sigX_Z[12] */
         let cycleNum_eq3 = *cycleNum == <(3)::logic[4]> >>
-        let skipCycle2 = cycleNum_eq3 & <(*sigX_Z >> 12)::logic> >>
+        let skipCycle2 = cycleNum_eq3 & <(cur_sigX_Z >> 12)::logic> >>
 
         /* _sigX_Z_T_7 = inReady & oddSqrt_S */
         let sigX_Z_T7 = *inReady & oddSqrt_S >>
@@ -262,7 +282,7 @@ proc DivSqrtRawFN_small_e5_s11(
         let fractB_or = if *inReady { <(0)::logic[11]> } else { <(*fractB_Z)::logic[11]> } >>
         let lo11_or = trialTerm_T9_lo11 | fractB_or >>
         let sub_base14 = (<(trialTerm_T9_bit12)::logic[14]> << <(12)::logic[14]>) | (<(bit11_or)::logic[14]> << <(11)::logic[14]>) | <(lo11_or)::logic[14]> >>
-        let sub_sqrtZ = if (~*inReady & *sqrtOp_Z) { <(*sigX_Z)::logic[14]> << <(1)::logic[14]> } else { <(0)::logic[14]> } >>
+        let sub_sqrtZ = if (~cur_inReady & cur_sqrtOp_Z) { <(cur_sigX_Z)::logic[14]> << <(1)::logic[14]> } else { <(0)::logic[14]> } >>
         let subtrahend14 = sub_base14 | sub_sqrtZ >>
         let trialRem16 = <(rem)::logic[16]> - <(subtrahend14)::logic[16]> >>
 
@@ -359,7 +379,7 @@ proc DivSqrtRawFN_small_e5_s11(
         let bitMask16 = <(1)::logic[16]> << <(*cycleNum)::logic[16]> >>
         let bitMask14_2 = <(bitMask16 >> 2)::logic[13]> >>
         let sigX_bit_upd = if (~*inReady & newBit) { bitMask14_2 } else { <(0)::logic[13]> } >>
-        let next_sigX_Z = sigX_top3 | (if *inReady { <(0)::logic[13]> } else { *sigX_Z }) | sigX_bit_upd >>
+        let next_sigX_Z = sigX_top3 | (if cur_inReady { <(0)::logic[13]> } else { cur_sigX_Z }) | sigX_bit_upd >>
 
         /* rem_Z next */
         let trialRem_lo13 = <(trialRem16)::logic[13]> >>
@@ -370,21 +390,39 @@ proc DivSqrtRawFN_small_e5_s11(
         let next_notZeroRem_Z = trialRem16 != <(0)::logic[16]> >>
         let notZeroRem_update_cond = gen_cond & (*inReady | newBit) >>
 
-        set cycleNum := if state_update_cond { cycleNum_next } else { *cycleNum } >>
-        set inReady := if state_update_cond { next_inReady } else { *inReady } >>
-        set rawOutValid := if state_update_cond { next_rawOutValid } else { *rawOutValid } >>
-        set sqrtOp_Z := if entering { io_sqrtOp } else { *sqrtOp_Z } >>
-        set majorExc_Z := if entering { next_majorExc_Z } else { *majorExc_Z } >>
-        set isNaN_Z := if entering { next_isNaN_Z } else { *isNaN_Z } >>
-        set isInf_Z := if entering { next_isInf_Z } else { *isInf_Z } >>
-        set isZero_Z := if entering { next_isZero_Z } else { *isZero_Z } >>
-        set sign_Z := if entering { next_sign_Z } else { *sign_Z } >>
-        set sExp_Z := if entering { next_sExp_Z } else { *sExp_Z } >>
-        set roundingMode_Z := if entering { io_roundingMode } else { *roundingMode_Z } >>
-        set fractB_Z := if fractB_update_cond { next_fractB_Z } else { *fractB_Z } >>
-        set rem_Z := if gen_cond { next_rem_Z } else { *rem_Z } >>
-        set sigX_Z := if gen_cond { next_sigX_Z } else { *sigX_Z } >>
-        set notZeroRem_Z := if notZeroRem_update_cond { next_notZeroRem_Z } else { *notZeroRem_Z }
+        set n_cycleNum := if state_update_cond { cycleNum_next } else { cur_cycleNum } >>
+        set n_inReady := if state_update_cond { next_inReady } else { cur_inReady } >>
+        set n_rawOutValid := if state_update_cond { next_rawOutValid } else { <(*rawOutValid)::logic> } >>
+        set n_sqrtOp_Z := if entering { io_sqrtOp } else { cur_sqrtOp_Z } >>
+        set n_majorExc_Z := if entering { next_majorExc_Z } else { <(*majorExc_Z)::logic> } >>
+        set n_isNaN_Z := if entering { next_isNaN_Z } else { <(*isNaN_Z)::logic> } >>
+        set n_isInf_Z := if entering { next_isInf_Z } else { <(*isInf_Z)::logic> } >>
+        set n_isZero_Z := if entering { next_isZero_Z } else { <(*isZero_Z)::logic> } >>
+        set n_sign_Z := if entering { next_sign_Z } else { <(*sign_Z)::logic> } >>
+        set n_sExp_Z := if entering { next_sExp_Z } else { <(*sExp_Z)::logic[7]> } >>
+        set n_roundingMode_Z := if entering { io_roundingMode } else { <(*roundingMode_Z)::logic[3]> } >>
+        set n_fractB_Z := if fractB_update_cond { next_fractB_Z } else { cur_fractB_Z } >>
+        set n_rem_Z := if gen_cond { next_rem_Z } else { cur_rem_Z } >>
+        set n_sigX_Z := if gen_cond { next_sigX_Z } else { cur_sigX_Z } >>
+        set n_notZeroRem_Z := if notZeroRem_update_cond { next_notZeroRem_Z } else { <(*notZeroRem_Z)::logic> }
+    }
+
+    loop {
+        set cycleNum := *n_cycleNum >>
+        set inReady := *n_inReady >>
+        set rawOutValid := *n_rawOutValid >>
+        set sqrtOp_Z := *n_sqrtOp_Z >>
+        set majorExc_Z := *n_majorExc_Z >>
+        set isNaN_Z := *n_isNaN_Z >>
+        set isInf_Z := *n_isInf_Z >>
+        set isZero_Z := *n_isZero_Z >>
+        set sign_Z := *n_sign_Z >>
+        set sExp_Z := *n_sExp_Z >>
+        set roundingMode_Z := *n_roundingMode_Z >>
+        set fractB_Z := *n_fractB_Z >>
+        set rem_Z := *n_rem_Z >>
+        set sigX_Z := *n_sigX_Z >>
+        set notZeroRem_Z := *n_notZeroRem_Z
     }
 
 }

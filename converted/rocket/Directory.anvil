@@ -66,14 +66,14 @@ proc Directory(
         let _victimLTE_T_7 = ((victimLFSR > 10'h37F)) >>
         let victimWay_hi = 4'h0 & 4'h0 >>
         let _victimWay_T_1 = <(victimWay_hi)::logic[3]> | 3'h0 & 3'h0 >>
-        let victimWay = 4'h0 >>
+        let victimWay = 3'h0 >>
         let _view__T_71 = ( <(_GEN)::logic> ) & ~ ( <(_GEN_0)::logic> ) >>
         let _view__T_72 = ( <(_GEN_0)::logic> ) & ~ _victimLTE_T_3 >>
         let _view__T_73 = _victimLTE_T_3 & ~ _victimLFSR_prng_io_out_9 >>
         let _view__T_74 = _victimLFSR_prng_io_out_9 & ~ _victimLTE_T_5 >>
         let _view__T_75 = _victimLTE_T_5 & ~ _victimLTE_T_6 >>
         let _view__T_76 = _victimLTE_T_6 & ~ _victimLTE_T_7 >>
-        let set_m = <(0)::logic[64]>  >>
+        let set_m = <(0)::logic[10]>  >>
         let setQuash = _write_q_io_deq_valid & (_write_q_io_deq_bits_set == set_m) >>
         let tag = <(0)::logic[13]>  >>
         let tagMatch = _write_q_io_deq_bits_data_tag == tag >>
