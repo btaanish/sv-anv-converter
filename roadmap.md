@@ -30,6 +30,9 @@ agent_spec.md fixed (all 7 examples compile), sv2anvil.py fixed (ternary, concat
 ### 2026-04-22: M9 planning — BOOM at 82% baseline
 Athena independently verified: 15/20 random sample compiled (75%, within variance of 82% full-corpus). Key remaining failures: TL* interconnect modules, FP pipeline, complex decoders. 103 files still fail. Strategy: fix converter for remaining error patterns + hand-convert complex files.
 
+### 2026-04-24: M9 complete — BOOM 578/578 compile
+Quinn verified all 3 acceptance criteria pass. 93 stubs (16%), 485 non-stub. Spot-check: 50% Good, 50% Partial. Key gaps: submodule instantiation not translated, memory write paths dropped, pipeline registers zeroed. Next: Rocket Chip (M10) — need CI workflow to generate SV files first.
+
 ## Milestones
 
 ### M1: Research & Foundation (budget: 4 impl cycles)
@@ -62,19 +65,21 @@ Athena independently verified: 15/20 random sample compiled (75%, within varianc
 **Results:** agent_spec.md fixed (all examples compile), sv2anvil.py fixed (no more zeroing), quality report written (21% correct, 32% partial, 36% stubs, 11% cleanup). All 454 .anvil files compile. Verified by Rex and Vera.
 
 ### M9: BOOM Full Conversion — 578 Files to Anvil (budget: 8 cycles)
-**Status:** PENDING VERIFICATION (2026-04-24)
+**Status:** COMPLETE ✓ (verified 2026-04-24)
 **Goal:** Convert all 578 BOOM SystemVerilog files to Anvil. Fix converter for remaining 18% failures. Hand-convert files the converter can't handle.
-**Starting point:** 578 SV files in `core/boom/`. Converter at 82% (473/578). 6 ground truth files exist. 105 files still fail.
-**Failure breakdown (Quinn's analysis):** Type size mismatch (59), concat type incompatibility (22), syntax errors (15), _RANDOM indexing (3), unused let (2), converter crash (4)
-**Results so far:** 578/578 compile. 93 files are stubs (16%). 6 ground truth files compile. Athena evaluating whether criteria are met.
-**Acceptance criteria:**
-1. All 578 BOOM .anvil files in `converted/boom/` pass `anvil -just-check` with exit code 0
-2. Semantic spot-check: ≥80% of a 20-file random sample contains non-stub logic (channels, registers, real assignments)
-3. All 6 ground truth BOOM files still compile (no regression)
+**Results:** 578/578 compile. 93 stubs (16%), 485 non-stub. Quinn spot-check: 50% Good, 50% Partial (all non-stub). Ground truth 6/6 pass. Known gaps: submodule instantiation, memory write paths, pipeline register propagation.
 
-### M10: Rocket Chip Conversion (budget: TBD)
-**Status:** NOT STARTED
-**Goal:** Convert Rocket Chip to Anvil. Chisel-based, largest codebase.
+### M10: Rocket Chip SV Generation & Conversion (budget: 10 cycles)
+**Status:** IN PROGRESS
+**Goal:** Generate Rocket Chip SystemVerilog via CI (Chipyard elaboration), then convert all files to Anvil.
+**Phase 1:** Create `.github/workflows/rocket-elaborate.yml` (based on boom-elaborate.yml, CONFIG=RocketConfig), trigger workflow, get SV files into `core/rocket/`.
+**Phase 2:** Run sv2anvil.py on all generated SV files, fix failures, hand-convert complex files. Target: 100% compilation, ≥80% non-stub.
+**Approach:** Iris researched options — GitHub Actions workflow is the proven path (same as BOOM). Expected ~300-500 SV files.
+**Acceptance criteria:**
+1. Rocket Chip SV files exist in `core/rocket/` (generated via CI)
+2. All converted .anvil files in `converted/rocket/` pass `anvil -just-check`
+3. Semantic spot-check: ≥80% of a 20-file random sample contains non-stub logic
+4. No regression on CVA6 or BOOM converted files
 
 ### M11: Semantic Validation & Round-Trip Verification (budget: TBD)
 **Status:** NOT STARTED
@@ -101,9 +106,9 @@ Maya improved sv2anvil.py from 49% to 100% vendor pass rate across 8 commits. Co
 - CVA6 utility+SoC: 39/39 compile ✓
 - CVA6 vendor: 153/153 compile ✓
 - CVA6 remaining (core extras, corev_apu, common, configs): 214/214 compile ✓
-- BOOM: 578 SV files available, 82% auto-convert pass rate (475/578), 103 remaining
-- Rocket Chip: not started (Chisel-based, no SV source yet)
-- Total converted: 445 files / 445 CVA6 total ✓
+- BOOM: 578/578 compile ✓ (93 stubs, 485 non-stub)
+- Rocket Chip: not started (need CI workflow to generate SV from Chisel)
+- Total converted: 1023 files (445 CVA6 + 578 BOOM)
 
 ## Research Findings
 - CVA6 = native SV (42K LOC), best first target (moderate complexity, clean modules)
