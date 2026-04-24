@@ -1,0 +1,143 @@
+/* Anvil translation of BreakpointUnit */
+
+chan BreakpointUnit_in_ch {
+    left io_status_debug : (logic@#1) @#1,
+    left io_status_prv : (logic[2]@#1) @#1,
+    left io_bp_0_control_action : (logic@#1) @#1,
+    left io_bp_0_control_tmatch : (logic[2]@#1) @#1,
+    left io_bp_0_control_m : (logic@#1) @#1,
+    left io_bp_0_control_s : (logic@#1) @#1,
+    left io_bp_0_control_u : (logic@#1) @#1,
+    left io_bp_0_control_x : (logic@#1) @#1,
+    left io_bp_0_control_w : (logic@#1) @#1,
+    left io_bp_0_control_r : (logic@#1) @#1,
+    left io_bp_0_address : (logic[39]@#1) @#1,
+    left io_pc : (logic[39]@#1) @#1,
+    left io_ea : (logic[39]@#1) @#1
+}
+
+chan BreakpointUnit_out_ch {
+    left io_xcpt_if : (logic@#1) @#1,
+    left io_xcpt_ld : (logic@#1) @#1,
+    left io_xcpt_st : (logic@#1) @#1,
+    left io_debug_if : (logic@#1) @#1,
+    left io_debug_ld : (logic@#1) @#1,
+    left io_debug_st : (logic@#1) @#1
+}
+
+proc BreakpointUnit(
+    in_ep : left BreakpointUnit_in_ch,
+    out_ep : right BreakpointUnit_out_ch
+) {
+    reg r_io_status_debug : logic;
+    reg r_io_status_prv : logic[2];
+    reg r_io_bp_0_control_action : logic;
+    reg r_io_bp_0_control_tmatch : logic[2];
+    reg r_io_bp_0_control_m : logic;
+    reg r_io_bp_0_control_s : logic;
+    reg r_io_bp_0_control_u : logic;
+    reg r_io_bp_0_control_x : logic;
+    reg r_io_bp_0_control_w : logic;
+    reg r_io_bp_0_control_r : logic;
+    reg r_io_bp_0_address : logic[39];
+    reg r_io_pc : logic[39];
+    reg r_io_ea : logic[39];
+
+    loop {
+        let io_status_debug = recv in_ep.io_status_debug >>
+        set r_io_status_debug := <(io_status_debug)::logic>
+    }
+
+    loop {
+        let io_status_prv = recv in_ep.io_status_prv >>
+        set r_io_status_prv := <(io_status_prv)::logic[2]>
+    }
+
+    loop {
+        let io_bp_0_control_action = recv in_ep.io_bp_0_control_action >>
+        set r_io_bp_0_control_action := <(io_bp_0_control_action)::logic>
+    }
+
+    loop {
+        let io_bp_0_control_tmatch = recv in_ep.io_bp_0_control_tmatch >>
+        set r_io_bp_0_control_tmatch := <(io_bp_0_control_tmatch)::logic[2]>
+    }
+
+    loop {
+        let io_bp_0_control_m = recv in_ep.io_bp_0_control_m >>
+        set r_io_bp_0_control_m := <(io_bp_0_control_m)::logic>
+    }
+
+    loop {
+        let io_bp_0_control_s = recv in_ep.io_bp_0_control_s >>
+        set r_io_bp_0_control_s := <(io_bp_0_control_s)::logic>
+    }
+
+    loop {
+        let io_bp_0_control_u = recv in_ep.io_bp_0_control_u >>
+        set r_io_bp_0_control_u := <(io_bp_0_control_u)::logic>
+    }
+
+    loop {
+        let io_bp_0_control_x = recv in_ep.io_bp_0_control_x >>
+        set r_io_bp_0_control_x := <(io_bp_0_control_x)::logic>
+    }
+
+    loop {
+        let io_bp_0_control_w = recv in_ep.io_bp_0_control_w >>
+        set r_io_bp_0_control_w := <(io_bp_0_control_w)::logic>
+    }
+
+    loop {
+        let io_bp_0_control_r = recv in_ep.io_bp_0_control_r >>
+        set r_io_bp_0_control_r := <(io_bp_0_control_r)::logic>
+    }
+
+    loop {
+        let io_bp_0_address = recv in_ep.io_bp_0_address >>
+        set r_io_bp_0_address := <(io_bp_0_address)::logic[39]>
+    }
+
+    loop {
+        let io_pc = recv in_ep.io_pc >>
+        set r_io_pc := <(io_pc)::logic[39]>
+    }
+
+    loop {
+        let io_ea = recv in_ep.io_ea >>
+        set r_io_ea := <(io_ea)::logic[39]>
+    }
+
+    loop {
+        let prv = *r_io_status_prv >>
+        let tmatch = *r_io_bp_0_control_tmatch >>
+        let addr = *r_io_bp_0_address >>
+        let ea = *r_io_ea >>
+        let pc = *r_io_pc >>
+        let en_T_4 = ((<(*r_io_bp_0_control_m)::logic[4]> << <(3)::logic[4]>) | (<(*r_io_bp_0_control_s)::logic[4]> << <(1)::logic[4]>)) | <(*r_io_bp_0_control_u)::logic[4]> >>
+        let en_T_2 = en_T_4 >> <(prv)::logic[4]> >>
+        let en = ~*r_io_status_debug & en_T_2 [ 0 ] >>
+        let t8 = tmatch [ 0 ] & addr [ 0 ] >>
+        let t10 = t8 & addr [ 1 ] >>
+        let mask4 = ((<(t10 & addr [ 2 ])::logic[4]> << <(3)::logic[4]>) | (<(t10)::logic[4]> << <(2)::logic[4]>)) | ((<(t8)::logic[4]> << <(1)::logic[4]>) | <(tmatch [ 0 ])::logic[4]>) >>
+        let not_ea_lo = <(~ea)::logic[4]> | mask4 >>
+        let not_addr_lo = <(~addr)::logic[4]> | mask4 >>
+        let not_ea_hi = <(~ea >> <(4)::logic[39]>)::logic[35]> >>
+        let not_addr_hi = <(~addr >> <(4)::logic[39]>)::logic[35]> >>
+        let ea_addr_match = (not_ea_hi == not_addr_hi) & (not_ea_lo == not_addr_lo) >>
+        let not_pc_lo = <(~pc)::logic[4]> | mask4 >>
+        let not_pc_hi = <(~pc >> <(4)::logic[39]>)::logic[35]> >>
+        let pc_addr_match = (not_pc_hi == not_addr_hi) & (not_pc_lo == not_addr_lo) >>
+        let r = en & *r_io_bp_0_control_r & (if tmatch [ 1 ] { (ea >= addr) ^ tmatch [ 0 ] } else { ea_addr_match }) >>
+        let w = en & *r_io_bp_0_control_w & (if tmatch [ 1 ] { (ea >= addr) ^ tmatch [ 0 ] } else { ea_addr_match }) >>
+        let x = en & *r_io_bp_0_control_x & (if tmatch [ 1 ] { (pc >= addr) ^ tmatch [ 0 ] } else { pc_addr_match }) >>
+        send out_ep.io_xcpt_if (<(x & ~*r_io_bp_0_control_action)::logic>) >>
+        send out_ep.io_xcpt_ld (<(r & ~*r_io_bp_0_control_action)::logic>) >>
+        send out_ep.io_xcpt_st (<(w & ~*r_io_bp_0_control_action)::logic>) >>
+        send out_ep.io_debug_if (<(x & *r_io_bp_0_control_action)::logic>) >>
+        send out_ep.io_debug_ld (<(r & *r_io_bp_0_control_action)::logic>) >>
+        send out_ep.io_debug_st (<(w & *r_io_bp_0_control_action)::logic>) >>
+        cycle 1
+    }
+
+}

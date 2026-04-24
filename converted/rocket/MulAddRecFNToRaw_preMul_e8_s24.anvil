@@ -1,0 +1,149 @@
+/* Anvil translation of MulAddRecFNToRaw_preMul_e8_s24 */
+
+chan MulAddRecFNToRaw_preMul_e8_s24_in_ch {
+    left io_op : (logic[2]@#1) @#1,
+    left io_a : (logic[33]@#1) @#1,
+    left io_b : (logic[33]@#1) @#1,
+    left io_c : (logic[33]@#1) @#1
+}
+
+chan MulAddRecFNToRaw_preMul_e8_s24_out_ch {
+    left io_mulAddA : (logic[24]@#1) @#1,
+    left io_mulAddB : (logic[24]@#1) @#1,
+    left io_mulAddC : (logic[48]@#1) @#1,
+    left io_toPostMul_isSigNaNAny : (logic@#1) @#1,
+    left io_toPostMul_isNaNAOrB : (logic@#1) @#1,
+    left io_toPostMul_isInfA : (logic@#1) @#1,
+    left io_toPostMul_isZeroA : (logic@#1) @#1,
+    left io_toPostMul_isInfB : (logic@#1) @#1,
+    left io_toPostMul_isZeroB : (logic@#1) @#1,
+    left io_toPostMul_signProd : (logic@#1) @#1,
+    left io_toPostMul_isNaNC : (logic@#1) @#1,
+    left io_toPostMul_isInfC : (logic@#1) @#1,
+    left io_toPostMul_isZeroC : (logic@#1) @#1,
+    left io_toPostMul_sExpSum : (logic[10]@#1) @#1,
+    left io_toPostMul_doSubMags : (logic@#1) @#1,
+    left io_toPostMul_CIsDominant : (logic@#1) @#1,
+    left io_toPostMul_CDom_CAlignDist : (logic[5]@#1) @#1,
+    left io_toPostMul_highAlignedSigC : (logic[26]@#1) @#1,
+    left io_toPostMul_bit0AlignedSigC : (logic@#1) @#1
+}
+
+proc MulAddRecFNToRaw_preMul_e8_s24(
+    in_ep : left MulAddRecFNToRaw_preMul_e8_s24_in_ch,
+    out_ep : right MulAddRecFNToRaw_preMul_e8_s24_out_ch
+) {
+    reg r_io_op : logic[2];
+    reg r_io_a : logic[33];
+    reg r_io_b : logic[33];
+    reg r_io_c : logic[33];
+
+    loop {
+        let io_op = recv in_ep.io_op >>
+        set r_io_op := <(io_op)::logic[2]>
+    }
+
+    loop {
+        let io_a = recv in_ep.io_a >>
+        set r_io_a := <(io_a)::logic[33]>
+    }
+
+    loop {
+        let io_b = recv in_ep.io_b >>
+        set r_io_b := <(io_b)::logic[33]>
+    }
+
+    loop {
+        let io_c = recv in_ep.io_c >>
+        set r_io_c := <(io_c)::logic[33]>
+    }
+
+    loop {
+        let a = *r_io_a >>
+        let b = *r_io_b >>
+        let c = *r_io_c >>
+        let op = *r_io_op >>
+        let a_31_30 = <(a >> 30)::logic[2]> >>
+        let a_31_29 = <(a >> 29)::logic[3]> >>
+        let a_31_23_11 = <(a >> 23)::logic[11]> >>
+        let b_31_30 = <(b >> 30)::logic[2]> >>
+        let b_31_29 = <(b >> 29)::logic[3]> >>
+        let b_31_23_11 = <(b >> 23)::logic[11]> >>
+        let c_31_30 = <(c >> 30)::logic[2]> >>
+        let c_31_29 = <(c >> 29)::logic[3]> >>
+        let c_31_23_9 = <(c >> 23)::logic[9]> >>
+        let c_31_23_11 = <(c >> 23)::logic[11]> >>
+        let c_22_0 = <(c)::logic[23]> >>
+        let rawA_isNaN = (a_31_30 == <(3)::logic[2]>) & a [ 29 ] >>
+        let rawB_isNaN = (b_31_30 == <(3)::logic[2]>) & b [ 29 ] >>
+        let rawC_isNaN = (c_31_30 == <(3)::logic[2]>) & c [ 29 ] >>
+        let signProd = a [ 32 ] ^ b [ 32 ] ^ op [ 1 ] >>
+        let sExpAlignedProd_T_1 = <(a_31_23_11)::logic[11]> + <(b_31_23_11)::logic[11]> - <(229)::logic[11]> >>
+        let doSubMags = signProd ^ c [ 32 ] ^ op [ 0 ] >>
+        let sNatCAlignDist_T = sExpAlignedProd_T_1 - <(c_31_23_11)::logic[11]> >>
+        let sNatCAlignDist_T_9_0 = <(sNatCAlignDist_T)::logic[10]> >>
+        let sNatCAlignDist_T_6_0 = <(sNatCAlignDist_T)::logic[7]> >>
+        let isMinCAlign = (a_31_29 == <(0)::logic[3]>) | (b_31_29 == <(0)::logic[3]>) | sNatCAlignDist_T [ 10 ] >>
+        let CIsDominant = (c_31_29 != <(0)::logic[3]>) & (isMinCAlign | (sNatCAlignDist_T_9_0 < <(25)::logic[10]>)) >>
+        let CAlignDist = if isMinCAlign { <(0)::logic[7]> } else { if (sNatCAlignDist_T_9_0 < <(74)::logic[10]>) { sNatCAlignDist_T_6_0 } else { <(74)::logic[7]> } } >>
+        let c_isZero = c_31_29 == <(0)::logic[3]> >>
+        let c_notZero = c_31_29 != <(0)::logic[3]> >>
+        let sig25_doSub = <(16777216)::logic[25]> | (if c_isZero { <(8388608)::logic[25]> } else { <(0)::logic[25]> }) | <(~c_22_0)::logic[25]> >>
+        let sig25_norm = (if c_notZero { <(8388608)::logic[25]> } else { <(0)::logic[25]> }) | <(c_22_0)::logic[25]> >>
+        let sig25 = if doSubMags { sig25_doSub } else { sig25_norm } >>
+        let fill53 = if doSubMags { <(9007199254740991)::logic[78]> } else { <(0)::logic[78]> } >>
+        let mainAlignedSigC = (<(sig25)::logic[78]> << <(53)::logic[78]>) | fill53 >>
+        let mainAlignedSigC_shifted = mainAlignedSigC >> <(CAlignDist)::logic[78]> >>
+        let mainAlignedSigC_2_0 = <(mainAlignedSigC_shifted)::logic[3]> >>
+        let mainAlignedSigC_50_3 = <(mainAlignedSigC_shifted >> <(3)::logic[78]>)::logic[48]> >>
+        let mainAlignedSigC_76_51 = <(mainAlignedSigC_shifted >> <(51)::logic[78]>)::logic[26]> >>
+        let CAlignDist_6_2 = <(CAlignDist >> <(2)::logic[7]>)::logic[5]> >>
+        let CAlignDist_4_0 = <(CAlignDist)::logic[5]> >>
+        let reduced4CExtra_shift = <(4294967296)::logic[33]> >> CAlignDist_6_2 >>
+        let c_21_18 = <(c >> 18)::logic[4]> >>
+        let c_17_14 = <(c >> 14)::logic[4]> >>
+        let c_13_10 = <(c >> 10)::logic[4]> >>
+        let c_9_6 = <(c >> 6)::logic[4]> >>
+        let c_5_2 = <(c >> 2)::logic[4]> >>
+        let c_1_0 = <(c)::logic[2]> >>
+        let _GEN_bits = #{c_21_18 != <(0)::logic[4]>, c_17_14 != <(0)::logic[4]>, c_13_10 != <(0)::logic[4]>, c_9_6 != <(0)::logic[4]>, c_5_2 != <(0)::logic[4]>, c_1_0 != <(0)::logic[2]>} >>
+        let _GEN_mask = #{reduced4CExtra_shift [ 14 ], reduced4CExtra_shift [ 15 ], reduced4CExtra_shift [ 16 ], reduced4CExtra_shift [ 17 ], reduced4CExtra_shift [ 18 ], reduced4CExtra_shift [ 19 ]} >>
+        let _GEN = _GEN_bits & _GEN_mask >>
+        let a_notZero = a_31_29 != <(0)::logic[3]> >>
+        let b_notZero = b_31_29 != <(0)::logic[3]> >>
+        let io_mulAddA = (<(a_notZero)::logic[24]> << <(23)::logic[24]>) | <(a)::logic[24]> >>
+        let io_mulAddB = (<(b_notZero)::logic[24]> << <(23)::logic[24]>) | <(b)::logic[24]> >>
+        let io_toPostMul_isSigNaNAny = (rawA_isNaN & ~a [ 22 ]) | (rawB_isNaN & ~b [ 22 ]) | (rawC_isNaN & ~c [ 22 ]) >>
+        let io_toPostMul_isNaNAOrB = rawA_isNaN | rawB_isNaN >>
+        let io_toPostMul_isInfA = (a_31_30 == <(3)::logic[2]>) & ~a [ 29 ] >>
+        let io_toPostMul_isZeroA = a_31_29 == <(0)::logic[3]> >>
+        let io_toPostMul_isInfB = (b_31_30 == <(3)::logic[2]>) & ~b [ 29 ] >>
+        let io_toPostMul_isZeroB = b_31_29 == <(0)::logic[3]> >>
+        let io_toPostMul_isNaNC = rawC_isNaN >>
+        let io_toPostMul_isInfC = (c_31_30 == <(3)::logic[2]>) & ~c [ 29 ] >>
+        let io_toPostMul_isZeroC = c_31_29 == <(0)::logic[3]> >>
+        let io_toPostMul_sExpSum = if CIsDominant { <(c_31_23_9)::logic[10]> } else { <(sExpAlignedProd_T_1)::logic[10]> - <(24)::logic[10]> } >>
+        let io_toPostMul_bit0AlignedSigC = if doSubMags { (mainAlignedSigC_2_0 == <(7)::logic[3]>) & (_GEN == <(0)::logic[6]>) } else { ((<(mainAlignedSigC_2_0)::logic[9]> << <(6)::logic[9]>) | <(_GEN)::logic[9]>) != <(0)::logic[9]> } >>
+        send out_ep.io_mulAddA (<(io_mulAddA)::logic[24]>) >>
+        send out_ep.io_mulAddB (<(io_mulAddB)::logic[24]>) >>
+        send out_ep.io_mulAddC (<(mainAlignedSigC_50_3)::logic[48]>) >>
+        send out_ep.io_toPostMul_isSigNaNAny (<(io_toPostMul_isSigNaNAny)::logic>) >>
+        send out_ep.io_toPostMul_isNaNAOrB (<(io_toPostMul_isNaNAOrB)::logic>) >>
+        send out_ep.io_toPostMul_isInfA (<(io_toPostMul_isInfA)::logic>) >>
+        send out_ep.io_toPostMul_isZeroA (<(io_toPostMul_isZeroA)::logic>) >>
+        send out_ep.io_toPostMul_isInfB (<(io_toPostMul_isInfB)::logic>) >>
+        send out_ep.io_toPostMul_isZeroB (<(io_toPostMul_isZeroB)::logic>) >>
+        send out_ep.io_toPostMul_signProd (<(signProd)::logic>) >>
+        send out_ep.io_toPostMul_isNaNC (<(io_toPostMul_isNaNC)::logic>) >>
+        send out_ep.io_toPostMul_isInfC (<(io_toPostMul_isInfC)::logic>) >>
+        send out_ep.io_toPostMul_isZeroC (<(io_toPostMul_isZeroC)::logic>) >>
+        send out_ep.io_toPostMul_sExpSum (<(io_toPostMul_sExpSum)::logic[10]>) >>
+        send out_ep.io_toPostMul_doSubMags (<(doSubMags)::logic>) >>
+        send out_ep.io_toPostMul_CIsDominant (<(CIsDominant)::logic>) >>
+        send out_ep.io_toPostMul_CDom_CAlignDist (<(CAlignDist_4_0)::logic[5]>) >>
+        send out_ep.io_toPostMul_highAlignedSigC (<(mainAlignedSigC_76_51)::logic[26]>) >>
+        send out_ep.io_toPostMul_bit0AlignedSigC (<(io_toPostMul_bit0AlignedSigC)::logic>) >>
+        cycle 1
+    }
+
+}
