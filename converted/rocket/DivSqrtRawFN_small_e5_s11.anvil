@@ -1,0 +1,390 @@
+/* Anvil translation of DivSqrtRawFN_small_e5_s11 */
+
+chan DivSqrtRawFN_small_e5_s11_in_ch {
+    left io_inValid : (logic@#1) @#1,
+    left io_sqrtOp : (logic@#1) @#1,
+    left io_a_isNaN : (logic@#1) @#1,
+    left io_a_isInf : (logic@#1) @#1,
+    left io_a_isZero : (logic@#1) @#1,
+    left io_a_sign : (logic@#1) @#1,
+    left io_a_sExp : (logic[7]@#1) @#1,
+    left io_a_sig : (logic[12]@#1) @#1,
+    left io_b_isNaN : (logic@#1) @#1,
+    left io_b_isInf : (logic@#1) @#1,
+    left io_b_isZero : (logic@#1) @#1,
+    left io_b_sign : (logic@#1) @#1,
+    left io_b_sExp : (logic[7]@#1) @#1,
+    left io_b_sig : (logic[12]@#1) @#1,
+    left io_roundingMode : (logic[3]@#1) @#1
+}
+
+chan DivSqrtRawFN_small_e5_s11_out_ch {
+    left io_inReady : (logic@#1) @#1,
+    left io_rawOutValid_div : (logic@#1) @#1,
+    left io_rawOutValid_sqrt : (logic@#1) @#1,
+    left io_roundingModeOut : (logic[3]@#1) @#1,
+    left io_invalidExc : (logic@#1) @#1,
+    left io_infiniteExc : (logic@#1) @#1,
+    left io_rawOut_isNaN : (logic@#1) @#1,
+    left io_rawOut_isInf : (logic@#1) @#1,
+    left io_rawOut_isZero : (logic@#1) @#1,
+    left io_rawOut_sign : (logic@#1) @#1,
+    left io_rawOut_sExp : (logic[7]@#1) @#1,
+    left io_rawOut_sig : (logic[14]@#1) @#1
+}
+
+proc DivSqrtRawFN_small_e5_s11(
+    in_ep : left DivSqrtRawFN_small_e5_s11_in_ch,
+    out_ep : right DivSqrtRawFN_small_e5_s11_out_ch
+) {
+    /* Input holding registers */
+    reg r_io_inValid : logic;
+    reg r_io_sqrtOp : logic;
+    reg r_io_a_isNaN : logic;
+    reg r_io_a_isInf : logic;
+    reg r_io_a_isZero : logic;
+    reg r_io_a_sign : logic;
+    reg r_io_a_sExp : logic[7];
+    reg r_io_a_sig : logic[12];
+    reg r_io_b_isNaN : logic;
+    reg r_io_b_isInf : logic;
+    reg r_io_b_isZero : logic;
+    reg r_io_b_sign : logic;
+    reg r_io_b_sExp : logic[7];
+    reg r_io_b_sig : logic[12];
+    reg r_io_roundingMode : logic[3];
+
+    /* State registers (reset: cycleNum=0, inReady=1, rawOutValid=0, rest undefined) */
+    reg cycleNum : logic[4];
+    reg inReady : logic;
+    reg rawOutValid : logic;
+    reg sqrtOp_Z : logic;
+    reg majorExc_Z : logic;
+    reg isNaN_Z : logic;
+    reg isInf_Z : logic;
+    reg isZero_Z : logic;
+    reg sign_Z : logic;
+    reg sExp_Z : logic[7];
+    reg fractB_Z : logic[11];
+    reg roundingMode_Z : logic[3];
+    reg rem_Z : logic[13];
+    reg notZeroRem_Z : logic;
+    reg sigX_Z : logic[13];
+
+    loop {
+        let io_inValid = recv in_ep.io_inValid >>
+        set r_io_inValid := <(io_inValid)::logic>
+    }
+
+    loop {
+        let io_sqrtOp = recv in_ep.io_sqrtOp >>
+        set r_io_sqrtOp := <(io_sqrtOp)::logic>
+    }
+
+    loop {
+        let io_a_isNaN = recv in_ep.io_a_isNaN >>
+        set r_io_a_isNaN := <(io_a_isNaN)::logic>
+    }
+
+    loop {
+        let io_a_isInf = recv in_ep.io_a_isInf >>
+        set r_io_a_isInf := <(io_a_isInf)::logic>
+    }
+
+    loop {
+        let io_a_isZero = recv in_ep.io_a_isZero >>
+        set r_io_a_isZero := <(io_a_isZero)::logic>
+    }
+
+    loop {
+        let io_a_sign = recv in_ep.io_a_sign >>
+        set r_io_a_sign := <(io_a_sign)::logic>
+    }
+
+    loop {
+        let io_a_sExp = recv in_ep.io_a_sExp >>
+        set r_io_a_sExp := <(io_a_sExp)::logic[7]>
+    }
+
+    loop {
+        let io_a_sig = recv in_ep.io_a_sig >>
+        set r_io_a_sig := <(io_a_sig)::logic[12]>
+    }
+
+    loop {
+        let io_b_isNaN = recv in_ep.io_b_isNaN >>
+        set r_io_b_isNaN := <(io_b_isNaN)::logic>
+    }
+
+    loop {
+        let io_b_isInf = recv in_ep.io_b_isInf >>
+        set r_io_b_isInf := <(io_b_isInf)::logic>
+    }
+
+    loop {
+        let io_b_isZero = recv in_ep.io_b_isZero >>
+        set r_io_b_isZero := <(io_b_isZero)::logic>
+    }
+
+    loop {
+        let io_b_sign = recv in_ep.io_b_sign >>
+        set r_io_b_sign := <(io_b_sign)::logic>
+    }
+
+    loop {
+        let io_b_sExp = recv in_ep.io_b_sExp >>
+        set r_io_b_sExp := <(io_b_sExp)::logic[7]>
+    }
+
+    loop {
+        let io_b_sig = recv in_ep.io_b_sig >>
+        set r_io_b_sig := <(io_b_sig)::logic[12]>
+    }
+
+    loop {
+        let io_roundingMode = recv in_ep.io_roundingMode >>
+        set r_io_roundingMode := <(io_roundingMode)::logic[3]>
+    }
+
+    /* Output loop: sends based on current state registers */
+    loop {
+        let out_rawOut_sig = (<(*sigX_Z)::logic[14]> << <(1)::logic[14]>) | <(*notZeroRem_Z)::logic[14]> >>
+        send out_ep.io_inReady (<(*inReady)::logic>) >>
+        send out_ep.io_rawOutValid_div (<(*rawOutValid & ~ *sqrtOp_Z)::logic>) >>
+        send out_ep.io_rawOutValid_sqrt (<(*rawOutValid & *sqrtOp_Z)::logic>) >>
+        send out_ep.io_roundingModeOut (<(*roundingMode_Z)::logic[3]>) >>
+        send out_ep.io_invalidExc (<(*majorExc_Z & *isNaN_Z)::logic>) >>
+        send out_ep.io_infiniteExc (<(*majorExc_Z & ~ *isNaN_Z)::logic>) >>
+        send out_ep.io_rawOut_isNaN (<(*isNaN_Z)::logic>) >>
+        send out_ep.io_rawOut_isInf (<(*isInf_Z)::logic>) >>
+        send out_ep.io_rawOut_isZero (<(*isZero_Z)::logic>) >>
+        send out_ep.io_rawOut_sign (<(*sign_Z)::logic>) >>
+        send out_ep.io_rawOut_sExp (<(*sExp_Z)::logic[7]>) >>
+        send out_ep.io_rawOut_sig (<(out_rawOut_sig)::logic[14]>) >>
+        cycle 1
+    }
+
+    /* State update loop: compute next state and set registers each cycle.
+       Key: use *reg directly inline to avoid borrow conflicts with set statements. */
+    loop {
+        let io_sqrtOp = *r_io_sqrtOp >>
+        let io_a_isNaN = *r_io_a_isNaN >>
+        let io_a_isInf = *r_io_a_isInf >>
+        let io_a_isZero = *r_io_a_isZero >>
+        let io_a_sign = *r_io_a_sign >>
+        let io_a_sExp = *r_io_a_sExp >>
+        let io_a_sig = *r_io_a_sig >>
+        let io_b_isNaN = *r_io_b_isNaN >>
+        let io_b_isInf = *r_io_b_isInf >>
+        let io_b_isZero = *r_io_b_isZero >>
+        let io_b_sign = *r_io_b_sign >>
+        let io_b_sExp = *r_io_b_sExp >>
+        let io_b_sig = *r_io_b_sig >>
+        let io_roundingMode = *r_io_roundingMode >>
+        let io_inValid = *r_io_inValid >>
+
+        /* specialCaseA_S = io_a_isNaN | io_a_isInf | io_a_isZero */
+        let specialCaseA_S = io_a_isNaN | io_a_isInf | io_a_isZero >>
+
+        /* normalCase_S */
+        let specialCaseB_S = io_b_isNaN | io_b_isInf | io_b_isZero >>
+        let normalCase_S = if io_sqrtOp { ~specialCaseA_S & ~io_a_sign } else { ~specialCaseA_S & ~specialCaseB_S } >>
+
+        /* io_a_sExp[0] */
+        let a_sExp_bit0 = <(io_a_sExp)::logic> >>
+
+        /* oddSqrt_S = io_sqrtOp & io_a_sExp[0] */
+        let oddSqrt_S = io_sqrtOp & a_sExp_bit0 >>
+
+        /* entering = inReady & io_inValid */
+        let entering = *inReady & io_inValid >>
+
+        /* skipCycle2 = cycleNum == 4'h3 & sigX_Z[12] */
+        let cycleNum_eq3 = *cycleNum == <(3)::logic[4]> >>
+        let skipCycle2 = cycleNum_eq3 & <(*sigX_Z >> 12)::logic> >>
+
+        /* _sigX_Z_T_7 = inReady & oddSqrt_S */
+        let sigX_Z_T7 = *inReady & oddSqrt_S >>
+
+        /* notSigNaNIn_invalidExc_S_div */
+        let notSigNaNIn_invalidExc_S_div = io_a_isZero & io_b_isZero | io_a_isInf & io_b_isInf >>
+
+        /* notSigNaNIn_invalidExc_S_sqrt */
+        let notSigNaNIn_invalidExc_S_sqrt = ~io_a_isNaN & ~io_a_isZero & io_a_sign >>
+
+        /* sExpQuot_S_div[7:0] = {io_a_sExp[6], io_a_sExp[6:0]} + {{3{io_b_sExp[5]}}, ~io_b_sExp[4:0]} */
+        let a_sExp_bit6 = <(io_a_sExp >> 6)::logic> >>
+        let a_sExp_ext8 = (<(a_sExp_bit6)::logic[8]> << <(7)::logic[8]>) | <(io_a_sExp)::logic[8]> >>
+        let b_sExp_bit5 = <(io_b_sExp >> 5)::logic> >>
+        let b_sExp_lo5 = <(io_b_sExp)::logic[5]> >>
+        let b_sExp_lo5_inv = ~b_sExp_lo5 >>
+        let b_sign3 = if b_sExp_bit5 { <(7)::logic[3]> } else { <(0)::logic[3]> } >>
+        let sExpQuot_rhs = (<(b_sign3)::logic[8]> << <(5)::logic[8]>) | <(b_sExp_lo5_inv)::logic[8]> >>
+        let sExpQuot_S_div = a_sExp_ext8 + sExpQuot_rhs >>
+
+        /* _fractB_Z_T_4[10:0] = inReady & ~sqrtOp ? {io_b_sig[9:0], 1'h0} : 11'h0 */
+        let b_sig_lo10 = <(io_b_sig)::logic[10]> >>
+        let fractB_T4 = if (*inReady & ~io_sqrtOp) { (<(b_sig_lo10)::logic[11]> << <(1)::logic[11]>) } else { <(0)::logic[11]> } >>
+
+        /* _fractB_Z_T_10 = inReady & io_sqrtOp */
+        let fractB_T10 = *inReady & io_sqrtOp >>
+
+        /* rem[13:0] */
+        let a_sig_shifted = <(io_a_sig)::logic[14]> << <(1)::logic[14]> >>
+        let rem_part1 = if (*inReady & ~oddSqrt_S) { a_sig_shifted } else { <(0)::logic[14]> } >>
+        let a_sig_bits10_9 = <(io_a_sig >> 9)::logic[2]> >>
+        let a_sig_lo9 = <(io_a_sig)::logic[9]> >>
+        let a_sig_hi2_dec = a_sig_bits10_9 - <(1)::logic[2]> >>
+        let rem_part2_inner = (<(a_sig_hi2_dec)::logic[14]> << <(12)::logic[14]>) | (<(a_sig_lo9)::logic[14]> << <(3)::logic[14]>) >>
+        let rem_part2 = if sigX_Z_T7 { rem_part2_inner } else { <(0)::logic[14]> } >>
+        let rem_Z_shifted = <(*rem_Z)::logic[14]> << <(1)::logic[14]> >>
+        let rem_part3 = if *inReady { <(0)::logic[14]> } else { rem_Z_shifted } >>
+        let rem = rem_part1 | rem_part2 | rem_part3 >>
+
+        /* _trialTerm_T_3[12:0] = inReady & ~sqrtOp ? {io_b_sig, 1'h0} : 13'h0 */
+        let trialTerm_T3 = if (*inReady & ~io_sqrtOp) { (<(io_b_sig)::logic[13]> << <(1)::logic[13]>) } else { <(0)::logic[13]> } >>
+
+        /* _trialTerm_T_9[12:0] */
+        let trialTerm_T3_bit12 = <(trialTerm_T3 >> 12)::logic> >>
+        let trialTerm_T3_lo12 = <(trialTerm_T3)::logic[12]> >>
+        let sqrtOp_evenA = *inReady & io_sqrtOp & ~a_sExp_bit0 >>
+        let sqrtEven12 = <(sqrtOp_evenA)::logic[12]> << <(11)::logic[12]> >>
+        let trialTerm_T9_lo12 = trialTerm_T3_lo12 | sqrtEven12 >>
+        let trialTerm_T9_base = (<(trialTerm_T3_bit12)::logic[13]> << <(12)::logic[13]>) | <(trialTerm_T9_lo12)::logic[13]> >>
+        let trialTerm_T9 = if sigX_Z_T7 { trialTerm_T9_base | <(5120)::logic[13]> } else { trialTerm_T9_base } >>
+
+        /* trialRem[15:0] = {2'h0, rem} - {2'h0, subtrahend} */
+        let trialTerm_T9_bit12 = <(trialTerm_T9 >> 12)::logic> >>
+        let trialTerm_T9_bit11 = <(trialTerm_T9 >> 11)::logic> >>
+        let trialTerm_T9_lo11 = <(trialTerm_T9)::logic[11]> >>
+        let not_inReady_not_sqrtZ = ~*inReady & ~*sqrtOp_Z >>
+        let bit11_or = trialTerm_T9_bit11 | not_inReady_not_sqrtZ >>
+        let fractB_or = if *inReady { <(0)::logic[11]> } else { <(*fractB_Z)::logic[11]> } >>
+        let lo11_or = trialTerm_T9_lo11 | fractB_or >>
+        let sub_base14 = (<(trialTerm_T9_bit12)::logic[14]> << <(12)::logic[14]>) | (<(bit11_or)::logic[14]> << <(11)::logic[14]>) | <(lo11_or)::logic[14]> >>
+        let sub_sqrtZ = if (~*inReady & *sqrtOp_Z) { <(*sigX_Z)::logic[14]> << <(1)::logic[14]> } else { <(0)::logic[14]> } >>
+        let subtrahend14 = sub_base14 | sub_sqrtZ >>
+        let trialRem16 = <(rem)::logic[16]> - <(subtrahend14)::logic[16]> >>
+
+        /* newBit = $signed(trialRem) > -1, i.e. MSB == 0 */
+        let trialRem_msb = <(trialRem16 >> 15)::logic> >>
+        let newBit = ~trialRem_msb >>
+
+        /* _GEN = entering | ~inReady */
+        let gen_cond = entering | ~*inReady >>
+
+        /* _cycleNum_T_15[3:0] */
+        let cycleNum_case = if io_sqrtOp { if a_sExp_bit0 { <(11)::logic[4]> } else { <(12)::logic[4]> } } else { <(13)::logic[4]> } >>
+        let cycleNum_T15_a = <(entering & ~normalCase_S)::logic[4]> >>
+        let cycleNum_T15_b = if (entering & normalCase_S) { cycleNum_case } else { <(0)::logic[4]> } >>
+        let cycleNum_T15_c = if (entering | skipCycle2) { <(0)::logic[4]> } else { *cycleNum - <(1)::logic[4]> } >>
+        let cycleNum_T15 = cycleNum_T15_a | cycleNum_T15_b | cycleNum_T15_c >>
+
+        /* next cycleNum = {cycleNum_T15[3:1], cycleNum_T15[0] | skipCycle2} */
+        let cycleNum_T15_lo1 = <(cycleNum_T15)::logic> >>
+        let cycleNum_T15_hi3 = <(cycleNum_T15 >> 1)::logic[3]> >>
+        let cycleNum_next_lo = cycleNum_T15_lo1 | skipCycle2 >>
+        let cycleNum_next = (<(cycleNum_T15_hi3)::logic[4]> << <(1)::logic[4]>) | <(cycleNum_next_lo)::logic[4]> >>
+
+        /* inReady next: cycleNum-1 < 2 means cycleNum is 1 or 2 */
+        let cycleNum_is1 = *cycleNum == <(1)::logic[4]> >>
+        let cycleNum_is2 = *cycleNum == <(2)::logic[4]> >>
+        let cycleNum_m1_lt2 = cycleNum_is1 | cycleNum_is2 >>
+        let next_inReady = entering & ~normalCase_S | ~entering & ~skipCycle2 & cycleNum_m1_lt2 | skipCycle2 >>
+
+        /* rawOutValid next: cycleNum-1 == 1 means cycleNum == 2 */
+        let next_rawOutValid = entering & ~normalCase_S | ~entering & ~skipCycle2 & cycleNum_is2 | skipCycle2 >>
+
+        /* state_update_cond: (|cycleNum) | entering */
+        let cycleNum_nonzero = *cycleNum != <(0)::logic[4]> >>
+        let state_update_cond = cycleNum_nonzero | entering >>
+
+        /* majorExc_Z computation */
+        let a_sig_bit9 = <(io_a_sig >> 9)::logic> >>
+        let b_sig_bit9 = <(io_b_sig >> 9)::logic> >>
+        let majorExc_sqrt = io_a_isNaN & ~a_sig_bit9 | notSigNaNIn_invalidExc_S_sqrt >>
+        let majorExc_div = io_a_isNaN & ~a_sig_bit9 | io_b_isNaN & ~b_sig_bit9 | notSigNaNIn_invalidExc_S_div | ~io_a_isNaN & ~io_a_isInf & io_b_isZero >>
+        let next_majorExc_Z = if io_sqrtOp { majorExc_sqrt } else { majorExc_div } >>
+
+        let isNaN_sqrt = io_a_isNaN | notSigNaNIn_invalidExc_S_sqrt >>
+        let isNaN_div = io_a_isNaN | io_b_isNaN | notSigNaNIn_invalidExc_S_div >>
+        let next_isNaN_Z = if io_sqrtOp { isNaN_sqrt } else { isNaN_div } >>
+
+        let next_isInf_Z = ~io_sqrtOp & io_b_isZero | io_a_isInf >>
+        let next_isZero_Z = ~io_sqrtOp & io_b_isInf | io_a_isZero >>
+        let next_sign_Z = io_a_sign ^ ~io_sqrtOp & io_b_sign >>
+
+        /* sExp_Z: sqrt path */
+        let a_sExp_hi6 = <(io_a_sExp >> 1)::logic[6]> >>
+        let sExp_sqrt_val = (<(a_sExp_bit6)::logic[7]> << <(6)::logic[7]>) | <(a_sExp_hi6)::logic[7]> >>
+        let sExp_sqrt_adj = sExp_sqrt_val + <(16)::logic[7]> >>
+        /* sExp_Z: div path - check if $signed(sExpQuot) > 55
+           For positive (bit7=0): > 55 iff bit6=1 OR (bit5 & bit4 & bit3) */
+        let sExpQuot_signed_msb = <(sExpQuot_S_div >> 7)::logic> >>
+        let sExpQuot_bit6 = <(sExpQuot_S_div >> 6)::logic> >>
+        let sExpQuot_bit5 = <(sExpQuot_S_div >> 5)::logic> >>
+        let sExpQuot_bit4 = <(sExpQuot_S_div >> 4)::logic> >>
+        let sExpQuot_bit3 = <(sExpQuot_S_div >> 3)::logic> >>
+        let sExpQuot_val_gt55 = sExpQuot_bit6 | sExpQuot_bit5 & sExpQuot_bit4 & sExpQuot_bit3 >>
+        let sExpQuot_over = ~sExpQuot_signed_msb & sExpQuot_val_gt55 >>
+        let sExpQuot_hi4 = <(sExpQuot_S_div >> 3)::logic[4]> >>
+        let sExpQuot_lo3 = <(sExpQuot_S_div)::logic[3]> >>
+        let sExp_div_hi4 = if sExpQuot_over { <(6)::logic[4]> } else { sExpQuot_hi4 } >>
+        let sExp_div = (<(sExp_div_hi4)::logic[7]> << <(3)::logic[7]>) | <(sExpQuot_lo3)::logic[7]> >>
+        let next_sExp_Z = if io_sqrtOp { sExp_sqrt_adj } else { sExp_div } >>
+
+        /* fractB_Z update */
+        let fractB_T4_bit10 = <(fractB_T4 >> 10)::logic> >>
+        let fractB_T4_lo10 = <(fractB_T4)::logic[10]> >>
+        let fractB_next_top = fractB_T4_bit10 | fractB_T10 & ~a_sExp_bit0 >>
+        let fractB_sqrtOdd_bit = <(fractB_T10 & a_sExp_bit0)::logic[10]> << <(9)::logic[10]> >>
+        let fractB_Z_hi10 = <(*fractB_Z >> 1)::logic[10]> >>
+        let fractB_hold = if *inReady { <(0)::logic[10]> } else { fractB_Z_hi10 } >>
+        let fractB_next_lo10 = fractB_T4_lo10 | fractB_sqrtOdd_bit | fractB_hold >>
+        let next_fractB_Z = (<(fractB_next_top)::logic[11]> << <(10)::logic[11]>) | <(fractB_next_lo10)::logic[11]> >>
+        let fractB_update_cond = entering | ~*inReady & *sqrtOp_Z >>
+
+        /* _sigX_Z_T_3 and _GEN_0 */
+        let sigX_T3 = if (*inReady & ~io_sqrtOp) { (<(newBit)::logic[13]> << <(12)::logic[13]>) } else { <(0)::logic[13]> } >>
+        let sigX_T3_lo12 = <(sigX_T3)::logic[12]> >>
+        let sqrtOp_top12 = <(*inReady & io_sqrtOp)::logic[12]> << <(11)::logic[12]> >>
+        let gen0_12 = sigX_T3_lo12 | sqrtOp_top12 >>
+
+        /* sigX_Z next value */
+        let sigX_T3_bit12 = <(sigX_T3 >> 12)::logic> >>
+        let gen0_bit11 = <(gen0_12 >> 11)::logic> >>
+        let gen0_lo11 = <(gen0_12)::logic[11]> >>
+        let sigX_T7_part = if sigX_Z_T7 { <(newBit)::logic[11]> << <(10)::logic[11]> } else { <(0)::logic[11]> } >>
+        let sigX_top3 = (<(sigX_T3_bit12)::logic[13]> << <(12)::logic[13]>) | (<(gen0_bit11)::logic[13]> << <(11)::logic[13]>) | <(gen0_lo11 | sigX_T7_part)::logic[13]> >>
+        let bitMask16 = <(1)::logic[16]> << <(*cycleNum)::logic[16]> >>
+        let bitMask14_2 = <(bitMask16 >> 2)::logic[13]> >>
+        let sigX_bit_upd = if (~*inReady & newBit) { bitMask14_2 } else { <(0)::logic[13]> } >>
+        let next_sigX_Z = sigX_top3 | (if *inReady { <(0)::logic[13]> } else { *sigX_Z }) | sigX_bit_upd >>
+
+        /* rem_Z next */
+        let trialRem_lo13 = <(trialRem16)::logic[13]> >>
+        let rem_lo13 = <(rem)::logic[13]> >>
+        let next_rem_Z = if newBit { trialRem_lo13 } else { rem_lo13 } >>
+
+        /* notZeroRem_Z next */
+        let next_notZeroRem_Z = trialRem16 != <(0)::logic[16]> >>
+        let notZeroRem_update_cond = gen_cond & (*inReady | newBit) >>
+
+        set cycleNum := if state_update_cond { cycleNum_next } else { *cycleNum } >>
+        set inReady := if state_update_cond { next_inReady } else { *inReady } >>
+        set rawOutValid := if state_update_cond { next_rawOutValid } else { *rawOutValid } >>
+        set sqrtOp_Z := if entering { io_sqrtOp } else { *sqrtOp_Z } >>
+        set majorExc_Z := if entering { next_majorExc_Z } else { *majorExc_Z } >>
+        set isNaN_Z := if entering { next_isNaN_Z } else { *isNaN_Z } >>
+        set isInf_Z := if entering { next_isInf_Z } else { *isInf_Z } >>
+        set isZero_Z := if entering { next_isZero_Z } else { *isZero_Z } >>
+        set sign_Z := if entering { next_sign_Z } else { *sign_Z } >>
+        set sExp_Z := if entering { next_sExp_Z } else { *sExp_Z } >>
+        set roundingMode_Z := if entering { io_roundingMode } else { *roundingMode_Z } >>
+        set fractB_Z := if fractB_update_cond { next_fractB_Z } else { *fractB_Z } >>
+        set rem_Z := if gen_cond { next_rem_Z } else { *rem_Z } >>
+        set sigX_Z := if gen_cond { next_sigX_Z } else { *sigX_Z } >>
+        set notZeroRem_Z := if notZeroRem_update_cond { next_notZeroRem_Z } else { *notZeroRem_Z }
+    }
+
+}
