@@ -1,0 +1,308 @@
+/* Anvil translation of MulAddRecFNToRaw_postMul_e8_s24 */
+
+chan MulAddRecFNToRaw_postMul_e8_s24_in_ch {
+    left io_fromPreMul_isSigNaNAny : (logic@#1) @#1,
+    left io_fromPreMul_isNaNAOrB : (logic@#1) @#1,
+    left io_fromPreMul_isInfA : (logic@#1) @#1,
+    left io_fromPreMul_isZeroA : (logic@#1) @#1,
+    left io_fromPreMul_isInfB : (logic@#1) @#1,
+    left io_fromPreMul_isZeroB : (logic@#1) @#1,
+    left io_fromPreMul_signProd : (logic@#1) @#1,
+    left io_fromPreMul_isNaNC : (logic@#1) @#1,
+    left io_fromPreMul_isInfC : (logic@#1) @#1,
+    left io_fromPreMul_isZeroC : (logic@#1) @#1,
+    left io_fromPreMul_sExpSum : (logic[10]@#1) @#1,
+    left io_fromPreMul_doSubMags : (logic@#1) @#1,
+    left io_fromPreMul_CIsDominant : (logic@#1) @#1,
+    left io_fromPreMul_CDom_CAlignDist : (logic[5]@#1) @#1,
+    left io_fromPreMul_highAlignedSigC : (logic[26]@#1) @#1,
+    left io_fromPreMul_bit0AlignedSigC : (logic@#1) @#1,
+    left io_mulAddResult : (logic[49]@#1) @#1,
+    left io_roundingMode : (logic[3]@#1) @#1
+}
+
+chan MulAddRecFNToRaw_postMul_e8_s24_out_ch {
+    left io_invalidExc : (logic@#1) @#1,
+    left io_rawOut_isNaN : (logic@#1) @#1,
+    left io_rawOut_isInf : (logic@#1) @#1,
+    left io_rawOut_isZero : (logic@#1) @#1,
+    left io_rawOut_sign : (logic@#1) @#1,
+    left io_rawOut_sExp : (logic[10]@#1) @#1,
+    left io_rawOut_sig : (logic[27]@#1) @#1
+}
+
+proc MulAddRecFNToRaw_postMul_e8_s24(
+    in_ep : left MulAddRecFNToRaw_postMul_e8_s24_in_ch,
+    out_ep : right MulAddRecFNToRaw_postMul_e8_s24_out_ch
+) {
+    reg r_isSigNaNAny : logic;
+    reg r_isNaNAOrB : logic;
+    reg r_isInfA : logic;
+    reg r_isZeroA : logic;
+    reg r_isInfB : logic;
+    reg r_isZeroB : logic;
+    reg r_signProd : logic;
+    reg r_isNaNC : logic;
+    reg r_isInfC : logic;
+    reg r_isZeroC : logic;
+    reg r_sExpSum : logic[10];
+    reg r_doSubMags : logic;
+    reg r_CIsDominant : logic;
+    reg r_CDom_CAlignDist : logic[5];
+    reg r_highAlignedSigC : logic[26];
+    reg r_bit0AlignedSigC : logic;
+    reg r_mulAddResult : logic[49];
+    reg r_roundingMode : logic[3];
+
+    loop { let v = recv in_ep.io_fromPreMul_isSigNaNAny >> set r_isSigNaNAny := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_isNaNAOrB >> set r_isNaNAOrB := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_isInfA >> set r_isInfA := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_isZeroA >> set r_isZeroA := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_isInfB >> set r_isInfB := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_isZeroB >> set r_isZeroB := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_signProd >> set r_signProd := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_isNaNC >> set r_isNaNC := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_isInfC >> set r_isInfC := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_isZeroC >> set r_isZeroC := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_sExpSum >> set r_sExpSum := <(v)::logic[10]> }
+    loop { let v = recv in_ep.io_fromPreMul_doSubMags >> set r_doSubMags := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_CIsDominant >> set r_CIsDominant := <(v)::logic> }
+    loop { let v = recv in_ep.io_fromPreMul_CDom_CAlignDist >> set r_CDom_CAlignDist := <(v)::logic[5]> }
+    loop { let v = recv in_ep.io_fromPreMul_highAlignedSigC >> set r_highAlignedSigC := <(v)::logic[26]> }
+    loop { let v = recv in_ep.io_fromPreMul_bit0AlignedSigC >> set r_bit0AlignedSigC := <(v)::logic> }
+    loop { let v = recv in_ep.io_mulAddResult >> set r_mulAddResult := <(v)::logic[49]> }
+    loop { let v = recv in_ep.io_roundingMode >> set r_roundingMode := <(v)::logic[3]> }
+
+    loop {
+        let isSigNaNAny = *r_isSigNaNAny >>
+        let isNaNAOrB = *r_isNaNAOrB >>
+        let isInfA = *r_isInfA >>
+        let isZeroA = *r_isZeroA >>
+        let isInfB = *r_isInfB >>
+        let isZeroB = *r_isZeroB >>
+        let signProd = *r_signProd >>
+        let isNaNC = *r_isNaNC >>
+        let isInfC = *r_isInfC >>
+        let isZeroC = *r_isZeroC >>
+        let sExpSum = *r_sExpSum >>
+        let doSubMags = *r_doSubMags >>
+        let CIsDominant = *r_CIsDominant >>
+        let CDom_CAlignDist = *r_CDom_CAlignDist >>
+        let highAlignedSigC = *r_highAlignedSigC >>
+        let bit0AlignedSigC = *r_bit0AlignedSigC >>
+        let mulAddResult = *r_mulAddResult >>
+        let roundingMode = *r_roundingMode >>
+
+        let roundingMode_min = roundingMode == <(2)::logic[3]> >>
+        let opSignC = signProd ^ doSubMags >>
+
+        /* _sigSum_T_3 [25:0]: mulAddResult[48] ? highAlignedSigC + 1 : highAlignedSigC */
+        let sigSum_T_3 = if mulAddResult [ 48 ] { <(highAlignedSigC)::logic[26]> + <(1)::logic[26]> } else { <(highAlignedSigC)::logic[26]> } >>
+
+        /* CDom_absSigSum [49:0]:
+           doSubMags ? ~{sigSum_T_3[25:0], mulAddResult[47:24]}
+                     : {1'h0, highAlignedSigC[25:24], sigSum_T_3[23:0], mulAddResult[47:25]}
+           sub: 26+24=50 bits
+           norm: 1+2+24+23=50 bits */
+        let mar_47_24 = <(mulAddResult >> <(24)::logic[49]>)::logic[24]> >>
+        let mar_47_25 = <(mulAddResult >> <(25)::logic[49]>)::logic[23]> >>
+        let hASC_25_24 = <(highAlignedSigC >> <(24)::logic[26]>)::logic[2]> >>
+        let sT3_23_0 = <(sigSum_T_3)::logic[24]> >>
+        let cdom_concat_sub = (<(sigSum_T_3)::logic[50]> << <(24)::logic[50]>) | <(mar_47_24)::logic[50]> >>
+        let cdom_sub = ~cdom_concat_sub >>
+        let cdom_norm = (<(hASC_25_24)::logic[50]> << <(47)::logic[50]>) | (<(sT3_23_0)::logic[50]> << <(23)::logic[50]>) | <(mar_47_25)::logic[50]> >>
+        let CDom_absSigSum = if doSubMags { cdom_sub } else { cdom_norm } >>
+
+        /* _CDom_mainSig_T [80:0]: {31'h0, CDom_absSigSum} << CDom_CAlignDist */
+        let CDom_mainSig_T = (<(CDom_absSigSum)::logic[81]> << <(<(CDom_CAlignDist)::logic[81]>)::logic[81]>) >>
+
+        /* CDom_reduced4SigExtra_shift [8:0]:
+           $signed(9'sh100 >>> ~(CDom_CAlignDist[4:2]))
+           9'sh100 = -256. Arithmetic right shift of -256 by ~cda[4:2] (3-bit):
+           cda[4:2]=7 => ~=0 => 9'b100000000=256
+           cda[4:2]=6 => ~=1 => 9'b110000000=384
+           cda[4:2]=5 => ~=2 => 9'b111000000=448
+           cda[4:2]=4 => ~=3 => 9'b111100000=480
+           cda[4:2]=3 => ~=4 => 9'b111110000=496
+           cda[4:2]=2 => ~=5 => 9'b111111000=504
+           cda[4:2]=1 => ~=6 => 9'b111111100=508
+           cda[4:2]=0 => ~=7 => 9'b111111110=510 */
+        let cdom_align_hi = <(CDom_CAlignDist >> <(2)::logic[5]>)::logic[3]> >>
+        let CDom_reduced4SigExtra_shift = if (cdom_align_hi == <(7)::logic[3]>) { <(256)::logic[9]> } else { if (cdom_align_hi == <(6)::logic[3]>) { <(384)::logic[9]> } else { if (cdom_align_hi == <(5)::logic[3]>) { <(448)::logic[9]> } else { if (cdom_align_hi == <(4)::logic[3]>) { <(480)::logic[9]> } else { if (cdom_align_hi == <(3)::logic[3]>) { <(496)::logic[9]> } else { if (cdom_align_hi == <(2)::logic[3]>) { <(504)::logic[9]> } else { if (cdom_align_hi == <(1)::logic[3]>) { <(508)::logic[9]> } else { <(510)::logic[9]> } } } } } } } >>
+
+        /* notCDom_absSigSum [50:0]:
+           sigSum_T_3[2] ? ~{sigSum_T_3[1:0], mulAddResult[47:0], bit0AlignedSigC}
+                         : {sigSum_T_3[1:0], mulAddResult[47:0], bit0AlignedSigC} + {50'h0, doSubMags}
+           concat: 2+48+1=51 bits */
+        let sT3_1_0 = <(sigSum_T_3)::logic[2]> >>
+        let mar_47_0 = <(mulAddResult)::logic[48]> >>
+        let nc_concat = (<(sT3_1_0)::logic[51]> << <(49)::logic[51]>) | (<(mar_47_0)::logic[51]> << <(1)::logic[51]>) | <(bit0AlignedSigC)::logic[51]> >>
+        let nc_sub = ~nc_concat >>
+        let nc_norm = nc_concat + <(<(doSubMags)::logic[51]>)::logic[51]> >>
+        let notCDom_absSigSum = if sigSum_T_3 [ 2 ] { nc_sub } else { nc_norm } >>
+
+        /* notCDom_normDistReduced2 [4:0]: priority encoder on notCDom_absSigSum[50:0]
+           notCDom_absSigSum[50]=1 -> 0
+           [49:48]!=0 -> 1, [47:46]!=0 -> 2, ..., [5:4]!=0 -> 23, [3:2]!=0 -> 24
+           last case: {4'hC, ~|(notCDom_absSigSum[3:2])} */
+        let nc_49_48 = <(notCDom_absSigSum >> <(48)::logic[51]>)::logic[2]> >>
+        let nc_47_46 = <(notCDom_absSigSum >> <(46)::logic[51]>)::logic[2]> >>
+        let nc_45_44 = <(notCDom_absSigSum >> <(44)::logic[51]>)::logic[2]> >>
+        let nc_43_42 = <(notCDom_absSigSum >> <(42)::logic[51]>)::logic[2]> >>
+        let nc_41_40 = <(notCDom_absSigSum >> <(40)::logic[51]>)::logic[2]> >>
+        let nc_39_38 = <(notCDom_absSigSum >> <(38)::logic[51]>)::logic[2]> >>
+        let nc_37_36 = <(notCDom_absSigSum >> <(36)::logic[51]>)::logic[2]> >>
+        let nc_35_34 = <(notCDom_absSigSum >> <(34)::logic[51]>)::logic[2]> >>
+        let nc_33_32 = <(notCDom_absSigSum >> <(32)::logic[51]>)::logic[2]> >>
+        let nc_31_30 = <(notCDom_absSigSum >> <(30)::logic[51]>)::logic[2]> >>
+        let nc_29_28 = <(notCDom_absSigSum >> <(28)::logic[51]>)::logic[2]> >>
+        let nc_27_26 = <(notCDom_absSigSum >> <(26)::logic[51]>)::logic[2]> >>
+        let nc_25_24 = <(notCDom_absSigSum >> <(24)::logic[51]>)::logic[2]> >>
+        let nc_23_22 = <(notCDom_absSigSum >> <(22)::logic[51]>)::logic[2]> >>
+        let nc_21_20 = <(notCDom_absSigSum >> <(20)::logic[51]>)::logic[2]> >>
+        let nc_19_18 = <(notCDom_absSigSum >> <(18)::logic[51]>)::logic[2]> >>
+        let nc_17_16 = <(notCDom_absSigSum >> <(16)::logic[51]>)::logic[2]> >>
+        let nc_15_14 = <(notCDom_absSigSum >> <(14)::logic[51]>)::logic[2]> >>
+        let nc_13_12 = <(notCDom_absSigSum >> <(12)::logic[51]>)::logic[2]> >>
+        let nc_11_10 = <(notCDom_absSigSum >> <(10)::logic[51]>)::logic[2]> >>
+        let nc_9_8 = <(notCDom_absSigSum >> <(8)::logic[51]>)::logic[2]> >>
+        let nc_7_6 = <(notCDom_absSigSum >> <(6)::logic[51]>)::logic[2]> >>
+        let nc_5_4 = <(notCDom_absSigSum >> <(4)::logic[51]>)::logic[2]> >>
+        let nc_3_2 = <(notCDom_absSigSum >> <(2)::logic[51]>)::logic[2]> >>
+        /* SV last case: {4'hC, ~|(notCDom_absSigSum[3:2])} = if nc_3_2==0 then 0b11001=25 else 0b11000=24 */
+        let notCDom_normDistReduced2 = if notCDom_absSigSum [ 50 ] { <(0)::logic[5]> } else { if (nc_49_48 != <(0)::logic[2]>) { <(1)::logic[5]> } else { if (nc_47_46 != <(0)::logic[2]>) { <(2)::logic[5]> } else { if (nc_45_44 != <(0)::logic[2]>) { <(3)::logic[5]> } else { if (nc_43_42 != <(0)::logic[2]>) { <(4)::logic[5]> } else { if (nc_41_40 != <(0)::logic[2]>) { <(5)::logic[5]> } else { if (nc_39_38 != <(0)::logic[2]>) { <(6)::logic[5]> } else { if (nc_37_36 != <(0)::logic[2]>) { <(7)::logic[5]> } else { if (nc_35_34 != <(0)::logic[2]>) { <(8)::logic[5]> } else { if (nc_33_32 != <(0)::logic[2]>) { <(9)::logic[5]> } else { if (nc_31_30 != <(0)::logic[2]>) { <(10)::logic[5]> } else { if (nc_29_28 != <(0)::logic[2]>) { <(11)::logic[5]> } else { if (nc_27_26 != <(0)::logic[2]>) { <(12)::logic[5]> } else { if (nc_25_24 != <(0)::logic[2]>) { <(13)::logic[5]> } else { if (nc_23_22 != <(0)::logic[2]>) { <(14)::logic[5]> } else { if (nc_21_20 != <(0)::logic[2]>) { <(15)::logic[5]> } else { if (nc_19_18 != <(0)::logic[2]>) { <(16)::logic[5]> } else { if (nc_17_16 != <(0)::logic[2]>) { <(17)::logic[5]> } else { if (nc_15_14 != <(0)::logic[2]>) { <(18)::logic[5]> } else { if (nc_13_12 != <(0)::logic[2]>) { <(19)::logic[5]> } else { if (nc_11_10 != <(0)::logic[2]>) { <(20)::logic[5]> } else { if (nc_9_8 != <(0)::logic[2]>) { <(21)::logic[5]> } else { if (nc_7_6 != <(0)::logic[2]>) { <(22)::logic[5]> } else { if (nc_5_4 != <(0)::logic[2]>) { <(23)::logic[5]> } else { if (nc_3_2 != <(0)::logic[2]>) { <(24)::logic[5]> } else { <(25)::logic[5]> } } } } } } } } } } } } } } } } } } } } } } } } } >>
+
+        /* _notCDom_mainSig_T [113:0]: {63'h0, notCDom_absSigSum} << {notCDom_normDistReduced2, 1'h0}
+           shift amount = notCDom_normDistReduced2 * 2 */
+        let nc_shift_amt = <((<(notCDom_normDistReduced2)::logic[114]>) << <(1)::logic[114]>)::logic[114]> >>
+        let notCDom_mainSig_T = (<(notCDom_absSigSum)::logic[114]> << nc_shift_amt) >>
+
+        /* notCDom_reduced4SigExtra_shift [16:0]:
+           $signed(17'sh10000 >>> ~(notCDom_normDistReduced2[4:1]))
+           17'sh10000 = -65536. Arithmetic right shift of -65536 by ~nd[4:1] (4-bit, 0..15):
+           nd[4:1]=15 => ~=0  => 17'b10000000000000000=65536
+           nd[4:1]=14 => ~=1  => 17'b11000000000000000=98304
+           nd[4:1]=13 => ~=2  => 17'b11100000000000000=114688
+           nd[4:1]=12 => ~=3  => 17'b11110000000000000=122880
+           nd[4:1]=11 => ~=4  => 17'b11111000000000000=126976
+           nd[4:1]=10 => ~=5  => 17'b11111100000000000=129024
+           nd[4:1]=9  => ~=6  => 17'b11111110000000000=130048
+           nd[4:1]=8  => ~=7  => 17'b11111111000000000=130560
+           nd[4:1]=7  => ~=8  => 17'b11111111100000000=130816
+           nd[4:1]=6  => ~=9  => 17'b11111111110000000=130944
+           nd[4:1]=5  => ~=10 => 17'b11111111111000000=131008
+           nd[4:1]=4  => ~=11 => 17'b11111111111100000=131040
+           nd[4:1]=3  => ~=12 => 17'b11111111111110000=131056
+           nd[4:1]=2  => ~=13 => 17'b11111111111111000=131064
+           nd[4:1]=1  => ~=14 => 17'b11111111111111100=131068
+           nd[4:1]=0  => ~=15 => 17'b11111111111111110=131070 */
+        let nd_4_1 = <(notCDom_normDistReduced2 >> <(1)::logic[5]>)::logic[4]> >>
+        let notCDom_reduced4SigExtra_shift = if (nd_4_1 == <(15)::logic[4]>) { <(65536)::logic[17]> } else { if (nd_4_1 == <(14)::logic[4]>) { <(98304)::logic[17]> } else { if (nd_4_1 == <(13)::logic[4]>) { <(114688)::logic[17]> } else { if (nd_4_1 == <(12)::logic[4]>) { <(122880)::logic[17]> } else { if (nd_4_1 == <(11)::logic[4]>) { <(126976)::logic[17]> } else { if (nd_4_1 == <(10)::logic[4]>) { <(129024)::logic[17]> } else { if (nd_4_1 == <(9)::logic[4]>) { <(130048)::logic[17]> } else { if (nd_4_1 == <(8)::logic[4]>) { <(130560)::logic[17]> } else { if (nd_4_1 == <(7)::logic[4]>) { <(130816)::logic[17]> } else { if (nd_4_1 == <(6)::logic[4]>) { <(130944)::logic[17]> } else { if (nd_4_1 == <(5)::logic[4]>) { <(131008)::logic[17]> } else { if (nd_4_1 == <(4)::logic[4]>) { <(131040)::logic[17]> } else { if (nd_4_1 == <(3)::logic[4]>) { <(131056)::logic[17]> } else { if (nd_4_1 == <(2)::logic[4]>) { <(131064)::logic[17]> } else { if (nd_4_1 == <(1)::logic[4]>) { <(131068)::logic[17]> } else { <(131070)::logic[17]> } } } } } } } } } } } } } } } >>
+
+        /* notCDom_completeCancellation: notCDom_mainSig_T[51:50] == 0 */
+        let nc_main_51_50 = <(notCDom_mainSig_T >> <(50)::logic[114]>)::logic[2]> >>
+        let notCDom_completeCancellation = nc_main_51_50 == <(0)::logic[2]> >>
+
+        let notNaN_isInfProd = isInfA | isInfB >>
+        let notNaN_isInfOut = notNaN_isInfProd | isInfC >>
+        let notNaN_addZeros = (isZeroA | isZeroB) & isZeroC >>
+
+        let io_invalidExc = isSigNaNAny | (isInfA & isZeroB) | (isZeroA & isInfB) | (~isNaNAOrB & notNaN_isInfProd & isInfC & doSubMags) >>
+        let io_rawOut_isNaN = isNaNAOrB | isNaNC >>
+        let io_rawOut_isZero = notNaN_addZeros | (~CIsDominant & notCDom_completeCancellation) >>
+
+        let sign_inner = if CIsDominant { opSignC } else { if notCDom_completeCancellation { roundingMode_min } else { signProd ^ sigSum_T_3 [ 2 ] } } >>
+        let io_rawOut_sign = (notNaN_isInfProd & signProd) | (isInfC & opSignC) | (notNaN_addZeros & (roundingMode != <(2)::logic[3]>) & signProd & opSignC) | (notNaN_addZeros & roundingMode_min & (signProd | opSignC)) | (~notNaN_isInfOut & ~notNaN_addZeros & sign_inner) >>
+
+        /* io_rawOut_sExp [9:0]:
+           CDom: sExpSum - {9'h0, doSubMags}
+           notCDom: sExpSum - {4'h0, normDistReduced2, 1'h0} */
+        let sexp_cdom = <(sExpSum)::logic[10]> - <(<(doSubMags)::logic[10]>)::logic[10]> >>
+        let normDist_x2 = <((<(notCDom_normDistReduced2)::logic[10]>) << <(1)::logic[10]>)::logic[10]> >>
+        let sexp_ncdom = <(sExpSum)::logic[10]> - normDist_x2 >>
+        let io_rawOut_sExp = if CIsDominant { sexp_cdom } else { sexp_ncdom } >>
+
+        /* io_rawOut_sig [26:0]:
+           CDom: {CDom_mainSig_T[49:24],
+                  (|{CDom_mainSig_T[23:21],
+                      {|(CDom_absSigSum[20:17]), |(CDom_absSigSum[16:13]), |(CDom_absSigSum[12:9]),
+                        |(CDom_absSigSum[8:5]),  |(CDom_absSigSum[4:1]),  CDom_absSigSum[0]}
+                      & {CDom_reduced4SigExtra_shift[1..6]}})
+                  | (doSubMags ? mulAddResult[23:0]!=24'hFFFFFF : |(mulAddResult[24:0]))}
+           = 26 bits high + 1 sticky = 27 bits
+
+           notCDom: {notCDom_mainSig_T[51:26],
+                     |{notCDom_mainSig_T[25:23],
+                        {|{|(n[23:22]),|(n[21:20])}, |{|(n[19:18]),|(n[17:16])},
+                          |{|(n[15:14]),|(n[13:12])}, |{|(n[11:10]),|(n[9:8])},
+                          |{|(n[7:6]),|(n[5:4])},    |{|(n[3:2]),|(n[1:0])}}
+                        & {notCDom_reduced4SigExtra_shift[1..6]}}}
+           = 26 bits high + 1 sticky = 27 bits */
+
+        /* CDom sig */
+        let cdom_main_49_24 = <(CDom_mainSig_T >> <(24)::logic[81]>)::logic[26]> >>
+        let cdom_main_23_21 = <(CDom_mainSig_T >> <(21)::logic[81]>)::logic[3]> >>
+        let cdom_abs_20_17 = <(CDom_absSigSum >> <(17)::logic[50]>)::logic[4]> >>
+        let cdom_abs_16_13 = <(CDom_absSigSum >> <(13)::logic[50]>)::logic[4]> >>
+        let cdom_abs_12_9  = <(CDom_absSigSum >> <(9)::logic[50]>)::logic[4]> >>
+        let cdom_abs_8_5   = <(CDom_absSigSum >> <(5)::logic[50]>)::logic[4]> >>
+        let cdom_abs_4_1   = <(CDom_absSigSum >> <(1)::logic[50]>)::logic[4]> >>
+        let cdom_abs_0     = CDom_absSigSum [ 0 ] >>
+        let cdom_r4_1 = CDom_reduced4SigExtra_shift [ 1 ] >>
+        let cdom_r4_2 = CDom_reduced4SigExtra_shift [ 2 ] >>
+        let cdom_r4_3 = CDom_reduced4SigExtra_shift [ 3 ] >>
+        let cdom_r4_4 = CDom_reduced4SigExtra_shift [ 4 ] >>
+        let cdom_r4_5 = CDom_reduced4SigExtra_shift [ 5 ] >>
+        let cdom_r4_6 = CDom_reduced4SigExtra_shift [ 6 ] >>
+        let cdom_extra_bits = #{(cdom_abs_20_17 != <(0)::logic[4]>), (cdom_abs_16_13 != <(0)::logic[4]>), (cdom_abs_12_9 != <(0)::logic[4]>), (cdom_abs_8_5 != <(0)::logic[4]>), (cdom_abs_4_1 != <(0)::logic[4]>), cdom_abs_0} & #{cdom_r4_1, cdom_r4_2, cdom_r4_3, cdom_r4_4, cdom_r4_5, cdom_r4_6} >>
+        let cdom_or_bits = (cdom_main_23_21 != <(0)::logic[3]>) | (cdom_extra_bits != <(0)::logic[6]>) >>
+        let mar_23_0 = <(mulAddResult)::logic[24]> >>
+        let mar_24_0 = <(mulAddResult)::logic[25]> >>
+        let cdom_tail = if doSubMags { mar_23_0 != <(16777215)::logic[24]> } else { mar_24_0 != <(0)::logic[25]> } >>
+        let cdom_sticky = cdom_or_bits | cdom_tail >>
+        let cdom_sig = (<(cdom_main_49_24)::logic[27]> << <(1)::logic[27]>) | <(<(cdom_sticky)::logic[27]>)::logic[27]> >>
+
+        /* notCDom sig */
+        let nc_main_51_26 = <(notCDom_mainSig_T >> <(26)::logic[114]>)::logic[26]> >>
+        let nc_main_25_23 = <(notCDom_mainSig_T >> <(23)::logic[114]>)::logic[3]> >>
+        let nc_23_22b = <(notCDom_absSigSum >> <(22)::logic[51]>)::logic[2]> >>
+        let nc_21_20b = <(notCDom_absSigSum >> <(20)::logic[51]>)::logic[2]> >>
+        let nc_19_18b = <(notCDom_absSigSum >> <(18)::logic[51]>)::logic[2]> >>
+        let nc_17_16b = <(notCDom_absSigSum >> <(16)::logic[51]>)::logic[2]> >>
+        let nc_15_14b = <(notCDom_absSigSum >> <(14)::logic[51]>)::logic[2]> >>
+        let nc_13_12b = <(notCDom_absSigSum >> <(12)::logic[51]>)::logic[2]> >>
+        let nc_11_10b = <(notCDom_absSigSum >> <(10)::logic[51]>)::logic[2]> >>
+        let nc_9_8b  = <(notCDom_absSigSum >> <(8)::logic[51]>)::logic[2]> >>
+        let nc_7_6b  = <(notCDom_absSigSum >> <(6)::logic[51]>)::logic[2]> >>
+        let nc_5_4b  = <(notCDom_absSigSum >> <(4)::logic[51]>)::logic[2]> >>
+        let nc_3_2b  = <(notCDom_absSigSum >> <(2)::logic[51]>)::logic[2]> >>
+        let nc_1_0b  = <(notCDom_absSigSum)::logic[2]> >>
+        let nc_grp0 = (nc_23_22b != <(0)::logic[2]>) | (nc_21_20b != <(0)::logic[2]>) >>
+        let nc_grp1 = (nc_19_18b != <(0)::logic[2]>) | (nc_17_16b != <(0)::logic[2]>) >>
+        let nc_grp2 = (nc_15_14b != <(0)::logic[2]>) | (nc_13_12b != <(0)::logic[2]>) >>
+        let nc_grp3 = (nc_11_10b != <(0)::logic[2]>) | (nc_9_8b != <(0)::logic[2]>) >>
+        let nc_grp4 = (nc_7_6b != <(0)::logic[2]>) | (nc_5_4b != <(0)::logic[2]>) >>
+        let nc_grp5 = (nc_3_2b != <(0)::logic[2]>) | (nc_1_0b != <(0)::logic[2]>) >>
+        let nc_r4_1 = notCDom_reduced4SigExtra_shift [ 1 ] >>
+        let nc_r4_2 = notCDom_reduced4SigExtra_shift [ 2 ] >>
+        let nc_r4_3 = notCDom_reduced4SigExtra_shift [ 3 ] >>
+        let nc_r4_4 = notCDom_reduced4SigExtra_shift [ 4 ] >>
+        let nc_r4_5 = notCDom_reduced4SigExtra_shift [ 5 ] >>
+        let nc_r4_6 = notCDom_reduced4SigExtra_shift [ 6 ] >>
+        let nc_extra = #{nc_grp0, nc_grp1, nc_grp2, nc_grp3, nc_grp4, nc_grp5} & #{nc_r4_1, nc_r4_2, nc_r4_3, nc_r4_4, nc_r4_5, nc_r4_6} >>
+        let nc_sticky = (nc_main_25_23 != <(0)::logic[3]>) | (nc_extra != <(0)::logic[6]>) >>
+        let ncdm_sig = (<(nc_main_51_26)::logic[27]> << <(1)::logic[27]>) | <(<(nc_sticky)::logic[27]>)::logic[27]> >>
+
+        let io_rawOut_sig = if CIsDominant { cdom_sig } else { ncdm_sig } >>
+
+        send out_ep.io_invalidExc (<(io_invalidExc)::logic>) >>
+        send out_ep.io_rawOut_isNaN (<(io_rawOut_isNaN)::logic>) >>
+        send out_ep.io_rawOut_isInf (<(notNaN_isInfOut)::logic>) >>
+        send out_ep.io_rawOut_isZero (<(io_rawOut_isZero)::logic>) >>
+        send out_ep.io_rawOut_sign (<(io_rawOut_sign)::logic>) >>
+        send out_ep.io_rawOut_sExp (<(io_rawOut_sExp)::logic[10]>) >>
+        send out_ep.io_rawOut_sig (<(io_rawOut_sig)::logic[27]>) >>
+        cycle 1
+    }
+
+}

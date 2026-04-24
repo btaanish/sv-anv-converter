@@ -1,0 +1,80 @@
+/* Anvil translation of IDPool */
+
+chan IDPool_in_ch {
+    left io_free_valid : (logic@#1) @#1,
+    left io_free_bits : (logic[3]@#1) @#1,
+    left io_alloc_ready : (logic@#1) @#1
+}
+
+chan IDPool_out_ch {
+    left io_alloc_valid : (logic@#1) @#1,
+    left io_alloc_bits : (logic[3]@#1) @#1
+}
+
+proc IDPool(
+    in_ep : left IDPool_in_ch,
+    out_ep : right IDPool_out_ch
+) {
+    reg bitmap : logic[8];
+    reg select : logic[3];
+    reg valid : logic;
+    reg r_io_free_valid : logic;
+    reg r_io_free_bits : logic[3];
+    reg r_io_alloc_ready : logic;
+    reg next_bitmap : logic[8];
+    reg next_valid : logic;
+    reg next_select : logic[3];
+
+    loop {
+        let io_free_valid = recv in_ep.io_free_valid >>
+        set r_io_free_valid := <(io_free_valid)::logic>
+    }
+
+    loop {
+        let io_free_bits = recv in_ep.io_free_bits >>
+        set r_io_free_bits := <(io_free_bits)::logic[3]>
+    }
+
+    loop {
+        let io_alloc_ready = recv in_ep.io_alloc_ready >>
+        set r_io_alloc_ready := <(io_alloc_ready)::logic>
+    }
+
+    loop {
+        let taken = if *r_io_alloc_ready { <(1)::logic[8]> << <(*select)::logic[8]> } else { <(0)::logic[8]> } >>
+        let free_oh = if *r_io_free_valid { <(1)::logic[8]> << <(*r_io_free_bits)::logic[8]> } else { <(0)::logic[8]> } >>
+        let bitmap1 = (*bitmap & ~taken) | free_oh >>
+        let cnt01 = <(*bitmap [ 0 ])::logic[2]> + <(*bitmap [ 1 ])::logic[2]> >>
+        let cnt23 = <(*bitmap [ 2 ])::logic[2]> + <(*bitmap [ 3 ])::logic[2]> >>
+        let cnt45 = <(*bitmap [ 4 ])::logic[2]> + <(*bitmap [ 5 ])::logic[2]> >>
+        let cnt67 = <(*bitmap [ 6 ])::logic[2]> + <(*bitmap [ 7 ])::logic[2]> >>
+        let cnt0123 = <(cnt01)::logic[3]> + <(cnt23)::logic[3]> >>
+        let cnt4567 = <(cnt45)::logic[3]> + <(cnt67)::logic[3]> >>
+        let cnt = <(cnt0123)::logic[4]> + <(cnt4567)::logic[4]> >>
+        let bitmap_orR = *bitmap != <(0)::logic[8]> >>
+        let curr_valid = *valid >>
+        let _GEN_1 = *r_io_alloc_ready | (~curr_valid & *r_io_free_valid) >>
+        let do_update = *r_io_alloc_ready | *r_io_free_valid >>
+        let valid_next_val = (bitmap_orR & ~((cnt == <(1)::logic[4]>) & *r_io_alloc_ready)) | *r_io_free_valid >>
+        let sel_next = if bitmap1 [ 0 ] { <(0)::logic[3]> } else { if bitmap1 [ 1 ] { <(1)::logic[3]> } else { if bitmap1 [ 2 ] { <(2)::logic[3]> } else { if bitmap1 [ 3 ] { <(3)::logic[3]> } else { if bitmap1 [ 4 ] { <(4)::logic[3]> } else { if bitmap1 [ 5 ] { <(5)::logic[3]> } else { if bitmap1 [ 6 ] { <(6)::logic[3]> } else { <(7)::logic[3]> } } } } } } } >>
+        set next_bitmap := if do_update { bitmap1 } else { *bitmap } >>
+        set next_valid := if do_update { valid_next_val } else { curr_valid } >>
+        set next_select := if _GEN_1 { sel_next } else { *select } >>
+        send out_ep.io_alloc_valid (<(*valid)::logic>) >>
+        send out_ep.io_alloc_bits (<(*select)::logic[3]>) >>
+        cycle 1
+    }
+
+    loop {
+        set bitmap := *next_bitmap
+    }
+
+    loop {
+        set valid := *next_valid
+    }
+
+    loop {
+        set select := *next_select
+    }
+
+}
