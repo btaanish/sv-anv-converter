@@ -127,7 +127,7 @@ proc IBuf(
         let _GEN = <(*r_io_imem_bits_pc [ 1 ])::logic[2]> >>
         let _nIC_T_2 = (if *r_io_imem_bits_btb_taken { <(*r_io_imem_bits_btb_bridx)::logic[2]> + 2'h1 } else { 2'h2 }) - _GEN >>
         let _GEN_0 = <(*nBufValid)::logic[2]> >>
-        let _valid_T = 4'h1 << <((if)::logic[4]> *r_io_imem_valid { _nIC_T_2 } else { 2'h0 }) + _GEN_0 >>
+        let _valid_T = 4'h1 << <((if *r_io_imem_valid { _nIC_T_2 } else { 2'h0 }) + _GEN_0)::logic[4]> >>
         let _valid_T_1 = <(_valid_T)::logic[2]> - 2'h1 >>
         let _bufMask_T_1 = ( 2'h1 << <(_GEN_0)::logic[2]> ) - 2'h1 >>
         let buf_replay = <(0)::logic>  >>
@@ -136,9 +136,8 @@ proc IBuf(
         let full_insn = _exp_io_rvc | _valid_T_1 [ 1 ] | buf_replay_0 [ 0 ] >>
         let nReady = if full_insn { (if _exp_io_rvc { 2'h1 } else { 2'h2 }) } else { 2'h0 } >>
         let _nICReady_T = nReady - _GEN_0 >>
-        let _nBufValid_T = nReady >= _GEN_0 >>
         let _nBufValid_T_6 = _nIC_T_2 - _nICReady_T >>
-        let _icData_T_4 = 127'h0 << <(_GEN_0 - 2'h2 - _GEN)::logic[191]> >>
+        let _icData_T_4 = 127'h0 << <(_GEN_0 - 2'h2 - _GEN)::logic[127]> >>
         let _icMask_T_2 = 63'hFFFFFFFF << <(*nBufValid)::logic[63]> >>
         let buf_data = <(0)::logic[32]>  >>
         let inst = <(_icData_T_4)::logic[32]> & <(_icMask_T_2)::logic[32]> | buf_data & ~ ( <(_icMask_T_2)::logic[32]> ) >>
@@ -148,11 +147,10 @@ proc IBuf(
         let buf_xcpt_ae_inst = <(0)::logic>  >>
         let _io_inst_0_bits_xcpt1_T_5 = if _exp_io_rvc { 3'h0 } else { #{<(<(<(<(<(<(if _bufMask_T_1 [ 1 ] { buf_xcpt_pf_inst } else { *r_io_imem_bits_xcpt_pf_inst })::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(if _bufMask_T_1 [ 1 ] { buf_xcpt_gf_inst } else { *r_io_imem_bits_xcpt_gf_inst })::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(if _bufMask_T_1 [ 1 ] { buf_xcpt_ae_inst } else { *r_io_imem_bits_xcpt_ae_inst })::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>} } >>
         let _GEN_1 = _bufMask_T_1 [ 0 ] & _exp_io_rvc | _bufMask_T_1 [ 1 ] >>
-        let _GEN_2 = *r_io_imem_valid & _nBufValid_T & ((_nICReady_T < _nIC_T_2)) & ~ ( _nBufValid_T_6 [ 1 ] ) >>
         let buf_pc = <(0)::logic[40]>  >>
         let ibufBTBResp_bht_history = <(0)::logic[8]>  >>
         let ibufBTBResp_entry = <(0)::logic[5]>  >>
-        send out_ep.io_imem_ready (<(*r_io_inst_0_ready & _nBufValid_T & ( (_nICReady_T >= _nIC_T_2) | ~ ( _nBufValid_T_6 [ 1 ] ) ))::logic>) >>
+        send out_ep.io_imem_ready (<(*r_io_inst_0_ready & (nReady >= _GEN_0) & ( (_nICReady_T >= _nIC_T_2) | ~ ( _nBufValid_T_6 [ 1 ] ) ))::logic>) >>
         send out_ep.io_pc (<(if *nBufValid { buf_pc } else { *r_io_imem_bits_pc })::logic[40]>) >>
         send out_ep.io_btb_resp_entry (<(if _GEN_1 { ibufBTBResp_entry } else { *r_io_imem_bits_btb_entry })::logic[5]>) >>
         send out_ep.io_btb_resp_bht_history (<(if _GEN_1 { ibufBTBResp_bht_history } else { *r_io_imem_bits_btb_bht_history })::logic[8]>) >>

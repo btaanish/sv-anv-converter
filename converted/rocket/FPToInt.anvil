@@ -37,7 +37,7 @@ proc FPToInt(
     reg in_in2 : logic[65];
 
     loop {
-        let toint_ieee_unrecoded_rawIn_sExp = <(<(*in_in1)::logic[12]>)::logic[2]> >>
+        let toint_ieee_unrecoded_rawIn_sExp = <(*in_in1)::logic[13]> >>
         let _toint_ieee_unrecoded_denormFract_T_1 = 55'h0 >> 6'h1 - <(*in_in1)::logic[6]> >>
         let _toint_ieee_prevUnrecoded_unrecoded_denormFract_T_1 = 24'h0 >> 5'h1 - <(*in_in1)::logic[5]> >>
         let _toint_ieee_prevUnrecoded_prevUnrecoded_rawIn_isSpecial_T = #{<(<(<(<(<(<(*in_in1 [ 23 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(*in_in1 [ 14 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>} >>

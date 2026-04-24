@@ -131,7 +131,7 @@ proc DivSqrtRawFN_small_e8_s24(
         let rem_Z = <(0)::logic[26]>  >>
         let _trialTerm_T_3 = if *inReady & ~ *r_io_sqrtOp { <(*r_io_b_sig)::logic[2]> } else { 26'h0 } >>
         let sqrtOp_Z = <(0)::logic>  >>
-        let _cycleNum_T_15 = <(entering & ~ normalCase_S)::logic[5]> | (if entering & normalCase_S { (if *r_io_sqrtOp { 14'h0 } else { 5'h1A }) } else { 5'h0 }) | (if entering | skipCycle2 { 5'h0 } else { *cycleNum - 5'h1 }) >>
+        let _cycleNum_T_15 = <(entering & ~ normalCase_S)::logic[5]> | (if entering & normalCase_S { (if *r_io_sqrtOp { (if *r_io_a_sExp [ 0 ] { 5'hE } else { 5'hF }) } else { 5'h1A }) } else { 5'h0 }) | (if entering | skipCycle2 { 5'h0 } else { *cycleNum - 5'h1 }) >>
         let isInf_Z = <(0)::logic>  >>
         let isNaN_Z = <(0)::logic>  >>
         let isZero_Z = <(0)::logic>  >>
@@ -162,8 +162,8 @@ proc DivSqrtRawFN_small_e8_s24(
         let skipCycle2 = <(0)::logic>  >>
         if (( <(*cycleNum)::logic> ) | entering) {
             set cycleNum := <(5'h0)::logic[5]> >>
-            set inReady := <(entering & ~ normalCase_S | ~ entering & ~ skipCycle2 & *cycleNum - (1'b1) | skipCycle2)::logic> >>
-            set rawOutValid := <(entering & ~ normalCase_S | ~ entering & ~ skipCycle2 & *cycleNum - (1'b1) | skipCycle2)::logic>
+            set inReady := <(entering & ~ normalCase_S | ~ entering & ~ skipCycle2 & ( <(*cycleNum - 5'h1)::logic> ) | skipCycle2)::logic> >>
+            set rawOutValid := <(entering & ~ normalCase_S | ~ entering & ~ skipCycle2 & ( <(*cycleNum - 5'h1)::logic> ) | skipCycle2)::logic>
         } else {
             cycle 1
         } >>
