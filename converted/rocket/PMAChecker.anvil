@@ -33,7 +33,7 @@ proc PMAChecker(
         let _GEN_1 = <(*r_io_paddr)::logic[14]> ^ <(14'h2010)::logic[14]> >>
         let _GEN_2 = <(*r_io_paddr)::logic[12]> ^ <(12'h800)::logic[12]> >>
         let _GEN_3 = <(*r_io_paddr)::logic[4]> ^ <(4'h8)::logic[4]> >>
-        let legal_address = (<(*r_io_paddr)::logic[28]> == 28'h0) |(67'h0 == 28'h0)|(28'h0 == 28'h0)|(63'h0 == 24'h0)|(28'h0 == 28'h0)|(28'h0 == 28'h0)|(24'h0 == 24'h0)|(15'h0 == 28'h0)|(13'h0 == 24'h0)|(14'h0 == 14'h0)|(28'h0 == 28'h0)|(12'h0 == 12'h0)>>
+        let legal_address = (<(*r_io_paddr)::logic[28]> == 28'h0) |(28'h0 == 28'h0)|(28'h0 == 28'h0)|(24'h0 == 24'h0)|(28'h0 == 28'h0)|(28'h0 == 28'h0)|(24'h0 == 24'h0)|(28'h0 == 28'h0)|(24'h0 == 24'h0)|(14'h0 == 14'h0)|(28'h0 == 28'h0)|(12'h0 == 12'h0)>>
         let _GEN_4 = 5'h0 >>
         let _GEN_5 = 6'h0 >>
         let _GEN_6 = 7'h0 >>
@@ -48,7 +48,7 @@ proc PMAChecker(
         send out_ep.io_resp_pp (<(legal_address & ( ~ ( <(_GEN_4)::logic> ) | ~ ( <(_GEN_5)::logic> ) | ~ ( <(_GEN_6)::logic> ) | ~ ( <(_GEN_7)::logic> ) | ~ ( <(_GEN_8)::logic> ) | ~ ( <(_GEN_10)::logic> ) | ~ ( <(_GEN_11)::logic> ) ))::logic>) >>
         send out_ep.io_resp_al (<(legal_address & ( ~ ( <(_GEN_4)::logic> ) | ~ ( <(_GEN_5)::logic> ) | ~ ( <(_GEN_6)::logic> ) | ~ ( <(_GEN_7)::logic> ) | ~ ( <(_GEN_8)::logic> ) | ~ ( <(_GEN_10)::logic> ) | ~ ( <(_GEN_11)::logic> ) ))::logic>) >>
         send out_ep.io_resp_aa (<(legal_address & ( ~ ( <(_GEN_4)::logic> ) | ~ ( <(_GEN_5)::logic> ) | ~ ( <(_GEN_6)::logic> ) | ~ ( <(_GEN_7)::logic> ) | ~ ( <(_GEN_8)::logic> ) | ~ ( <(_GEN_10)::logic> ) | ~ ( <(_GEN_11)::logic> ) ))::logic>) >>
-        send out_ep.io_resp_x (<(legal_address & ((9'h0 == 9'h0)|(9'h0 == 9'h0)|(46'h0 == 7'h0)|(7'h0 == 7'h0)| ~ ( <(_GEN_11)::logic> ) ))::logic>) >>
+        send out_ep.io_resp_x (<(legal_address & ((9'h0 == 9'h0)|(9'h0 == 9'h0)|(7'h0 == 7'h0)|(7'h0 == 7'h0)| ~ ( <(_GEN_11)::logic> ) ))::logic>) >>
         send out_ep.io_resp_eff (<(legal_address & ((8'h0 == 8'h0)|(8'h0 == 8'h0)|(7'h0 == 7'h0)|(9'h0 == 9'h0)|(4'h0 == 4'h0)|(9'h0 == 9'h0)))::logic>) >>
         cycle 1
     }

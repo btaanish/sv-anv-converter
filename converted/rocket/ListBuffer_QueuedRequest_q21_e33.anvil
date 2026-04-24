@@ -67,7 +67,7 @@ proc ListBuffer_QueuedRequest_q21_e33(
 
     loop {
         let _freeOH_T_22 = ~ *used >>
-        let _GEN = 18'h0  & _freeOH_T_22 >>
+        let _GEN = 33'h0  & _freeOH_T_22 >>
         let io_push_ready_0 = *used != <(33'h1FFFFFFFF)::logic[33]> >>
         let data_MPORT_en = io_push_ready_0 & *r_io_push_valid >>
         let _valid_clr_T = 32'h1 << <(*r_io_pop_bits)::logic[32]> >>

@@ -39,7 +39,7 @@ proc RecFNToIN_e11_s53_i64(
         let rawIn_isNaN = ( <(<(*r_io_in)::logic[2]>)::logic> ) & *r_io_in [ 61 ] >>
         let magJustBelowOne = ~ ( *r_io_in [ 63 ] ) & ( <(<(*r_io_in)::logic[11]>)::logic> ) >>
         let roundingMode_odd = *r_io_roundingMode == <(3'h6)::logic[3]> >>
-        let shiftedSig = 116'h0 << (if *r_io_in [ 63 ] { <(*r_io_in)::logic[6]> } else { 6'h0 }) >>
+        let shiftedSig = 116'h0 << <((if *r_io_in [ 63 ] { <(*r_io_in)::logic[6]> } else { 6'h0 }))::logic[116]> >>
         let _roundIncr_near_even_T_6 = 52'h0 >>
         let common_inexact = if *r_io_in [ 63 ] { ( <(_roundIncr_near_even_T_6)::logic> ) } else { ( <(<(*r_io_in)::logic[3]>)::logic> ) } >>
         let roundIncr = (*r_io_roundingMode == <(3'h0)::logic[3]>) & ( *r_io_in [ 63 ] & ( ( <(<(shiftedSig)::logic[2]>)::logic> ) | ( <(_roundIncr_near_even_T_6)::logic> ) ) | magJustBelowOne & ( <(_roundIncr_near_even_T_6)::logic> ) ) | (*r_io_roundingMode == <(3'h4)::logic[3]>) & ( *r_io_in [ 63 ] & shiftedSig [ 51 ] | magJustBelowOne ) | ( (*r_io_roundingMode == <(3'h2)::logic[3]>) | roundingMode_odd ) & *r_io_in [ 64 ] & common_inexact | (*r_io_roundingMode == <(3'h3)::logic[3]>) & ~ ( *r_io_in [ 64 ] ) & common_inexact >>

@@ -50,7 +50,7 @@ proc ListBuffer_PutBufferCEntry_q2_e16(
 
     loop {
         let _freeOH_T_16 = ~ *used >>
-        let freeIdx_lo = 10'h0  & _freeOH_T_16 >>
+        let freeIdx_lo = 16'h0  & _freeOH_T_16 >>
         let _GEN = <(*r_io_push_bits_index)::logic[2]> >>
         let io_push_ready_0 = *used != <(16'hFFFF)::logic[16]> >>
         let data_MPORT_en = io_push_ready_0 & *r_io_push_valid >>

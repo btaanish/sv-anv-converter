@@ -75,15 +75,15 @@ proc RoundAnyRawFNToRecFN_ie11_is53_oe5_os11(
         let roundingMode_odd = *r_io_roundingMode == <(3'h6)::logic[3]> >>
         let roundMagUp = (*r_io_roundingMode == <(3'h2)::logic[3]>) & *r_io_in_sign | (*r_io_roundingMode == <(3'h3)::logic[3]>) & ~ *r_io_in_sign >>
         let sAdjustedExp = 14'h0 - 14'h7E0 >>
-        let roundMask_shift = 65'h10000000000000000 >> <(~)::logic[65]> ( <(sAdjustedExp)::logic[6]> )  >>
-        let _GEN = 13'h0 >>
-        let _GEN_0 = #{<(<(<(<(<(<(roundMask_shift [ 7 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 8 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 9 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 10 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 11 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 12 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 13 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 14 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 15 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 16 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 17 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 18 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(1'h1)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>} >>
+        let roundMask_shift = 65'h10000000000000000 >> <(~ <(sAdjustedExp)::logic[65]>)::logic[65]> >>
+        let _GEN = <(#{1'h1, ~ roundMask_shift [ 7 ], ~ roundMask_shift [ 8 ], ~ roundMask_shift [ 9 ], ~ roundMask_shift [ 10 ], ~ roundMask_shift [ 11 ], ~ roundMask_shift [ 12 ], ~ roundMask_shift [ 13 ], ~ roundMask_shift [ 14 ], ~ roundMask_shift [ 15 ], ~ roundMask_shift [ 16 ], ~ roundMask_shift [ 17 ], ~ roundMask_shift [ 18 ]})::logic[13]> >>
+        let _GEN_0 = <(#{roundMask_shift [ 7 ], roundMask_shift [ 8 ], roundMask_shift [ 9 ], roundMask_shift [ 10 ], roundMask_shift [ 11 ], roundMask_shift [ 12 ], roundMask_shift [ 13 ], roundMask_shift [ 14 ], roundMask_shift [ 15 ], roundMask_shift [ 16 ], roundMask_shift [ 17 ], roundMask_shift [ 18 ], 1'h1})::logic[13]> >>
         let _roundPosBit_T = <(*r_io_in_sig)::logic[13]> & _GEN & _GEN_0 >>
-        let _anyRoundExtra_T = 53'h0 & _GEN_0 >>
-        let _GEN_1 = 18'h0 >>
+        let _anyRoundExtra_T = 13'h0 & _GEN_0 >>
+        let _GEN_1 = <(#{_roundPosBit_T, _anyRoundExtra_T})::logic[26]> >>
         let _overflow_roundMagUp_T = roundingMode_near_even | (*r_io_roundingMode == <(3'h4)::logic[3]>) >>
-        let roundedSig = if _overflow_roundMagUp_T & ( <(_roundPosBit_T)::logic> ) | roundMagUp & ( <(_GEN_1)::logic> ) { 649'h0 + 13'h1 & ~ (if roundingMode_near_even & ( <(_roundPosBit_T)::logic> ) & (_anyRoundExtra_T == 13'h0) { #{<(<(<(<(<(<(roundMask_shift [ 7 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 8 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 9 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 10 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 11 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 12 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 13 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 14 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 15 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 16 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 17 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(roundMask_shift [ 18 ])::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>, <(<(<(<(<(<(1'h1)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>)::logic[1]>} } else { 13'h0 }) } else { <(<(*r_io_in_sig)::logic[12]> & #{~ ( roundMask_shift [ 7 ] ) , ~ ( roundMask_shift [ 8 ] ) , ~ ( roundMask_shift [ 9 ] ) , ~ ( roundMask_shift [ 10 ] ) , ~ ( roundMask_shift [ 11 ] ) , ~ ( roundMask_shift [ 12 ] ) , ~ ( roundMask_shift [ 13 ] ) , ~ ( roundMask_shift [ 14 ] ) , ~ ( roundMask_shift [ 15 ] ) , ~ ( roundMask_shift [ 16 ] ) , ~ ( roundMask_shift [ 17 ] ) , ~ ( roundMask_shift [ 18 ] )})::logic[2]> | (if roundingMode_odd & ( <(_GEN_1)::logic> ) { _GEN & _GEN_0 } else { 13'h0 }) } >>
-        let sRoundedExp = 6'h0 + <(<(roundedSig)::logic[2]>)::logic[14]> >>
+        let roundedSig = if _overflow_roundMagUp_T & ( <(_roundPosBit_T)::logic> ) | roundMagUp & ( <(_GEN_1)::logic> ) { 13'h0 + 13'h1 & ~ (if roundingMode_near_even & ( <(_roundPosBit_T)::logic> ) & (_anyRoundExtra_T == 13'h0) { _GEN_0 } else { 13'h0 }) } else { <(*r_io_in_sig)::logic[13]> & _GEN | (if roundingMode_odd & ( <(_GEN_1)::logic> ) { _GEN & _GEN_0 } else { 13'h0 }) } >>
+        let sRoundedExp = 15'h0 + <(<(roundedSig)::logic[2]>)::logic[15]> >>
         let common_totalUnderflow = ((sRoundedExp < 15'h8)) >>
         let isNaNOut = *r_io_invalidExc | *r_io_in_isNaN >>
         let commonCase = ~ isNaNOut & ~ *r_io_in_isInf & ~ *r_io_in_isZero >>
@@ -93,7 +93,7 @@ proc RoundAnyRawFNToRecFN_ie11_is53_oe5_os11(
         let pegMaxFiniteMagOut = overflow & ~ overflow_roundMagUp >>
         let notNaN_isInfOut = *r_io_in_isInf | overflow & overflow_roundMagUp >>
         send out_ep.io_out (<(17'h0)::logic[17]>) >>
-        send out_ep.io_exceptionFlags (<(12'h0)::logic[5]>) >>
+        send out_ep.io_exceptionFlags (<(5'h0)::logic[5]>) >>
         cycle 1
     }
 
